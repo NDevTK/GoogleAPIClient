@@ -164,4 +164,65 @@
       origin: location.origin,
     });
   }
+
+  // ─── Mutation Observer (Dynamic Loading) ───────────────────────────────────
+
+  let debounceTimer = null;
+  const pendingKeys = new Set();
+  const pendingEndpoints = new Set();
+
+  const observer = new MutationObserver((mutations) => {
+    let changed = false;
+
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          // Check script tags
+          if (node.tagName === "SCRIPT") {
+            const res = scanText(node.textContent);
+            if (res.keys.length || res.endpoints.length) {
+              res.keys.forEach((k) => pendingKeys.add(k));
+              res.endpoints.forEach((e) => pendingEndpoints.add(e));
+              changed = true;
+            }
+          }
+          // Check other elements for text content (naive scan of innerHTML is too expensive)
+          // tailored to common config patterns (e.g. JSON blobs in other tags)
+          if (node.tagName === "DIV" || node.tagName === "SPAN") {
+            // Optional: deep scan if needed, or specific attributes
+          }
+        }
+      }
+    }
+
+    if (changed) {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(flushPending, 1000);
+    }
+  });
+
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+  });
+
+  function flushPending() {
+    debounceTimer = null;
+    if (pendingKeys.size > 0) {
+      chrome.runtime.sendMessage({
+        type: "CONTENT_KEYS",
+        keys: [...pendingKeys],
+        origin: location.origin,
+      });
+      pendingKeys.clear();
+    }
+    if (pendingEndpoints.size > 0) {
+      chrome.runtime.sendMessage({
+        type: "CONTENT_ENDPOINTS",
+        endpoints: [...pendingEndpoints],
+        origin: location.origin,
+      });
+      pendingEndpoints.clear();
+    }
+  }
 })();
