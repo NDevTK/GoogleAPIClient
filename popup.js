@@ -37,6 +37,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     .getElementById("btn-add-header")
     .addEventListener("click", addHeaderRow);
 
+  // Fuzz panel
+  document.getElementById("btn-start-fuzz").addEventListener("click", startFuzzing);
+  document.getElementById("fuzz-ep-select").addEventListener("change", (e) => {
+    // Optional: show schema preview for fuzzing
+  });
+
   // Click delegation for discovery methods
   document.getElementById("data-services").addEventListener("click", (e) => {
     const methodRow = e.target.closest(".clickable-method");
@@ -64,11 +70,60 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
+  async function startFuzzing() {
+    const select = document.getElementById("fuzz-ep-select");
+    const epKey = select.value;
+    if (!epKey) return;
+  
+    const opt = select.options[select.selectedIndex];
+    const config = {
+      strings: document.getElementById("fuzz-strings").checked,
+      numbers: document.getElementById("fuzz-numbers").checked,
+      objects: document.getElementById("fuzz-objects").checked,
+    };
+  
+    const btn = document.getElementById("btn-start-fuzz");
+    btn.disabled = true;
+    btn.textContent = "Fuzzing...";
+    document.getElementById("fuzz-log").innerHTML = "";
+  
+    try {
+      await chrome.runtime.sendMessage({
+        type: "EXECUTE_FUZZ",
+        tabId: currentTabId,
+        service: opt.dataset.svc,
+        methodId: opt.dataset.discoveryId,
+        config
+      });
+    } catch (err) {
+      console.error("Fuzzing failed:", err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Start Fuzzing";
+    }
+  }
+  
+  function renderFuzzUpdate(update) {
+    const log = document.getElementById("fuzz-log");
+    const card = el("div", "card fuzz-card");
+    const statusClass = update.status >= 200 && update.status < 300 ? "badge-found" : "badge-error";
+    
+    card.innerHTML = `
+      <div class="card-label">
+        Field: <strong>${esc(update.field)}</strong> &middot; 
+        <span class="badge ${statusClass}">${update.status}</span>
+      </div>
+      <div class="card-meta">Payload: <code>${esc(JSON.stringify(update.payload))}</code></div>
+      ${update.error ? `<div class="card-meta error">${esc(update.error)}</div>` : ""}
+    `;
+    log.prepend(card);
+  }
+  
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "STATE_UPDATED" && msg.tabId === currentTabId) loadState();
+    if (msg.type === "FUZZ_UPDATE" && msg.tabId === currentTabId) renderFuzzUpdate(msg.update);
   });
-
-  loadState();
+    loadState();
 });
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -106,50 +161,75 @@ function renderDataPanel() {
   servicesContainer.innerHTML = "";
 
   const keys = tabData?.apiKeys ? Object.entries(tabData.apiKeys) : [];
-  const hasData = keys.length > 0;
+  const services = tabData?.discoveryDocs ? Object.entries(tabData.discoveryDocs) : [];
+  const hasData = keys.length > 0 || services.length > 0;
   empty.style.display = hasData ? "none" : "block";
 
   // Keys section
   if (keys.length) {
-    let html = '<div class="section-header">API Keys</div>';
+    let html = '<div class="section-header">Discovered API Keys</div>';
     for (const [key, info] of keys) {
       const services = info.services || [];
       const eps = info.endpoints || [];
       const reqCount = info.requestCount || eps.length || 0;
 
-      const discoveryHits = [];
-      if (tabData?.discoveryDocs) {
-        for (const [svc, doc] of Object.entries(tabData.discoveryDocs)) {
-          if (doc.apiKey === key) discoveryHits.push(svc);
-        }
-      }
-
       html += `<div class="card">
-        <div class="card-label">API Key ${info.source === "page_source" ? '<span class="badge badge-source">page source</span>' : '<span class="badge badge-source">network</span>'}
+        <div class="card-label">${esc(info.name || "API Key")} ${info.source === "page_source" ? '<span class="badge badge-source">page source</span>' : '<span class="badge badge-source">network</span>'}
           ${reqCount > 0 ? `<span class="badge badge-status">${reqCount} req</span>` : ""}
         </div>
         <div class="card-value">${esc(key)}</div>
         <div class="card-meta">
           ${info.origin ? `Origin: <strong>${esc(info.origin)}</strong>` : ""}
-          ${info.referer && info.referer !== info.origin ? ` &middot; Referer: ${esc(info.referer)}` : ""}
         </div>`;
 
       if (services.length) {
-        html += `<div class="card-meta">Services: ${services.map((s) => `<code>${esc(s)}</code>`).join(" ")}</div>`;
+        html += `<div class="card-meta">Interfaces: ${[...services].map((s) => `<code>${esc(s)}</code>`).join(" ")}</div>`;
       }
-      if (discoveryHits.length) {
-        html += `<div class="card-meta" style="color:#3fb950">Unlocked discovery: ${discoveryHits.map((s) => `<strong>${esc(s)}</strong>`).join(", ")}</div>`;
+      html += `</div>`;
+    }
+    keysContainer.innerHTML = html;
+  }
+
+  // Interfaces section
+  if (services.length) {
+    let html = '<div class="section-header">Discovered Interfaces</div>';
+    for (const [svcName, svcData] of services) {
+      const summary = svcData.summary || svcData.doc;
+      const methods = [];
+      if (summary?.resources) {
+        for (const [rName, rMethods] of Object.entries(summary.resources)) {
+          if (Array.isArray(rMethods)) {
+            methods.push(...rMethods);
+          } else if (rMethods.methods) {
+            methods.push(...Object.values(rMethods.methods));
+          }
+        }
       }
-      if (eps.length) {
-        html += `<details style="margin-top:4px"><summary style="font-size:10px;color:#484f58">${eps.length} endpoint(s)</summary>`;
-        for (const ep of eps) {
-          html += `<div class="card-meta" style="font-family:monospace;font-size:10px">${esc(ep)}</div>`;
+
+      html += `<div class="card">
+        <div class="card-label">${esc(svcName)} 
+          <span class="badge badge-status">${svcData.method || "LEARNED"}</span>
+          ${svcData.isVirtual ? '<span class="badge badge-source">virtual</span>' : ""}
+        </div>
+        <div class="card-meta">Methods found: <strong>${methods.length}</strong></div>`;
+      
+      if (methods.length > 0) {
+        html += `<details style="margin-top:4px"><summary style="font-size:10px;color:#484f58">Show Methods</summary>`;
+        for (const m of methods) {
+          html += `<div class="clickable-method" 
+                      data-svc="${esc(svcName)}" 
+                      data-id="${esc(m.id)}" 
+                      data-path="${esc(m.path)}" 
+                      data-method="${esc(m.httpMethod)}"
+                      style="font-family:monospace;font-size:10px;padding:2px 4px;cursor:pointer;border-bottom:1px solid #f0f0f0">
+                    <span class="badge ${m.httpMethod}">${m.httpMethod}</span> ${esc(m.id || m.path)}
+                  </div>`;
         }
         html += `</details>`;
       }
       html += `</div>`;
     }
-    keysContainer.innerHTML = html;
+    servicesContainer.innerHTML = html;
   }
 }
 
@@ -157,8 +237,12 @@ function renderDataPanel() {
 
 function renderSendPanel() {
   const select = document.getElementById("send-ep-select");
+  const fuzzSelect = document.getElementById("fuzz-ep-select");
   const prev = select.value;
+  const fuzzPrev = fuzzSelect.value;
+  
   select.innerHTML = '<option value="">-- select method --</option>';
+  fuzzSelect.innerHTML = '<option value="">-- select method --</option>';
 
   // Populate from Discovery Docs
   if (tabData?.discoveryDocs) {
@@ -181,6 +265,7 @@ function renderSendPanel() {
         if (methods.length > 0) {
           const group = document.createElement("optgroup");
           group.label = svcData.summary.title || svcName;
+          const fuzzGroup = group.cloneNode(true);
 
           for (const m of methods) {
             const opt = document.createElement("option");
@@ -193,14 +278,17 @@ function renderSendPanel() {
             opt.dataset.path = m.path;
             opt.dataset.discoveryId = m.id;
             group.appendChild(opt);
+            fuzzGroup.appendChild(opt.cloneNode(true));
           }
           select.appendChild(group);
+          fuzzSelect.appendChild(fuzzGroup);
         }
       }
     }
   }
 
   if (prev) select.value = prev;
+  if (fuzzPrev) fuzzSelect.value = fuzzPrev;
 }
 
 function selectDiscoveryMethod(svc, id, path, method) {
@@ -1215,6 +1303,14 @@ function renderResponsePanel() {
         `
             : ""
         }
+        ${
+          req.responseBody
+            ? `
+          <div class="card-meta" style="margin-top:8px">Decoded Response Body:</div>
+          <div class="pb-container">${renderResponseBody(req)}</div>
+        `
+            : ""
+        }
         <div class="card-meta" style="margin-top:8px">Request Headers:</div>
         <pre class="headers-pre">${esc(JSON.stringify(req.requestHeaders, null, 2))}</pre>
       </div>
@@ -1238,6 +1334,51 @@ function renderResponsePanel() {
     b.onclick = () =>
       toggleRequestDetails(parseInt(b.closest(".request-card").dataset.id));
   });
+}
+
+function renderResponseBody(req) {
+  const mimeType = req.mimeType || "";
+  if (mimeType.includes("json")) {
+    try {
+      const parsed = JSON.parse(req.responseBody);
+      return `<pre class="resp-body">${esc(JSON.stringify(parsed, null, 2))}</pre>`;
+    } catch (e) {
+      return `<pre class="resp-body">${esc(req.responseBody)}</pre>`;
+    }
+  }
+
+  const isProtobuf =
+    mimeType.includes("protobuf") ||
+    (req.requestHeaders &&
+      Object.entries(req.requestHeaders).some(
+        ([k, v]) =>
+          k.toLowerCase() === "content-type" && v.toLowerCase().includes("protobuf"),
+      ));
+
+  if (isProtobuf) {
+    try {
+      const bytes = req.responseBase64
+        ? base64ToUint8(req.responseBody)
+        : new TextEncoder().encode(req.responseBody);
+      const tree = pbDecodeTree(bytes);
+      // Try to find a response schema
+      let schema = null;
+      const svc = req.service;
+      const doc = tabData?.discoveryDocs?.[svc]?.doc;
+      if (doc) {
+        const url = new URL(req.url);
+        const match = findDiscoveryMethod(doc, url.pathname, req.method);
+        if (match?.method?.response?.$ref) {
+          schema = resolveDiscoverySchema(doc, match.method.response.$ref);
+        }
+      }
+      return renderPbTree(tree, schema);
+    } catch (e) {
+      return `<pre class="resp-body">Protobuf decoding failed: ${esc(e.message)}</pre>`;
+    }
+  }
+
+  return `<pre class="resp-body">${esc(req.responseBody.substring(0, 2000))}${req.responseBody.length > 2000 ? "..." : ""}</pre>`;
 }
 
 function getStatusBadge(status) {

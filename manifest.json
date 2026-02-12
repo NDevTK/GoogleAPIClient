@@ -1,21 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "Google API Security Research",
-  "version": "1.2.0",
-  "description": "Extract APIs, discover schemas, and replay requests. Specialized in Google Protobuf and JSPB decoding.",
+  "name": "Universal API Security Researcher",
+  "version": "2.0.0",
+  "description": "Universal API discovery, passive response capture, smart schema learning, and automated fuzzing.",
   "permissions": [
     "webRequest",
-    "cookies",
     "storage",
     "activeTab",
-    "scripting"
+    "scripting",
+    "debugger"
   ],
   "host_permissions": [
-    "*://*.googleapis.com/*",
-    "*://*.clients6.google.com/*",
-    "*://*.google.com/*",
-    "*://*.youtube.com/*",
-    "*://*.sandbox.googleapis.com/*"
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"
@@ -23,9 +19,7 @@
   "content_scripts": [
     {
       "matches": [
-        "*://*.google.com/*",
-        "*://*.youtube.com/*",
-        "*://*.googleapis.com/*"
+        "<all_urls>"
       ],
       "js": ["content.js"],
       "run_at": "document_idle",

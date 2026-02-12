@@ -9,7 +9,91 @@ importScripts("lib/protobuf.js", "lib/discovery.js", "lib/req2proto.js");
 const state = {
   // Map<tabId, TabData>
   tabs: new Map(),
+  // Map<tabId, boolean>
+  attachedTabs: new Map(),
 };
+
+// ─── Debugger Management ─────────────────────────────────────────────────────
+
+const DebuggerManager = {
+  async attach(tabId) {
+    if (state.attachedTabs.get(tabId)) return;
+    try {
+      await chrome.debugger.attach({ tabId }, "1.3");
+      state.attachedTabs.set(tabId, true);
+      await chrome.debugger.sendCommand({ tabId }, "Network.enable");
+      console.log(`[Debugger] Attached to tab ${tabId}`);
+    } catch (err) {
+      console.error(`[Debugger] Attach failed for ${tabId}:`, err);
+    }
+  },
+
+  async detach(tabId) {
+    if (!state.attachedTabs.get(tabId)) return;
+    try {
+      await chrome.debugger.detach({ tabId });
+      state.attachedTabs.delete(tabId);
+    } catch (_) {}
+  },
+
+  async getResponseBody(tabId, requestId) {
+    try {
+      const result = await chrome.debugger.sendCommand(
+        { tabId },
+        "Network.getResponseBody",
+        { requestId }
+      );
+      return result; // { body, base64Encoded }
+    } catch (err) {
+      return null;
+    }
+  }
+};
+
+chrome.debugger.onEvent.addListener(async (source, method, params) => {
+  const tabId = source.tabId;
+  if (method === "Network.responseReceived") {
+    const { requestId, response } = params;
+    const url = new URL(response.url);
+    if (!isApiRequest(url, { method: response.method })) return;
+
+    // Store response metadata
+    const tab = getTab(tabId);
+    const entry = tab.requestLog.find(r => r.id === requestId);
+    if (entry) {
+      entry.responseHeaders = response.headers;
+      entry.status = response.status;
+      entry.mimeType = response.mimeType;
+    }
+  }
+
+  if (method === "Network.loadingFinished") {
+    const { requestId } = params;
+    const tab = getTab(tabId);
+    const entry = tab.requestLog.find(r => r.id === requestId);
+    if (!entry) return;
+
+    const bodyData = await DebuggerManager.getResponseBody(tabId, requestId);
+    if (bodyData) {
+      entry.responseBody = bodyData.body;
+      entry.responseBase64 = bodyData.base64Encoded;
+      
+      // 1. Learn keys from the response body!
+      if (!bodyData.base64Encoded) {
+        extractKeysFromText(tabId, bodyData.body, entry.url, "response_body");
+      }
+
+      // 2. Learn schema from the response!
+      const service = entry.service || extractInterfaceName(new URL(entry.url));
+      learnFromResponse(tabId, service, entry);
+      notifyPopup(tabId);
+    }
+  }
+});
+
+chrome.debugger.onDetach.addListener((source) => {
+  state.attachedTabs.delete(source.tabId);
+});
 
 // Global persistent store — survives tab closes and SW restarts
 const globalStore = {
@@ -19,6 +103,58 @@ const globalStore = {
   probeResults: new Map(), // endpointKey → probe result
   scopes: new Map(), // service → string[]
 };
+
+// ─── Key Extraction ──────────────────────────────────────────────────────────
+
+const KEY_PATTERNS = [
+  { name: "Google API Key", re: /AIzaSy[\w-]{33}/g },
+  { name: "Firebase Key", re: /AIza[0-9A-Za-z-_]{35}/g },
+  { name: "Bearer Token", re: /bearer\s+([a-zA-Z0-9-._~+/]+=*)/gi },
+  { name: "Generic API Key", re: /(?:api[-_]?key|access[-_]?token|auth[-_]?token)['"]?\s*[:=]\s*['"]?([a-zA-Z0-9\-_]{16,})['"]?/gi },
+  { name: "JWT", re: /ey[a-zA-Z0-9-_]+\.ey[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+/g },
+  { name: "Mapbox Token", re: /pk\.[a-zA-Z0-9.]+/g },
+  { name: "GitHub Token", re: /ghp_[a-zA-Z0-9]{36}/g },
+  { name: "Stripe Key", re: /[sk|pk]_(?:test|live)_[0-9a-zA-Z]{24}/g }
+];
+
+function extractKeysFromText(tabId, text, sourceUrl, sourceContext) {
+  if (!text) return;
+  const tab = getTab(tabId);
+  const url = sourceUrl ? new URL(sourceUrl) : null;
+  const service = url ? extractInterfaceName(url) : "unknown";
+
+  for (const pattern of KEY_PATTERNS) {
+    pattern.re.lastIndex = 0;
+    let m;
+    while ((m = pattern.re.exec(text)) !== null) {
+      const key = m[1] || m[0];
+      if (key.length < 10) continue;
+
+      if (!tab.apiKeys.has(key)) {
+        tab.apiKeys.set(key, {
+          name: pattern.name,
+          origin: url ? url.origin : null,
+          referer: url ? url.href : null,
+          source: sourceContext || "network",
+          firstSeen: Date.now(),
+          lastSeen: Date.now(),
+          services: new Set(),
+          hosts: new Set(),
+          endpoints: new Set(),
+          requestCount: 0,
+        });
+      }
+      
+      const keyData = tab.apiKeys.get(key);
+      keyData.lastSeen = Date.now();
+      if (url) {
+        keyData.services.add(service);
+        keyData.hosts.add(url.hostname);
+        keyData.endpoints.add(`${url.hostname}${url.pathname}`);
+      }
+    }
+  }
+}
 
 function getTab(tabId) {
   if (!state.tabs.has(tabId)) {
@@ -209,23 +345,72 @@ loadGlobalStore();
 
 const API_KEY_RE = /AIzaSy[\w-]{33}/g;
 
-const GOOGLE_API_HOSTS = [
-  /\.googleapis\.com$/,
-  /\.clients6\.google\.com$/,
-  /\.sandbox\.googleapis\.com$/,
-];
+function isApiRequest(url, details) {
+  // Ignore common non-API static assets
+  const ext = url.pathname.split('.').pop().toLowerCase();
+  const staticExts = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'css', 'js', 'woff', 'woff2', 'ttf', 'otf', 'ico', 'map'];
+  if (staticExts.includes(ext)) return false;
 
-function isGoogleApiHost(hostname) {
-  return GOOGLE_API_HOSTS.some((re) => re.test(hostname));
+  // Ignore specific tracking/asset paths that aren't useful APIs
+  const noisePaths = [
+    '/gen_204', '/_/js/', '/_/ss/', '/xjs/', '/client_204', '/vt/', '/jserror',
+    '/ulog', '/log', '/error', '/collect'
+  ];
+  if (noisePaths.some(p => url.pathname.includes(p))) return false;
+
+  // Look for API indicators
+  if (url.hostname.includes('api')) return true;
+  if (/\bv\d+\b/.test(url.pathname)) return true; // versioning like /v1/
+  if (url.pathname.includes('graphql')) return true;
+  if (url.pathname.includes('$rpc')) return true;
+  if (url.searchParams.has('alt') && url.searchParams.get('alt') === 'json') return true;
+  
+  if (details.method !== 'GET') return true; // Most POST/PUT/DELETE are APIs
+  if (details.type === 'xmlhttprequest' || details.type === 'fetch') {
+    // If it's XHR/Fetch but not a GET, it's definitely an API.
+    // If it IS a GET, check if it's likely returning JSON/Data
+    const isDataPath = /json|data|query|search|async|rpc/.test(url.pathname);
+    if (isDataPath) return true;
+  }
+
+  return false;
 }
 
-// Extract service name: "people-pa.googleapis.com" → "people-pa"
-function extractServiceName(hostname) {
-  // Handle staging prefix
-  const m = hostname.match(
-    /^(?:staging-)?([^.]+)\.(googleapis\.com|clients6\.google\.com|sandbox\.googleapis\.com)/,
-  );
-  return m ? m[1] : hostname;
+// Extract interface name from URL with better granularity
+function extractInterfaceName(urlObj) {
+  const hostname = urlObj.hostname;
+  const segments = urlObj.pathname.split('/').filter(Boolean);
+
+  // Special handling for Google (keep legacy support)
+  if (hostname.endsWith('.googleapis.com') || hostname.endsWith('.clients6.google.com')) {
+    const m = hostname.match(/^(?:staging-)?([^.]+)\./);
+    return m ? m[1] : hostname;
+  }
+
+  // Common API root patterns
+  const apiRoots = ['api', 'v1', 'v2', 'v3', 'rest', 'graphql', 'grpc', 'async'];
+  
+  // Find where the API "root" starts
+  let rootIdx = -1;
+  for (let i = 0; i < segments.length; i++) {
+    if (apiRoots.includes(segments[i].toLowerCase())) {
+      rootIdx = i;
+      break;
+    }
+  }
+
+  if (rootIdx !== -1) {
+    // Interface is hostname + path up to the root (e.g. example.com/api/v1)
+    return hostname + '/' + segments.slice(0, rootIdx + 1).join('/');
+  }
+
+  // Fallback: If it's a known non-API hostname but we're here, 
+  // it might be an internal app endpoint. Use 1 segment of path.
+  if (segments.length > 0) {
+    return hostname + '/' + segments[0];
+  }
+
+  return hostname;
 }
 
 // Parse $rpc/ paths: "/$rpc/google.internal.people.v2.InternalPeopleService/GetPeople"
@@ -253,12 +438,15 @@ chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
     const url = new URL(details.url);
-    if (!isGoogleApiHost(url.hostname)) return;
+    if (!isApiRequest(url, details)) return;
 
     // Skip internal probe requests (req2proto) to avoid interception loops
     if (url.searchParams.has("_probe")) return;
 
     const tab = getTab(details.tabId);
+    
+    // Auto-attach debugger for response capture
+    DebuggerManager.attach(details.tabId);
 
     // Capture initiator as distinct from Origin header (more reliable for context)
     if (details.initiator) {
@@ -269,11 +457,6 @@ chrome.webRequest.onBeforeRequest.addListener(
         scheduleSave();
       }
     }
-
-    // Create/Info log entry
-    // We use a map or just search by ID? ID is unique per request.
-    // If onBeforeSendHeaders comes later, we want to update this.
-    // Since we store in an array (log), we can unshift it here.
 
     // We store raw request bytes if present (for Protobuf decoding)
     let rawBodyB64 = null;
@@ -287,7 +470,7 @@ chrome.webRequest.onBeforeRequest.addListener(
       id: details.requestId,
       url: details.url,
       method: details.method,
-      service: extractServiceName(url.hostname),
+      service: extractInterfaceName(url),
       timestamp: Date.now(),
       status: "pending",
       requestBody: details.requestBody,
@@ -299,11 +482,7 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (tab.requestLog.length > 50) tab.requestLog.pop();
   },
   {
-    urls: [
-      "*://*.googleapis.com/*",
-      "*://*.clients6.google.com/*",
-      "*://*.sandbox.googleapis.com/*",
-    ],
+    urls: ["<all_urls>"],
   },
   ["requestBody"],
 );
@@ -312,7 +491,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     if (details.tabId < 0) return;
     const url = new URL(details.url);
-    if (!isGoogleApiHost(url.hostname)) return;
+    if (!isApiRequest(url, details)) return;
 
     // Skip internal probe requests
     if (url.searchParams.has("_probe")) return;
@@ -329,130 +508,61 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     }
 
     const headerMap = {};
-    let apiKey = null;
-    let origin = null;
-    let referer = null;
     let authorization = null;
     let cookie = null;
-    let spatula = null;
     let contentType = null;
-
-    let apiKeySource = null; // "header" or "url"
+    let origin = null;
+    let referer = null;
+    let apiKey = null;
 
     for (const h of details.requestHeaders || []) {
       const name = h.name.toLowerCase();
-      // Store headers with lowercase keys for consistent access
       headerMap[name] = h.value;
-      // Also keep original case for display if needed?
-      // But standard practice is lowercase keys for map lookup.
-      // If we need original case later, we can store separately,
-      // but for logContentType we need lowercase key access.
 
-      if (name === "x-goog-api-key") {
-        apiKey = h.value;
-        apiKeySource = "header";
-      }
+      if (name === "authorization") authorization = h.value;
       if (name === "origin") origin = h.value;
       if (name === "referer") referer = h.value;
-      if (name === "authorization") authorization = h.value;
-      if (name === "cookie") cookie = h.value;
-      if (name === "x-goog-spatula") spatula = h.value;
       if (name === "content-type") contentType = h.value;
+      if (name === "cookie") cookie = h.value;
+      if (name === "x-goog-api-key" || name === "x-api-key" || name === "apikey") apiKey = h.value;
+
+      // Extract keys from headers (X-API-Key, Authorization, etc)
+      extractKeysFromText(details.tabId, `${h.name}: ${h.value}`, details.url, "header");
     }
 
-    // Check URL params for key
-    const urlKey = url.searchParams.get("key");
-    if (urlKey) {
-      API_KEY_RE.lastIndex = 0;
-      if (API_KEY_RE.test(urlKey)) {
-        apiKey = urlKey;
-        apiKeySource = apiKeySource || "url";
-      }
-    }
+    // Extract keys from URL params
+    extractKeysFromText(details.tabId, details.url, details.url, "url");
 
     // Store API key with service/host tracking
-    if (apiKey) {
-      if (!tab.apiKeys.has(apiKey)) {
-        tab.apiKeys.set(apiKey, {
-          origin,
-          referer,
-          firstSeen: Date.now(),
-          lastSeen: Date.now(),
-          services: new Set(), // service names this key was used with
-          hosts: new Set(), // full hostnames this key was used with
-          endpoints: new Set(), // deduplicated endpoint paths
-          requestCount: 0,
-        });
-      }
-      const keyData = tab.apiKeys.get(apiKey);
-      keyData.lastSeen = Date.now();
-      keyData.requestCount++;
-      keyData.services.add(extractServiceName(url.hostname));
-      keyData.hosts.add(url.hostname);
-      keyData.endpoints.add(`${details.method} ${url.hostname}${url.pathname}`);
-    }
-
-    // Update auth context (only track presence of auth signals, not values)
-    if (authorization || cookie || spatula) {
+    const service = extractInterfaceName(url);
+    
+    // Update auth context
+    if (authorization || cookie) {
       tab.authContext = tab.authContext || {};
       if (authorization) tab.authContext.hasAuthorization = true;
-      if (spatula) tab.authContext.hasSpatula = true;
       if (cookie) tab.authContext.hasCookies = true;
       if (origin) tab.authContext.origin = origin;
     }
 
-    // Trigger discovery fetch for this service
-    const service = extractServiceName(url.hostname);
+    // ─── Smart Learning (Virtual Discovery) ──────────────────────────────────
+    
     const discoveryStatus = tab.discoveryDocs.get(service);
+    const isGoogle = url.hostname.endsWith('google.com') || url.hostname.endsWith('googleapis.com');
 
-    console.log(
-      `[Debug] potentially triggering discovery for ${service}. Status:`,
-      discoveryStatus,
-    );
+    // Always learn from the current request to build the VDD immediately
+    learnFromRequest(details.tabId, service, details, headerMap);
 
-    if (!discoveryStatus) {
-      console.log(`[Debug] First time seeing ${service}. Initiating fetch...`);
-      // First time seeing this service — collect all keys known for it
-      tab.discoveryDocs.set(service, {
-        status: "pending",
-        seedUrl: details.url,
-      });
-      const keysForService = collectKeysForService(tab, service, url.hostname);
-      if (apiKey && !keysForService.includes(apiKey))
-        keysForService.push(apiKey);
-      fetchDiscoveryForService(
-        details.tabId,
-        service,
-        url.hostname,
-        keysForService,
-        details.url,
-      );
-    } else if (discoveryStatus.status === "not_found" && apiKey) {
-      console.log(
-        `[Debug] Service ${service} previously not found. Checking new key...`,
-      );
-      // New API key arrived for a service we couldn't find — retry with all keys
-      const keysForService = collectKeysForService(tab, service, url.hostname);
-      if (!discoveryStatus._triedKeys?.has(apiKey)) {
-        console.log(`[Debug] New key ${apiKey} found. Retrying discovery...`);
-        tab.discoveryDocs.set(service, {
-          ...discoveryStatus,
-          status: "pending",
-        });
-        fetchDiscoveryForService(
-          details.tabId,
-          service,
-          url.hostname,
-          keysForService,
-          details.url, // Pass current URL as fresh seed
-        );
+    if (isGoogle && (!discoveryStatus || discoveryStatus.status === "not_found")) {
+      // For Google, also try to fetch the official Discovery Document in the background
+      if (!discoveryStatus) {
+        tab.discoveryDocs.set(service, { status: "pending", seedUrl: details.url });
       } else {
-        console.log(`[Debug] Key ${apiKey} already tried. Skipping retry.`);
+        discoveryStatus.status = "pending";
       }
-    } else {
-      console.log(
-        `[Debug] Discovery for ${service} already in state: ${discoveryStatus.status}`,
-      );
+      
+      const keysForService = collectKeysForService(tab, service, url.hostname);
+      if (apiKey && !keysForService.includes(apiKey)) keysForService.push(apiKey);
+      fetchDiscoveryForService(details.tabId, service, url.hostname, keysForService, details.url);
     }
 
     mergeToGlobal(tab);
@@ -460,7 +570,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     // Log request for Response tab
     let entry = tab.requestLog.find((r) => r.id === details.requestId);
     const logContentType = headerMap["content-type"] || "";
-    const isProtobuf = logContentType.includes("protobuf");
+    const isProtobuf = logContentType.includes("protobuf") || logContentType.includes("grpc");
 
     if (!entry) {
       entry = {
@@ -480,111 +590,31 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     entry.service = service;
 
     if (isProtobuf && entry.rawBodyB64) {
-      console.log(
-        `[Debug] Protobuf/JSPB detected for ${details.url}. Content-Type: ${logContentType}`,
-      );
       try {
         const bytes = base64ToUint8(entry.rawBodyB64);
-        if (
-          logContentType.includes("json") ||
-          logContentType.includes("text") ||
-          logContentType.includes("application/grpc-web-text")
-        ) {
+        if (logContentType.includes("json") || logContentType.includes("text")) {
           // Try JSPB (JSON array) parsing
-          console.log("[Debug] Attempting JSPB/Text decoding...");
           try {
             const text = new TextDecoder().decode(bytes);
-            console.log(`[Debug] Decoded text (start): ${text.slice(0, 100)}`);
-
-            // Heuristic -> if it looks like JSON array
             if (text.trim().startsWith("[")) {
               const json = JSON.parse(text);
               if (Array.isArray(json)) {
-                console.log("[Debug] JSPB Array parsed successfully.");
                 entry.decodedBody = jspbToTree(json);
                 entry.isJspb = true;
               }
-            } else {
-              console.log("[Debug] Text body does not start with '['.");
             }
-          } catch (e) {
-            console.error("[Debug] JSPB decoding failed:", e);
-          }
+          } catch (e) {}
         } else {
           // Binary protobuf
-          console.log("[Debug] Attempting Binary Protobuf decoding...");
           entry.decodedBody = pbDecodeTree(bytes);
         }
-      } catch (err) {
-        console.error("[Debug] General decoding error:", err);
-      }
-    } else {
-      if (isProtobuf)
-        console.log(
-          `[Debug] Protobuf content-type but no rawBodyB64 for ${details.url}`,
-        );
-    }
-
-    // Proactive probing for undocumented Protobuf methods
-    // Debug: check if we should probe
-    if (isProtobuf && details.method === "POST") {
-      const docFound =
-        discoveryStatus?.status === "found" && discoveryStatus.doc;
-      console.log(
-        `[Debug] Checking proactive probe for ${url.pathname}. Doc found: ${!!docFound}`,
-      );
-    }
-
-    if (
-      isProtobuf &&
-      details.method === "POST" &&
-      discoveryStatus?.status === "found" &&
-      discoveryStatus.doc
-    ) {
-      const match = findDiscoveryMethod(
-        discoveryStatus.doc,
-        url.pathname,
-        details.method,
-      );
-      if (match) {
-        entry.methodId = match.method.id;
-        console.log(`[Debug] Method found in existing doc: ${match.method.id}`);
-      } else {
-        // Method not in doc — trigger a probe update
-        console.log(
-          `[Debug] Method ${url.pathname} NOT found in doc. Triggering probe update...`,
-        );
-        const keysForService = collectKeysForService(
-          tab,
-          service,
-          url.hostname,
-        );
-        if (apiKey && !keysForService.includes(apiKey))
-          keysForService.push(apiKey);
-
-        // RE-FETCH / PROBE explicit fallback
-        // We use the first available key or null
-        // The `keysToTry` variable is not defined in this scope, so we'll use the available `apiKey` or `keysForService[0]`.
-        // const probeKey = keysToTry ? keysToTry[0] : (apiKey || null);
-
-        // Call the probe logic directly to patch the doc
-        performProbeAndPatch(
-          details.tabId,
-          service,
-          details.url, // Use this specific URL as the probe target
-          apiKey || keysForService[0] || null,
-        );
-      }
+      } catch (err) {}
     }
 
     notifyPopup(details.tabId);
   },
   {
-    urls: [
-      "*://*.googleapis.com/*",
-      "*://*.clients6.google.com/*",
-      "*://*.sandbox.googleapis.com/*",
-    ],
+    urls: ["<all_urls>"],
   },
   ["requestHeaders"],
 );
@@ -594,43 +624,231 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     if (details.tabId < 0) return;
-    if (details.statusCode !== 403) return;
 
     const url = new URL(details.url);
-    if (!isGoogleApiHost(url.hostname)) return;
+    if (!isApiRequest(url, details)) return;
 
     const tab = getTab(details.tabId);
-    const service = extractServiceName(url.hostname);
+    const service = extractInterfaceName(url);
 
-    for (const h of details.responseHeaders || []) {
-      if (h.name.toLowerCase() === "www-authenticate" && h.value) {
-        // Extract scopes: Bearer ... scope="scope1 scope2 ..."
-        const scopeMatch = h.value.match(/scope="([^"]*)"/);
-        if (scopeMatch) {
-          const scopeList = scopeMatch[1].split(/\s+/).filter(Boolean);
-          if (scopeList.length > 0) {
-            tab.scopes.set(service, scopeList);
+    if (details.statusCode === 403) {
+      for (const h of details.responseHeaders || []) {
+        if (h.name.toLowerCase() === "www-authenticate" && h.value) {
+          // Extract scopes: Bearer ... scope="scope1 scope2 ..."
+          const scopeMatch = h.value.match(/scope="([^"]*)"/);
+          if (scopeMatch) {
+            const scopeList = scopeMatch[1].split(/\s+/).filter(Boolean);
+            if (scopeList.length > 0) {
+              tab.scopes.set(service, scopeList);
 
-            // Also annotate the endpoint
-            const endpointKey = `${details.method} ${url.hostname}${url.pathname}`;
-            const ep = tab.endpoints.get(endpointKey);
-            if (ep) ep.requiredScopes = scopeList;
+              // Also annotate the endpoint
+              const endpointKey = `${details.method} ${url.hostname}${url.pathname}`;
+              const ep = tab.endpoints.get(endpointKey);
+              if (ep) ep.requiredScopes = scopeList;
 
-            notifyPopup(details.tabId);
+              notifyPopup(details.tabId);
+            }
           }
         }
       }
     }
+    
+    // Potential to learn from response body too, but we need to use debugger or another way 
+    // to get response body in MV3 reliably if we want it for all requests.
+    // For now, we learn from the request side which is easier.
   },
   {
-    urls: [
-      "*://*.googleapis.com/*",
-      "*://*.clients6.google.com/*",
-      "*://*.sandbox.googleapis.com/*",
-    ],
+    urls: ["<all_urls>"],
   },
   ["responseHeaders"],
 );
+
+// ─── Smart Learning ──────────────────────────────────────────────────────────
+
+function learnFromRequest(tabId, interfaceName, details, headers) {
+  const tab = getTab(tabId);
+  const url = new URL(details.url);
+  const method = details.method;
+  
+  let docEntry = tab.discoveryDocs.get(interfaceName);
+  if (!docEntry || !docEntry.doc) {
+    docEntry = {
+      status: "found",
+      isVirtual: true,
+      doc: {
+        kind: "discovery#restDescription",
+        name: interfaceName,
+        title: `${interfaceName} (Learned)`,
+        resources: {
+          learned: { methods: {} }
+        },
+        schemas: {}
+      }
+    };
+    tab.discoveryDocs.set(interfaceName, docEntry);
+  }
+  
+  const doc = docEntry.doc;
+  if (!doc.resources.learned) doc.resources.learned = { methods: {} };
+
+  const segments = url.pathname.split('/').filter(Boolean);
+  
+  // Heuristic for method name: 
+  // Look for segments AFTER the interface name
+  const interfaceParts = interfaceName.split('/');
+  const startIdx = interfaceParts.length - 1;
+  let methodSegments = segments.slice(startIdx);
+  
+  // Strip segments that look like hashes or long ID lists
+  methodSegments = methodSegments.filter(s => {
+    if (s.length > 32) return false; // Likely a hash/token
+    if (s.includes('=') && s.includes(',')) return false; // Likely module list
+    return true;
+  });
+
+  let methodName = methodSegments.join('_') || 'root';
+  
+  // If it's a gRPC-style path, keep it cleaner
+  if (url.pathname.includes('$rpc')) {
+    const rpcParts = url.pathname.split('/');
+    methodName = rpcParts[rpcParts.length - 1];
+  }
+  
+  const methodId = `${interfaceName.replace(/\//g, '.')}.${methodName}`;
+  
+  if (!doc.resources.learned.methods[methodName]) {
+    doc.resources.learned.methods[methodName] = {
+      id: methodId,
+      path: url.pathname.substring(1),
+      httpMethod: method,
+      parameters: {},
+      request: null
+    };
+  }
+  
+  const m = doc.resources.learned.methods[methodName];
+  
+  // Learn parameters from URL
+  url.searchParams.forEach((value, name) => {
+    if (name === 'key' || name === 'api_key') return;
+    if (!m.parameters[name]) {
+      m.parameters[name] = {
+        type: isNaN(value) ? 'string' : 'number',
+        location: 'query',
+        description: `Learned from request`
+      };
+    }
+  });
+  
+  // Learn request body if present
+  if (details.requestBody?.raw?.[0]?.bytes) {
+     const contentType = headers['content-type'] || '';
+     if (contentType.includes('json')) {
+       try {
+         const bytes = details.requestBody.raw[0].bytes;
+         const text = new TextDecoder().decode(bytes);
+         const json = JSON.parse(text);
+         const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Request`;
+         m.request = { $ref: schemaName };
+         doc.schemas[schemaName] = generateSchemaFromJson(json, schemaName, doc.schemas);
+       } catch(e) {}
+     } else if (contentType.includes('protobuf')) {
+        // If it's protobuf, we can use req2proto's probeResult logic to update schema
+        // but that usually requires an error. Here we have a successful request.
+        // We could heuristically decode it.
+     }
+  }
+}
+
+function learnFromResponse(tabId, interfaceName, entry) {
+  if (!entry.responseBody) return;
+  
+  const tab = getTab(tabId);
+  const url = new URL(entry.url);
+  const segments = url.pathname.split('/').filter(Boolean);
+  let methodName = segments[segments.length - 1] || 'root';
+  if (url.pathname.includes('$rpc')) {
+    methodName = url.pathname.split('/').slice(-2).join('_');
+  }
+
+  const docEntry = tab.discoveryDocs.get(interfaceName);
+  if (!docEntry || !docEntry.doc) return;
+  const doc = docEntry.doc;
+  const m = doc.resources.learned.methods[methodName];
+  if (!m) return;
+
+  const mimeType = entry.mimeType || '';
+  if (mimeType.includes('json')) {
+    try {
+      const json = JSON.parse(entry.responseBody);
+      const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Response`;
+      m.response = { $ref: schemaName };
+      doc.schemas[schemaName] = generateSchemaFromJson(json, schemaName, doc.schemas);
+    } catch(e) {}
+  } else if (mimeType.includes('protobuf') || entry.contentType?.includes('protobuf')) {
+    // Decode response protobuf heuristically
+    try {
+      const bytes = entry.responseBase64 ? base64ToUint8(entry.responseBody) : new TextEncoder().encode(entry.responseBody);
+      const tree = pbDecodeTree(bytes);
+      const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Response`;
+      m.response = { $ref: schemaName };
+      doc.schemas[schemaName] = generateSchemaFromPbTree(tree, schemaName, doc.schemas);
+    } catch(e) {}
+  }
+}
+
+function generateSchemaFromPbTree(tree, name, schemas) {
+  const properties = {};
+  for (const node of tree) {
+    const fieldKey = `field${node.field}`;
+    const prop = {
+      id: node.field,
+      number: node.field,
+      type: node.wire === 0 ? 'int64' : node.wire === 5 ? 'float' : node.wire === 1 ? 'double' : 'string',
+      description: `Discovered via response capture`
+    };
+
+    if (node.message) {
+      const nestedName = `${name}Field${node.field}`;
+      prop.type = 'message';
+      prop.$ref = nestedName;
+      schemas[nestedName] = generateSchemaFromPbTree(node.message, nestedName, schemas);
+    } else if (node.string) {
+      prop.type = 'string';
+    }
+
+    properties[fieldKey] = prop;
+  }
+  return { id: name, type: 'object', properties };
+}
+
+function generateSchemaFromJson(json, name, schemas) {
+  if (Array.isArray(json)) {
+    const items = json.length > 0 ? generateSchemaFromJson(json[0], name + 'Item', schemas) : { type: 'string' };
+    return { type: 'array', items };
+  } else if (typeof json === 'object' && json !== null) {
+    const properties = {};
+    for (const key in json) {
+      const val = json[key];
+      const safeKey = key.replace(/[^a-zA-Z0-9]/g, '');
+      if (Array.isArray(val)) {
+        properties[key] = { 
+          type: 'array', 
+          items: val.length > 0 ? generateSchemaFromJson(val[0], name + safeKey + 'Item', schemas) : { type: 'string' } 
+        };
+      } else if (typeof val === 'object' && val !== null) {
+        const nestedName = name + safeKey.charAt(0).toUpperCase() + safeKey.slice(1);
+        properties[key] = { $ref: nestedName };
+        schemas[nestedName] = generateSchemaFromJson(val, nestedName, schemas);
+      } else {
+        properties[key] = { type: typeof val };
+      }
+    }
+    return { id: name, type: 'object', properties };
+  } else {
+    return { type: typeof json };
+  }
+}
 
 // ─── Page-Context Fetch Bridge ───────────────────────────────────────────────
 // Routes fetch requests through the content script so they execute with the
@@ -744,11 +962,11 @@ function releaseTempTab(origin) {
  * Fetch through a content script, with temp tab fallback.
  */
 async function pageContextFetch(tabId, url, opts, initiatorOrigin) {
-  // Validate URL is a Google API host before relaying
+  // Validate URL is a valid API-like host
   try {
     const parsed = new URL(url);
-    if (!isGoogleApiHost(parsed.hostname)) {
-      return { error: "blocked: not a Google API host" };
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return { error: "blocked: invalid protocol" };
     }
   } catch (_) {
     return { error: "blocked: invalid URL" };
@@ -908,9 +1126,12 @@ async function fetchDiscoveryForService(
         ) {
           console.log(`[Debug] Discovery FOUND for ${service} at ${url}`);
 
+          const existingEntry = tab.discoveryDocs.get(service);
+          const mergedDoc = mergeVirtualParts(doc, existingEntry?.doc);
+
           tab.discoveryDocs.set(service, {
             status: "found",
-            doc,
+            doc: mergedDoc,
             url,
             method: method || "GET",
             apiKey: apiKey || null,
@@ -975,9 +1196,12 @@ async function fetchDiscoveryForService(
         doc &&
         (doc.discoveryVersion || doc.kind === "discovery#restDescription")
       ) {
+        const existingEntry = tab.discoveryDocs.get(service);
+        const mergedDoc = mergeVirtualParts(doc, existingEntry?.doc);
+
         tab.discoveryDocs.set(service, {
           status: "found",
-          doc,
+          doc: mergedDoc,
           url,
           method: method || "GET",
           apiKey: null,
@@ -1120,6 +1344,7 @@ function updateOrCreateVirtualDoc(service, seedUrl, probeResult, existingDoc) {
       };
 
   // Ensure resources structure
+  if (!doc.resources) doc.resources = {};
   if (!doc.resources.probed) {
     doc.resources.probed = { methods: {} };
   }
@@ -1327,7 +1552,7 @@ async function probeEndpoint(tabId, endpointKey) {
 
   // Store scopes if the probe discovered them
   if (result.scopes?.length) {
-    const svc = ep.service || extractServiceName(new URL(ep.url).hostname);
+    const svc = ep.service || extractInterfaceName(new URL(ep.url));
     tab.scopes.set(svc, result.scopes);
   }
 
@@ -1373,14 +1598,13 @@ function handleContentMessage(msg, sender) {
       if (!tab.endpoints.has(key)) {
         try {
           const url = new URL(ep);
-          if (!isGoogleApiHost(url.hostname)) continue;
           const rpcInfo = parseRpcPath(url.pathname);
           tab.endpoints.set(key, {
             url: ep,
             method: "?",
             host: url.hostname,
             path: url.pathname,
-            service: extractServiceName(url.hostname),
+            service: extractInterfaceName(url),
             origin: sender.origin,
             rpc: rpcInfo,
             source: "page_source",
@@ -1438,7 +1662,7 @@ function handlePopupMessage(msg, _sender, sendResponse) {
           tab.probeResults.set(`svc:${msg.endpointKey}`, result);
           if (result.scopes?.length) {
             const svc =
-              ep.service || extractServiceName(new URL(ep.url).hostname);
+              ep.service || extractInterfaceName(new URL(ep.url));
             tab.scopes.set(svc, result.scopes);
           }
           mergeToGlobal(tab);
@@ -1492,6 +1716,74 @@ function handlePopupMessage(msg, _sender, sendResponse) {
         sendResponse(result);
       });
       return true;
+    }
+
+    case "EXECUTE_FUZZ": {
+      if (tabId == null) return;
+      executeFuzzing(tabId, msg);
+      sendResponse({ ok: true });
+      return;
+    }
+  }
+}
+
+// ─── Fuzzing Engine ──────────────────────────────────────────────────────────
+
+async function executeFuzzing(tabId, msg) {
+  const schema = resolveEndpointSchema(tabId, null, msg.service, msg.methodId);
+  if (!schema || !schema.requestBody) return;
+
+  const fields = schema.requestBody.fields;
+  const url = schema.endpoint?.url || (schema.method ? (new URL(schema.method.path, "https://" + msg.service + ".googleapis.com")).toString() : null);
+  if (!url) return;
+
+  const payloads = [];
+  if (msg.config.strings) {
+    payloads.push("", "A".repeat(1000), "' OR 1=1 --", "<script>alert(1)</script>", "\0", "NaN", "undefined");
+  }
+  if (msg.config.numbers) {
+    payloads.push(0, -1, 2147483648, 9007199254740991, 1.1e+38, -1.1e+38);
+  }
+  if (msg.config.objects) {
+    payloads.push(null, [], {});
+  }
+
+  for (const field of fields) {
+    for (const payload of payloads) {
+      // Create a copy of default fields with one fuzzed field
+      const fuzzedFields = fields.map(f => {
+        if (f.name === field.name) {
+          return { ...f, value: payload };
+        }
+        // Use a safe default value for other fields
+        return { ...f, value: f.type === 'string' ? "test" : f.type === 'bool' ? false : 1 };
+      });
+
+      const result = await executeSendRequest(tabId, {
+        service: msg.service,
+        methodId: msg.methodId,
+        url: url,
+        httpMethod: schema.method?.httpMethod || "POST",
+        contentType: schema.contentTypes[0],
+        body: {
+          mode: "form",
+          formData: { fields: fuzzedFields }
+        }
+      });
+
+      chrome.runtime.sendMessage({
+        type: "FUZZ_UPDATE",
+        tabId,
+        update: {
+          field: field.name,
+          payload: payload,
+          status: result.status,
+          error: result.error
+        }
+      });
+      
+      // Small delay to avoid rate limiting
+      await new Promise(r => setTimeout(r, 200));
     }
   }
 }
@@ -1841,8 +2133,8 @@ async function executeSendRequest(tabId, msg) {
   let parsedUrl;
   try {
     parsedUrl = new URL(msg.url);
-    if (!isGoogleApiHost(parsedUrl.hostname)) {
-      return { error: "blocked: not a Google API host" };
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      return { error: "blocked: invalid protocol" };
     }
   } catch (_) {
     return { error: "invalid URL" };
@@ -2036,8 +2328,36 @@ function notifyPopup(tabId) {
   chrome.runtime.sendMessage({ type: "STATE_UPDATED", tabId }).catch(() => {});
 }
 
+function mergeVirtualParts(newDoc, oldDoc) {
+  if (!oldDoc || !newDoc) return newDoc;
+  
+  // Preserve "learned" methods
+  if (oldDoc.resources?.learned) {
+    if (!newDoc.resources) newDoc.resources = {};
+    newDoc.resources.learned = oldDoc.resources.learned;
+  }
+  
+  // Preserve "probed" methods
+  if (oldDoc.resources?.probed) {
+    if (!newDoc.resources) newDoc.resources = {};
+    newDoc.resources.probed = oldDoc.resources.probed;
+  }
+
+  // Preserve learned schemas
+  if (oldDoc.schemas) {
+    for (const [name, schema] of Object.entries(oldDoc.schemas)) {
+      if (!newDoc.schemas[name]) {
+        newDoc.schemas[name] = schema;
+      }
+    }
+  }
+  
+  return newDoc;
+}
+
 function serializeApiKeyEntry(v) {
   return {
+    name: v.name,
     origin: v.origin,
     referer: v.referer,
     source: v.source,
@@ -2108,6 +2428,7 @@ function serializeTabData(tab) {
         fetchedAt: v.fetchedAt,
         summary: v.doc ? summarizeDiscovery(v.doc) : v.summary || null,
         doc: v.doc || null,
+        isVirtual: v.isVirtual || false,
       };
     } else {
       mergedDiscovery[k] = { status: v.status };
@@ -2137,11 +2458,7 @@ function serializeTabData(tab) {
 // ─── Request Completion Tracking ─────────────────────────────────────────────
 
 const REQUEST_FILTER = {
-  urls: [
-    "*://*.googleapis.com/*",
-    "*://*.clients6.google.com/*",
-    "*://*.sandbox.googleapis.com/*",
-  ],
+  urls: ["<all_urls>"],
 };
 
 chrome.webRequest.onCompleted.addListener((details) => {
@@ -2155,7 +2472,7 @@ chrome.webRequest.onCompleted.addListener((details) => {
     entry.completedAt = Date.now();
     notifyPopup(details.tabId);
   }
-}, REQUEST_FILTER);
+}, { urls: ["<all_urls>"] });
 
 chrome.webRequest.onErrorOccurred.addListener((details) => {
   if (details.tabId < 0) return;
@@ -2169,4 +2486,4 @@ chrome.webRequest.onErrorOccurred.addListener((details) => {
     entry.completedAt = Date.now();
     notifyPopup(details.tabId);
   }
-}, REQUEST_FILTER);
+}, { urls: ["<all_urls>"] });

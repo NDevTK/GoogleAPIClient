@@ -15,6 +15,7 @@
     <nav>
       <button class="tab active" data-panel="response">Requests</button>
       <button class="tab" data-panel="send">Send</button>
+      <button class="tab" data-panel="fuzz">Fuzz</button>
       <button class="tab" data-panel="data">Keys</button>
     </nav>
 
@@ -91,6 +92,25 @@
       </div>
 
       <button id="btn-send" type="button">Send Request</button>
+    </section>
+
+    <!-- Fuzz Panel -->
+    <section id="panel-fuzz" class="panel">
+      <div id="fuzz-controls">
+        <select id="fuzz-ep-select">
+          <option value="">-- select target --</option>
+        </select>
+        <button id="btn-start-fuzz">Start Fuzzing</button>
+      </div>
+      <div id="fuzz-config">
+        <label><input type="checkbox" id="fuzz-strings" checked> Strings (Overflow/Injection)</label><br>
+        <label><input type="checkbox" id="fuzz-numbers" checked> Numbers (Limits/Types)</label><br>
+        <label><input type="checkbox" id="fuzz-objects" checked> Structures (Null/Circular)</label>
+      </div>
+      <div id="fuzz-log-container">
+        <div class="section-header">Fuzzing Log</div>
+        <div id="fuzz-log" class="log-list"></div>
+      </div>
     </section>
 
     <!-- Response Panel -->
