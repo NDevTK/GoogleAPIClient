@@ -43,15 +43,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Optional: show schema preview for fuzzing
   });
 
-  // Click delegation for discovery methods
-  document.getElementById("data-services").addEventListener("click", (e) => {
-    const methodRow = e.target.closest(".clickable-method");
-    if (methodRow) {
-      const { svc, id, path, method } = methodRow.dataset;
-      selectDiscoveryMethod(svc, id, path, method);
-    }
-  });
-
   for (const btn of document.querySelectorAll(
     "#send-body-toggle .toggle-btn",
   )) {
@@ -163,15 +154,12 @@ function render() {
 
 function renderDataPanel() {
   const keysContainer = document.getElementById("data-keys");
-  const servicesContainer = document.getElementById("data-services");
   const empty = document.getElementById("data-empty");
 
   keysContainer.innerHTML = "";
-  servicesContainer.innerHTML = "";
 
   const keys = tabData?.apiKeys ? Object.entries(tabData.apiKeys) : [];
-  const services = tabData?.discoveryDocs ? Object.entries(tabData.discoveryDocs) : [];
-  const hasData = keys.length > 0 || services.length > 0;
+  const hasData = keys.length > 0;
   empty.style.display = hasData ? "none" : "block";
 
   // Keys section
@@ -197,48 +185,6 @@ function renderDataPanel() {
       html += `</div>`;
     }
     keysContainer.innerHTML = html;
-  }
-
-  // Interfaces section
-  if (services.length) {
-    let html = '<div class="section-header">Discovered Interfaces</div>';
-    for (const [svcName, svcData] of services) {
-      const summary = svcData.summary || svcData.doc;
-      const methods = [];
-      if (summary?.resources) {
-        for (const [rName, rMethods] of Object.entries(summary.resources)) {
-          if (Array.isArray(rMethods)) {
-            methods.push(...rMethods);
-          } else if (rMethods.methods) {
-            methods.push(...Object.values(rMethods.methods));
-          }
-        }
-      }
-
-      html += `<div class="card">
-        <div class="card-label">${esc(svcName)} 
-          <span class="badge badge-status">${svcData.method || "LEARNED"}</span>
-          ${svcData.isVirtual ? '<span class="badge badge-source">virtual</span>' : ""}
-        </div>
-        <div class="card-meta">Methods found: <strong>${methods.length}</strong></div>`;
-      
-      if (methods.length > 0) {
-        html += `<details style="margin-top:4px"><summary style="font-size:10px;color:#484f58">Show Methods</summary>`;
-        for (const m of methods) {
-          html += `<div class="clickable-method" 
-                      data-svc="${esc(svcName)}" 
-                      data-id="${esc(m.id)}" 
-                      data-path="${esc(m.path)}" 
-                      data-method="${esc(m.httpMethod)}"
-                      style="font-family:monospace;font-size:10px;padding:2px 4px;cursor:pointer;border-bottom:1px solid #f0f0f0">
-                    <span class="badge ${m.httpMethod}">${m.httpMethod}</span> ${esc(m.id || m.path)}
-                  </div>`;
-        }
-        html += `</details>`;
-      }
-      html += `</div>`;
-    }
-    servicesContainer.innerHTML = html;
   }
 }
 
@@ -298,33 +244,6 @@ function renderSendPanel() {
 
   if (prev) select.value = prev;
   if (fuzzPrev) fuzzSelect.value = fuzzPrev;
-}
-
-function selectDiscoveryMethod(svc, id, path, method) {
-  // Switch to Send tab
-  document.querySelector(".tab[data-panel='send']").click();
-
-  const select = document.getElementById("send-ep-select");
-
-  // Create a consistently named key for virtual endpoints
-  const key = `DISCOVERY ${method} ${svc} ${id}`;
-
-  // Check if we already added this virtual option
-  let opt = select.querySelector(`option[value="${key}"]`);
-  if (!opt) {
-    opt = document.createElement("option");
-    opt.value = key;
-    opt.textContent = `[${method}] ${id}`;
-    opt.dataset.method = method;
-    opt.dataset.isVirtual = "true";
-    opt.dataset.svc = svc;
-    opt.dataset.path = path; // template path
-    opt.dataset.discoveryId = id; // Store ID explicitly
-    select.appendChild(opt);
-  }
-
-  select.value = key;
-  onSendEndpointSelected(); // Trigger selection logic
 }
 
 function renderFieldsTable(fields, depth) {
