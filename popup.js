@@ -119,7 +119,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     log.prepend(card);
   }
   
-  chrome.runtime.onMessage.addListener((msg) => {
+  const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;
+
+  chrome.runtime.onMessage.addListener((msg, sender) => {
+    if (sender.id !== chrome.runtime.id) return;
+
+    // Security: Only accept coordination messages from internal extension contexts (e.g. background.js)
+    // Content scripts will have the website's URL here, not the extension's origin.
+    const isExtensionPage = sender.url && sender.url.startsWith(EXTENSION_ORIGIN + "/");
+    if (!isExtensionPage) return;
+
     if (msg.type === "STATE_UPDATED" && msg.tabId === currentTabId) loadState();
     if (msg.type === "FUZZ_UPDATE" && msg.tabId === currentTabId) renderFuzzUpdate(msg.update);
   });
