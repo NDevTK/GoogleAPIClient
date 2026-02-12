@@ -11,18 +11,24 @@
     "scripting"
   ],
   "host_permissions": [
-    "<all_urls>"
-    ],
+    "*://*.googleapis.com/*",
+    "*://*.clients6.google.com/*",
+    "*://*.google.com/*",
+    "*://*.youtube.com/*",
+    "*://*.sandbox.googleapis.com/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
       "matches": [
-        "<all_urls>"
+        "*://*.google.com/*",
+        "*://*.youtube.com/*",
+        "*://*.googleapis.com/*"
       ],
       "js": ["content.js"],
-      "run_at": "document_start",
+      "run_at": "document_idle",
       "all_frames": true,
       "match_origin_as_fallback": true,
       "match_about_blank": true
