@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>GAPI Security</h1>
+    <div class="toolbar">
+      <button id="btn-clear" title="Clear All Data">🗑️</button>
+    </div>
+  </header>
+
+  <nav>
+    <button class="tab active" data-panel="response">Requests</button>
+    <button class="tab" data-panel="send">Send</button>
+    <button class="tab" data-panel="data">Keys</button>
+  </nav>
+
+  <!-- Data Panel -->
+  <section id="panel-data" class="panel">
+    <button class="btn-export" id="btn-export-data" title="Copy all data as JSON">Copy</button>
+
+    <div class="empty" id="data-empty">No data captured yet. Browse a Google service to begin.</div>
+    <div id="data-keys"></div>
+    <div id="data-services"></div>
+  </section>
+
+  <!-- Send Panel -->
+  <section id="panel-send" class="panel">
+    <p class="hint">Select an endpoint to load field info.</p>
+
+    <div id="send-controls">
+      <select id="send-ep-select"><option value="">-- select endpoint --</option></select>
+    </div>
+
+    <div id="send-url-row">
+      <select id="send-method">
+        <option>GET</option>
+        <option selected>POST</option>
+        <option>PUT</option>
+        <option>PATCH</option>
+        <option>DELETE</option>
+      </select>
+      <input id="send-url" type="text" placeholder="https://..." />
+    </div>
+
+    <div id="send-ct-row">
+      <label>Content-Type:</label>
+      <select id="send-ct">
+        <option value="application/json">JSON</option>
+        <option value="application/json+protobuf">JSPB (json+protobuf)</option>
+        <option value="application/x-protobuf">Binary Protobuf</option>
+      </select>
+    </div>
+
+    <details id="send-headers-section">
+      <summary>Custom Headers</summary>
+      <div id="send-headers-list"></div>
+      <button id="btn-add-header" class="btn-small" type="button">+ Add Header</button>
+    </details>
+
+    <div id="send-body-section">
+      <div id="send-body-toggle">
+        <button class="toggle-btn active" data-mode="form" type="button">Form</button>
+        <button class="toggle-btn" data-mode="raw" type="button">Raw</button>
+      </div>
+      <div id="send-form-fields"></div>
+      <textarea id="send-raw-body" style="display:none" placeholder='{"field": "value"} or base64 for protobuf'></textarea>
+    </div>
+
+    <button id="btn-send" type="button">Send Request</button>
+  </section>
+
+  <!-- Response Panel -->
+  <section id="panel-response" class="panel active">
+    <div id="response-log-container">
+      <div class="section-header">Request Log (Active Tab) <button id="btn-clear-log" class="btn-small" style="float:right">Clear</button></div>
+      <div id="response-log" class="log-list"></div>
+    </div>
+    <div id="send-response" style="display:none; margin-top: 16px; border-top: 1px solid #eee; padding-top: 16px;">
+      <div class="section-header">Manual Send Result</div>
+      <div id="send-response-status"></div>
+      <details id="send-response-headers-section">
+        <summary>Response Headers</summary>
+        <table id="send-response-headers" class="auth-table"></table>
+      </details>
+      <div id="send-response-body"></div>
+    </div>
+  </section>
+
+  <script src="lib/protobuf.js"></script>
+  <script src="lib/discovery.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

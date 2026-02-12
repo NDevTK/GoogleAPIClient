@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Google API Security Research",
+  "version": "1.2.0",
+  "description": "Extract APIs, discover schemas, and replay requests. Specialized in Google Protobuf and JSPB decoding.",
+  "permissions": [
+    "webRequest",
+    "cookies",
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://*.googleapis.com/*",
+    "*://*.clients6.google.com/*",
+    "*://*.google.com/*",
+    "*://*.youtube.com/*",
+    "*://*.sandbox.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.google.com/*",
+        "*://*.youtube.com/*",
+        "*://*.googleapis.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
