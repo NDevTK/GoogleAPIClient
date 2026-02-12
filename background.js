@@ -30,8 +30,12 @@ const DebuggerManager = {
       console.log(`[Debugger] Attached to tab ${tabId}`);
     } catch (err) {
       state.attachedTabs.delete(tabId);
-      // Silence the error if it's just because the user has DevTools open
-      if (!err.message.includes("Another debugger is already attached")) {
+      // Silence expected browser restricted errors
+      const isExpectedError = 
+        err.message.includes("Another debugger is already attached") ||
+        err.message.includes("Cannot access a chrome:// URL");
+        
+      if (!isExpectedError) {
         console.error(`[Debugger] Attach failed for ${tabId}:`, err);
       }
     }
