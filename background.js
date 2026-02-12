@@ -517,7 +517,13 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 
     for (const h of details.requestHeaders || []) {
       const name = h.name.toLowerCase();
-      headerMap[name] = h.value;
+      
+      if (name === "cookie") {
+        cookie = "[PRESENT]";
+        headerMap[name] = "[REDACTED]";
+      } else {
+        headerMap[name] = h.value;
+      }
 
       if (name === "authorization") authorization = h.value;
       if (name === "origin") origin = h.value;
