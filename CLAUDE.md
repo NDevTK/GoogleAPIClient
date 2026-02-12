@@ -4,22 +4,23 @@
 A specialized Chrome Extension for API discovery, protocol reverse-engineering (Protobuf/JSPB/JSON), and security testing across all websites.
 
 ## Core Architecture
-- **Passive Discovery**: `webRequest` for requests, `debugger` (CDP) for response bodies.
-- **Smart Learning**: Automatically builds a Virtual Discovery Document (VDD) by grouping endpoints into "Interfaces" and "Methods" based on path heuristics.
+- **Passive Discovery**: `webRequest` for metadata, `debugger` (CDP) for full response bodies.
 - **Protocol Handlers**:
-  - `lib/protobuf.js`: Wire-format codec for binary/JSPB inspection.
-  - `lib/discovery.js`: Manages REST discovery schemas and mapping.
-  - `lib/req2proto.js`: Error-based schema probing (Specialized Google + Generic support).
-- **Fuzzing Engine**: Automated field-level probing for common web vulnerabilities.
-- **Context Relay**: Executes `fetch` in the page's origin to reuse active session cookies/auth.
+  - `batchexecute`: Deeply unpacks Google's double-encoded batch RPCs using `parseBatchExecuteRequest`.
+  - `lib/protobuf.js`: Wire-format codec with recursive base64 scanning for nested keys.
+  - `lib/req2proto.js`: Universal error-based probing (Specialized Google + Generic logic).
+- **Smart Learning**: Built-in VDD engine that automatically maps request/response schemas and URL parameters.
+- **Collaborative Mapping**: Persistent field renaming stored in `chrome.storage.local`.
+- **UI Management**: State-aware rendering in `popup.js` using `expandedReqId` to maintain expansion and scroll states during background traffic updates.
 
 ## Development Standards
-- **Naming**: `camelCase` for variables/functions, `UPPER_SNAKE_CASE` for constants/regex.
-- **MV3 Compliance**: Use `service_worker`, `chrome.storage.local`, and ensure non-blocking headers where possible.
-- **Error Handling**: Always use `try/catch` around `chrome.debugger` commands and `JSON.parse`.
-- **Security**: Never store actual `Cookie` header values; only track presence.
+- **Naming**: `camelCase` for logic, `UPPER_SNAKE_CASE` for constants. Unified `methodId` format: `interface.name.method`.
+- **MV3 Compliance**: Non-blocking `webRequest` observers. Debugger auto-attaches on API detection.
+- **UI Security**: Strict origin checks in `onMessage` handlers. All dynamic content passed through `esc()` to prevent XSS.
+- **Data Persistence**: Use `scheduleSave()` pattern to deduplicate and batch storage writes.
 
 ## Common Tasks
-- **Add Key Pattern**: Update `KEY_PATTERNS` constant in `background.js`.
-- **Modify Fuzzing Payloads**: Update `executeFuzzing` function in `background.js`.
-- **Update UI**: Modify `popup.html` and use `render()` in `popup.js` to refresh data.
+- **Extend Key Patterns**: Update `KEY_PATTERNS` in `background.js`.
+- **Add Fuzzing Payload**: Update `payloads` array in `executeFuzzing` (`background.js`).
+- **Adjust Method Heuristics**: Modify `calculateMethodMetadata` in `background.js`.
+- **UI Changes**: Ensure new components respect `expandedReqId` to avoid state loss on re-render.

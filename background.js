@@ -19,14 +19,21 @@ const state = {
 
 const DebuggerManager = {
   async attach(tabId) {
-    if (state.attachedTabs.get(tabId)) return;
+    const status = state.attachedTabs.get(tabId);
+    if (status === true || status === "pending") return;
+    
+    state.attachedTabs.set(tabId, "pending");
     try {
       await chrome.debugger.attach({ tabId }, "1.3");
       state.attachedTabs.set(tabId, true);
       await chrome.debugger.sendCommand({ tabId }, "Network.enable");
       console.log(`[Debugger] Attached to tab ${tabId}`);
     } catch (err) {
-      console.error(`[Debugger] Attach failed for ${tabId}:`, err);
+      state.attachedTabs.delete(tabId);
+      // Silence the error if it's just because the user has DevTools open
+      if (!err.message.includes("Another debugger is already attached")) {
+        console.error(`[Debugger] Attach failed for ${tabId}:`, err);
+      }
     }
   },
 
@@ -75,10 +82,20 @@ chrome.debugger.onEvent.addListener(async (source, method, params) => {
     
     const bodyData = await DebuggerManager.getResponseBody(tabId, requestId);
     if (bodyData) {
+      let textBody = bodyData.body;
+      if (bodyData.base64Encoded) {
+        try {
+          const bytes = base64ToUint8(bodyData.body);
+          textBody = new TextDecoder().decode(bytes);
+        } catch (e) {
+          textBody = null; // Truly binary
+        }
+      }
+
       // Always scan for keys in captured bodies (scripts, JSON, etc)
-      if (!bodyData.base64Encoded) {
+      if (textBody) {
         const url = state.tempRequestMap.get(requestId);
-        extractKeysFromText(tabId, bodyData.body, url, "response_body");
+        extractKeysFromText(tabId, textBody, url, "response_body");
       }
       state.tempRequestMap.delete(requestId);
 
@@ -122,12 +139,94 @@ const KEY_PATTERNS = [
   { name: "Stripe Key", re: /[sk|pk]_(?:test|live)_[0-9a-zA-Z]{24}/g }
 ];
 
-function extractKeysFromText(tabId, text, sourceUrl, sourceContext) {
-  if (!text) return;
+// ─── batchexecute Decoding ──────────────────────────────────────────────────
+
+function parseBatchExecuteRequest(bodyText) {
+  try {
+    // Usually f.req=[[[rpcid, inner_json, null, "generic"]]]
+    const params = new URLSearchParams(bodyText);
+    const fReq = params.get('f.req');
+    if (!fReq) return null;
+
+    const outer = JSON.parse(fReq);
+    if (!Array.isArray(outer)) return null;
+
+    const calls = [];
+    for (const call of outer[0]) {
+      const [rpcId, innerJson] = call;
+      let decodedInner = null;
+      try {
+        decodedInner = JSON.parse(innerJson);
+      } catch (e) {
+        decodedInner = innerJson; // Fallback to raw string
+      }
+      calls.push({ rpcId, data: decodedInner });
+    }
+    return calls;
+  } catch (e) {
+    return null;
+  }
+}
+
+function parseBatchExecuteResponse(bodyText) {
+  try {
+    // Strip security prefix )]}'
+    let cleaned = bodyText.trim();
+    if (cleaned.startsWith(")]}'")) {
+      cleaned = cleaned.substring(4).trim();
+    }
+
+    // batchexecute often has length-prefixed chunks
+    // Example: 123\n[[...]]\n
+    const chunks = [];
+    const lines = cleaned.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (/^\d+$/.test(line)) {
+        // Next line is the JSON chunk
+        if (i + 1 < lines.length) {
+          try {
+            const chunk = JSON.parse(lines[i + 1]);
+            chunks.push(chunk);
+            i++; // skip next line
+          } catch (e) {}
+        }
+      } else if (line.startsWith('[')) {
+        try {
+          chunks.push(JSON.parse(line));
+        } catch (e) {}
+      }
+    }
+
+    const results = [];
+    for (const chunk of chunks) {
+      if (!Array.isArray(chunk)) continue;
+      for (const item of chunk) {
+        if (item[0] === "wrb.fr") {
+          const [tag, rpcId, innerJson] = item;
+          let decodedInner = null;
+          try {
+            decodedInner = JSON.parse(innerJson);
+          } catch (e) {
+            decodedInner = innerJson;
+          }
+          results.push({ rpcId, data: decodedInner });
+        }
+      }
+    }
+    return results;
+  } catch (e) {
+    return null;
+  }
+}
+
+function extractKeysFromText(tabId, text, sourceUrl, sourceContext, depth = 0) {
+  if (!text || depth > 3) return; // Prevent infinite recursion
   const tab = getTab(tabId);
   const url = sourceUrl ? new URL(sourceUrl) : null;
   const service = url ? extractInterfaceName(url) : "unknown";
 
+  // 1. Scan for direct key matches
   for (const pattern of KEY_PATTERNS) {
     pattern.re.lastIndex = 0;
     let m;
@@ -157,6 +256,26 @@ function extractKeysFromText(tabId, text, sourceUrl, sourceContext) {
         keyData.hosts.add(url.hostname);
         keyData.endpoints.add(`${url.hostname}${url.pathname}`);
       }
+    }
+  }
+
+  // 2. Scan for base64 blobs that might contain hidden keys
+  // Heuristic: looking for strings > 20 chars that look like base64
+  const B64_RE = /[a-zA-Z0-9+/]{20,}=*/g;
+  let b64m;
+  while ((b64m = B64_RE.exec(text)) !== null) {
+    const candidate = b64m[0];
+    try {
+      // Don't try to decode if it's already a known key to avoid loops
+      if (tab.apiKeys.has(candidate)) continue;
+
+      const decoded = atob(candidate);
+      // If it looks like printable text or JSON, scan it recursively
+      if (/[\x20-\x7E\t\n\r]/.test(decoded)) {
+        extractKeysFromText(tabId, decoded, sourceUrl, sourceContext + " > b64", depth + 1);
+      }
+    } catch (e) {
+      // Not valid base64, ignore
     }
   }
 }
@@ -356,6 +475,9 @@ function isApiRequest(url, details) {
   const staticExts = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'css', 'js', 'woff', 'woff2', 'ttf', 'otf', 'ico', 'map'];
   if (staticExts.includes(ext)) return false;
 
+  // batchexecute is always an API
+  if (url.pathname.includes('batchexecute')) return true;
+
   // Ignore specific tracking/asset paths that aren't useful APIs
   const noisePaths = [
     '/gen_204', '/_/js/', '/_/ss/', '/xjs/', '/client_204', '/vt/', '/jserror',
@@ -385,6 +507,18 @@ function isApiRequest(url, details) {
 function extractInterfaceName(urlObj) {
   const hostname = urlObj.hostname;
   const segments = urlObj.pathname.split('/').filter(Boolean);
+
+  // batchexecute handling: /_/PlayStoreUi/data/batchexecute -> PlayStoreUi
+  if (urlObj.pathname.includes('batchexecute')) {
+    const dataIdx = segments.indexOf('data');
+    if (dataIdx > 0) {
+      return hostname + '/' + segments[dataIdx - 1];
+    }
+    const underscoreIdx = segments.indexOf('_');
+    if (underscoreIdx !== -1 && segments.length > underscoreIdx + 1) {
+      return hostname + '/' + segments[underscoreIdx + 1];
+    }
+  }
 
   // Special handling for Google (keep legacy support)
   if (hostname.endsWith('.googleapis.com') || hostname.endsWith('.clients6.google.com')) {
@@ -479,6 +613,15 @@ chrome.webRequest.onBeforeRequest.addListener(
       rawBodyB64 = uint8ToBase64(
         new Uint8Array(details.requestBody.raw[0].bytes),
       );
+    } else if (details.requestBody?.formData) {
+      // For application/x-www-form-urlencoded
+      const params = new URLSearchParams();
+      for (const [key, values] of Object.entries(details.requestBody.formData)) {
+        for (const val of values) {
+          params.append(key, val);
+        }
+      }
+      rawBodyB64 = uint8ToBase64(new TextEncoder().encode(params.toString()));
     }
 
     const entry = {
@@ -571,7 +714,21 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     const isGoogle = url.hostname.endsWith('google.com') || url.hostname.endsWith('googleapis.com');
 
     // Always learn from the current request to build the VDD immediately
-    learnFromRequest(details.tabId, service, details, headerMap);
+    let entry = tab.requestLog.find((r) => r.id === details.requestId);
+    if (!entry) {
+      entry = {
+        id: details.requestId,
+        url: details.url,
+        method: details.method,
+        service: service,
+        timestamp: Date.now(),
+        status: "pending",
+      };
+      tab.requestLog.unshift(entry);
+      if (tab.requestLog.length > 50) tab.requestLog.pop();
+    }
+    
+    learnFromRequest(details.tabId, service, entry, headerMap);
 
     if (isGoogle && (!discoveryStatus || discoveryStatus.status === "not_found")) {
       // For Google, also try to fetch the official Discovery Document in the background
@@ -589,7 +746,6 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     mergeToGlobal(tab);
 
     // Log request for Response tab
-    let entry = tab.requestLog.find((r) => r.id === details.requestId);
     const logContentType = headerMap["content-type"] || "";
     const isProtobuf = logContentType.includes("protobuf") || logContentType.includes("grpc");
 
@@ -627,7 +783,11 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
           } catch (e) {}
         } else {
           // Binary protobuf
-          entry.decodedBody = pbDecodeTree(bytes);
+          entry.decodedBody = pbDecodeTree(bytes, 8, (val) => {
+            if (typeof val === 'string') {
+              extractKeysFromText(details.tabId, val, details.url, "protobuf_body");
+            }
+          });
         }
       } catch (err) {}
     }
@@ -685,6 +845,12 @@ chrome.webRequest.onHeadersReceived.addListener(
 );
 
 function calculateMethodMetadata(urlObj, interfaceName) {
+  // batchexecute: use rpcids param
+  if (urlObj.pathname.includes('batchexecute')) {
+    const rpcids = urlObj.searchParams.get('rpcids') || 'batch';
+    return { methodName: rpcids, methodId: `${interfaceName.replace(/\//g, '.')}.${rpcids}` };
+  }
+
   const segments = urlObj.pathname.split('/').filter(Boolean);
   const interfaceParts = interfaceName.split('/');
   
@@ -721,10 +887,10 @@ function calculateMethodMetadata(urlObj, interfaceName) {
 
 // ─── Smart Learning ──────────────────────────────────────────────────────────
 
-function learnFromRequest(tabId, interfaceName, details, headers) {
+function learnFromRequest(tabId, interfaceName, entry, headers) {
   const tab = getTab(tabId);
-  const url = new URL(details.url);
-  const method = details.method;
+  const url = new URL(entry.url);
+  const method = entry.method;
   
   let docEntry = tab.discoveryDocs.get(interfaceName);
   if (!docEntry || !docEntry.doc) {
@@ -774,21 +940,38 @@ function learnFromRequest(tabId, interfaceName, details, headers) {
   });
   
   // Learn request body if present
-  if (details.requestBody?.raw?.[0]?.bytes) {
-     const contentType = headers['content-type'] || '';
-     if (contentType.includes('json')) {
+  if (entry.rawBodyB64) {
+     const bytes = base64ToUint8(entry.rawBodyB64);
+     const text = new TextDecoder().decode(bytes);
+     const isBatch = url.pathname.includes('batchexecute');
+
+     if (isBatch) {
+       const calls = parseBatchExecuteRequest(text);
+       if (calls) {
+         for (const call of calls) {
+           const callMethodId = `${interfaceName.replace(/\//g, '.')}.${call.rpcId}`;
+           if (!doc.resources.learned.methods[call.rpcId]) {
+             doc.resources.learned.methods[call.rpcId] = {
+               id: callMethodId,
+               path: url.pathname.substring(1),
+               httpMethod: "POST",
+               parameters: {},
+               request: null
+             };
+           }
+           const callM = doc.resources.learned.methods[call.rpcId];
+           const schemaName = `${call.rpcId}Request`;
+           callM.request = { $ref: schemaName };
+           doc.schemas[schemaName] = generateSchemaFromJson(call.data, schemaName, doc.schemas, true);
+         }
+       }
+     } else if (headers['content-type']?.includes('json')) {
        try {
-         const bytes = details.requestBody.raw[0].bytes;
-         const text = new TextDecoder().decode(bytes);
          const json = JSON.parse(text);
          const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Request`;
          m.request = { $ref: schemaName };
          doc.schemas[schemaName] = generateSchemaFromJson(json, schemaName, doc.schemas);
        } catch(e) {}
-     } else if (contentType.includes('protobuf')) {
-        // If it's protobuf, we can use req2proto's probeResult logic to update schema
-        // but that usually requires an error. Here we have a successful request.
-        // We could heuristically decode it.
      }
   }
 }
@@ -803,22 +986,53 @@ function learnFromResponse(tabId, interfaceName, entry) {
   const docEntry = tab.discoveryDocs.get(interfaceName);
   if (!docEntry || !docEntry.doc) return;
   const doc = docEntry.doc;
-  const m = doc.resources.learned.methods[methodName];
-  if (!m) return;
+  const m = doc.resources.learned ? doc.resources.learned.methods[methodName] : null;
+  // Also check probed methods
+  const proM = doc.resources.probed ? doc.resources.probed.methods[methodName] : null;
+  const targetM = m || proM;
+  if (!targetM) return;
+
+  // Decode base64 to text for JSON/Batch parsing
+  let textBody = entry.responseBody;
+  if (entry.responseBase64) {
+    try {
+      const bytes = base64ToUint8(entry.responseBody);
+      textBody = new TextDecoder().decode(bytes);
+    } catch (e) {
+      textBody = null;
+    }
+  }
+  if (!textBody) return;
 
   const mimeType = entry.mimeType || '';
-  if (mimeType.includes('json')) {
+  if (url.pathname.includes('batchexecute')) {
+    const results = parseBatchExecuteResponse(textBody);
+    if (results) {
+      for (const res of results) {
+        const callM = doc.resources.learned.methods[res.rpcId];
+        if (callM) {
+          const schemaName = `${res.rpcId}Response`;
+          callM.response = { $ref: schemaName };
+          doc.schemas[schemaName] = generateSchemaFromJson(res.data, schemaName, doc.schemas, true);
+        }
+      }
+    }
+  } else if (mimeType.includes('json')) {
     try {
-      const json = JSON.parse(entry.responseBody);
+      const json = JSON.parse(textBody);
       const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Response`;
-      m.response = { $ref: schemaName };
+      targetM.response = { $ref: schemaName };
       doc.schemas[schemaName] = generateSchemaFromJson(json, schemaName, doc.schemas);
     } catch(e) {}
   } else if (mimeType.includes('protobuf') || entry.contentType?.includes('protobuf')) {
     // Decode response protobuf heuristically
     try {
       const bytes = entry.responseBase64 ? base64ToUint8(entry.responseBody) : new TextEncoder().encode(entry.responseBody);
-      const tree = pbDecodeTree(bytes);
+      const tree = pbDecodeTree(bytes, 8, (val) => {
+        if (typeof val === 'string') {
+          extractKeysFromText(tabId, val, entry.url, "response_protobuf");
+        }
+      });
       const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Response`;
       m.response = { $ref: schemaName };
       doc.schemas[schemaName] = generateSchemaFromPbTree(tree, schemaName, doc.schemas);
@@ -851,10 +1065,29 @@ function generateSchemaFromPbTree(tree, name, schemas) {
   return { id: name, type: 'object', properties };
 }
 
-function generateSchemaFromJson(json, name, schemas) {
+function generateSchemaFromJson(json, name, schemas, isIndexed = false) {
   if (Array.isArray(json)) {
-    const items = json.length > 0 ? generateSchemaFromJson(json[0], name + 'Item', schemas) : { type: 'string' };
-    return { type: 'array', items };
+    if (isIndexed) {
+      const properties = {};
+      json.forEach((val, idx) => {
+        const fieldNum = idx + 1;
+        const fieldKey = `field${fieldNum}`;
+        const nestedName = `${name}_f${fieldNum}`;
+        
+        if (val === null || val === undefined) {
+          properties[fieldKey] = { id: fieldNum, number: fieldNum, type: 'string', description: 'Learned (null)' };
+        } else if (Array.isArray(val)) {
+          properties[fieldKey] = { id: fieldNum, number: fieldNum, $ref: nestedName };
+          schemas[nestedName] = generateSchemaFromJson(val, nestedName, schemas, true);
+        } else {
+          properties[fieldKey] = { id: fieldNum, number: fieldNum, type: typeof val };
+        }
+      });
+      return { id: name, type: 'object', properties };
+    } else {
+      const items = json.length > 0 ? generateSchemaFromJson(json[0], name + 'Item', schemas, false) : { type: 'string' };
+      return { type: 'array', items };
+    }
   } else if (typeof json === 'object' && json !== null) {
     const properties = {};
     for (const key in json) {
@@ -1748,6 +1981,37 @@ function handlePopupMessage(msg, _sender, sendResponse) {
       sendResponse({ ok: true });
       return;
     }
+
+    case "RENAME_FIELD": {
+      if (tabId == null) return;
+      const { service, schemaName, fieldKey, newName } = msg;
+      const docEntry = tab.discoveryDocs.get(service) || globalStore.discoveryDocs.get(service);
+      
+      if (!docEntry || !docEntry.doc) return;
+      const doc = docEntry.doc;
+
+      if (schemaName === "params") {
+        // Find method and rename its parameter
+        const { methodName } = calculateMethodMetadata(new URL(msg.url || ""), service);
+        const m = doc.resources.learned?.methods[methodName] || doc.resources.probed?.methods[methodName];
+        if (m && m.parameters?.[fieldKey]) {
+          m.parameters[fieldKey].name = newName;
+          m.parameters[fieldKey].customName = true;
+          mergeToGlobal(tab);
+          sendResponse({ ok: true });
+        }
+      } else if (doc.schemas?.[schemaName]) {
+        const schema = doc.schemas[schemaName];
+        if (schema.properties?.[fieldKey]) {
+          const prop = schema.properties[fieldKey];
+          prop.name = newName;
+          prop.customName = true;
+          mergeToGlobal(tab);
+          sendResponse({ ok: true });
+        }
+      }
+      return;
+    }
   }
 }
 
@@ -2248,7 +2512,11 @@ async function executeSendRequest(tabId, msg) {
         resp.bodyEncoding === "base64"
           ? base64ToUint8(resp.body)
           : new TextEncoder().encode(resp.body);
-      const tree = pbDecodeTree(bytes);
+      const tree = pbDecodeTree(bytes, 8, (val) => {
+        if (typeof val === 'string') {
+          extractKeysFromText(tabId, val, url, "send_response_protobuf");
+        }
+      });
       bodyResult = {
         format: "protobuf_tree",
         parsed: tree,

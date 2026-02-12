@@ -3,6 +3,7 @@
 let currentTabId = null;
 let tabData = null;
 let currentSchema = null;
+let expandedReqId = null; // Track which request is currently expanded
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
@@ -41,6 +42,31 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("btn-start-fuzz").addEventListener("click", startFuzzing);
   document.getElementById("fuzz-ep-select").addEventListener("change", (e) => {
     // Optional: show schema preview for fuzzing
+  });
+
+  // Global rename handler
+  document.addEventListener("click", async (e) => {
+    if (e.target.classList.contains("btn-rename")) {
+      const { schema, key } = e.target.dataset;
+      const currentName = e.target.previousElementSibling.textContent;
+      const newName = prompt(`Rename "${currentName}" to:`, currentName);
+      if (newName && newName !== currentName) {
+        const select = document.getElementById("send-ep-select");
+        const svc = select.dataset.svc;
+        const url = document.getElementById("send-url").value;
+        await chrome.runtime.sendMessage({
+          type: "RENAME_FIELD",
+          tabId: currentTabId,
+          service: svc,
+          schemaName: schema,
+          fieldKey: key,
+          newName,
+          url
+        });
+        // Reload schema to reflect change
+        loadVirtualSchema(svc, select.dataset.discoveryId);
+      }
+    }
   });
 
   for (const btn of document.querySelectorAll(
@@ -464,6 +490,7 @@ function buildFormFields(schema, initialData = null) {
             children: null,
             enum: param.enum || null,
             location: param.location,
+            parentSchema: "params"
           },
           "param",
           0,
@@ -483,7 +510,7 @@ function buildFormFields(schema, initialData = null) {
     for (const field of schema.requestBody.fields) {
       const fieldVal = initialData ? initialData[field.number] : null;
       section.appendChild(
-        createFieldInput(field.name, field, "body", 0, fieldVal),
+        createFieldInput(field.name, { ...field, parentSchema: schema.requestBody.schemaName }, "body", 0, fieldVal),
       );
     }
     container.appendChild(section);
@@ -513,7 +540,14 @@ function createFieldInput(
   if (fieldDef.location) wrapper.dataset.location = fieldDef.location;
 
   const labelEl = el("label", "form-field-label");
-  let labelHtml = `<span class="field-name">${esc(name)}</span>`;
+  const displayName = fieldDef.name || name;
+  let labelHtml = `<span class="field-name">${esc(displayName)}</span>`;
+  
+  // Add rename button for learned/indexed fields or parameters
+  if (fieldDef.number || name.startsWith("field") || category === "param") {
+    labelHtml += ` <span class="btn-rename" title="Rename field" data-schema="${esc(fieldDef.parentSchema || 'params')}" data-key="${esc(name)}">✎</span>`;
+  }
+
   if (fieldDef.number)
     labelHtml += ` <span class="field-number">#${fieldDef.number}</span>`;
   labelHtml += ` <span class="field-type">${esc(fieldDef.type || "string")}</span>`;
@@ -542,7 +576,7 @@ function createFieldInput(
     for (const child of fieldDef.children) {
       const childVal = initialValue ? initialValue[child.number] : null;
       childContainer.appendChild(
-        createFieldInput(child.name, child, category, depth + 1, childVal),
+        createFieldInput(child.name, { ...child, parentSchema: fieldDef.$ref || fieldDef.parentSchema }, category, depth + 1, childVal),
       );
     }
     details.appendChild(childContainer);
@@ -817,8 +851,17 @@ async function sendRequest() {
       body,
     });
     renderResponse(result);
+    
+    // Collapse any open request details
+    expandedReqId = null;
+    
     // Switch to Response tab
     document.querySelector(".tab[data-panel='response']").click();
+
+    // Scroll result into view
+    setTimeout(() => {
+      document.getElementById("send-response").scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 100);
   } catch (err) {
     renderResponse({ error: err.message });
   }
@@ -1105,8 +1148,11 @@ function renderPbTree(nodes, schema = null) {
       ? `<span class="pb-type-badge">${fieldDef.type}</span>`
       : `<span class="pb-wire-badge">${node.wire === 0 ? "varint" : node.wire === 1 ? "64bit" : node.wire === 2 ? "len" : "32bit"}</span>`;
 
+    const renameAttr = fieldDef ? `data-schema="${esc(schema.id || '')}" data-key="${esc(fieldName)}"` : "";
+    const renameBtn = renameAttr ? ` <span class="btn-rename" title="Rename field" ${renameAttr}>✎</span>` : "";
+
     html += `<div class="pb-node">
-      <span class="pb-field">${esc(fieldName)}</span>
+      <span class="pb-field">${esc(fieldName)}</span>${renameBtn}
       ${typeLabel}: `;
 
     if (node.message) {
@@ -1187,13 +1233,15 @@ function findSchemaForRequest(req) {
 }
 
 function toggleRequestDetails(reqId) {
-  const card = document.querySelector(`.request-card[data-id="${reqId}"]`);
-  const details = card.querySelector(".request-details");
-  const isFolded = details.style.display === "none";
-  details.style.display = isFolded ? "block" : "none";
-  card.querySelector(".btn-expand").textContent = isFolded
-    ? "Collapse"
-    : "Details";
+  // Update global state: if clicking the same one, collapse. Otherwise, expand new one.
+  if (expandedReqId === reqId) {
+    expandedReqId = null;
+  } else {
+    expandedReqId = reqId;
+  }
+
+  // Trigger re-render to ensure only the selected one is open and all buttons are correct
+  renderResponsePanel();
 }
 
 // ─── Response Panel (Request Log) ─────────────────────────────────────────────
@@ -1208,7 +1256,9 @@ function renderResponsePanel() {
   let html = "";
   for (const req of tabData.requestLog) {
     const hasProto = !!req.decodedBody;
-    html += `<div class="card request-card" style="margin-bottom:8px" data-id="${req.id}">
+    const isExpanded = expandedReqId !== null && String(expandedReqId) === String(req.id);
+    
+    html += `<div class="card request-card" style="margin-bottom:8px; ${isExpanded ? 'border-color:#58a6ff' : ''}" data-id="${req.id}">
       <div class="card-label" style="display:flex;justify-content:space-between;align-items:center">
         <span>
           <span class="badge ${req.method}">${req.method}</span>
@@ -1222,14 +1272,19 @@ function renderResponsePanel() {
         ${hasProto ? ' <span class="badge badge-found">PROTOBUF BODY</span>' : ""}
       </div>
       
-      <div class="request-details" style="display:none; margin-top:8px; border-top:1px solid #eee; padding-top:8px">
+      <div class="request-details" style="display:${isExpanded ? 'block' : 'none'}; margin-top:8px; border-top:1px solid #eee; padding-top:8px">
         ${
-          hasProto
+          req.url.includes("batchexecute") && req.rawBodyB64
             ? `
+          <div class="card-meta">Decoded Batch Request:</div>
+          <div class="pb-container" style="padding:0">${renderBatchExecuteRequest(req)}</div>
+        `
+            : hasProto
+              ? `
           <div class="card-meta">Decoded Request Body:</div>
           <div class="pb-container">${renderPbTree(req.decodedBody, findSchemaForRequest(req))}</div>
         `
-            : ""
+              : ""
         }
         ${
           req.responseBody
@@ -1244,34 +1299,61 @@ function renderResponsePanel() {
       </div>
 
       <div class="card-actions" style="margin-top:6px;text-align:right">
-        <button class="btn-small btn-expand">Details</button>
+        <button class="btn-small btn-expand">${isExpanded ? 'Collapse' : 'Details'}</button>
         <button class="btn-small btn-replay" data-id="${req.id}">Load into Send</button>
       </div>
     </div>`;
   }
   container.innerHTML = html;
 
+  // Scroll expanded item into view only if it was just opened
+  // We use a small check to see if we should scroll
+  if (expandedReqId && document.activeElement && document.activeElement.classList.contains('btn-expand')) {
+    const expandedCard = container.querySelector(`.request-card[data-id="${expandedReqId}"]`);
+    if (expandedCard) {
+      expandedCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+
   // Attach listeners
   container.querySelectorAll(".btn-replay").forEach((b) => {
     b.onclick = (e) => {
       e.stopPropagation();
-      replayRequest(parseInt(b.dataset.id));
+      replayRequest(b.dataset.id);
     };
   });
   container.querySelectorAll(".btn-expand").forEach((b) => {
     b.onclick = () =>
-      toggleRequestDetails(parseInt(b.closest(".request-card").dataset.id));
+      toggleRequestDetails(b.closest(".request-card").dataset.id);
   });
 }
 
 function renderResponseBody(req) {
   const mimeType = req.mimeType || "";
-  if (mimeType.includes("json")) {
+  const url = new URL(req.url);
+  const isBatchExecute = url.pathname.includes("batchexecute");
+
+  // Normalize body to text if it's base64 but looks like text/json/batch
+  let textBody = req.responseBody;
+  if (req.responseBase64) {
     try {
-      const parsed = JSON.parse(req.responseBody);
+      const bytes = base64ToUint8(req.responseBody);
+      textBody = new TextDecoder().decode(bytes);
+    } catch (e) {
+      // Keep original for binary formats
+    }
+  }
+
+  if (isBatchExecute && textBody) {
+    return renderBatchExecuteResponse(textBody, req);
+  }
+
+  if (mimeType.includes("json") && textBody) {
+    try {
+      const parsed = JSON.parse(textBody);
       return `<pre class="resp-body">${esc(JSON.stringify(parsed, null, 2))}</pre>`;
     } catch (e) {
-      return `<pre class="resp-body">${esc(req.responseBody)}</pre>`;
+      return `<pre class="resp-body">${esc(textBody)}</pre>`;
     }
   }
 
@@ -1309,6 +1391,127 @@ function renderResponseBody(req) {
   return `<pre class="resp-body">${esc(req.responseBody.substring(0, 2000))}${req.responseBody.length > 2000 ? "..." : ""}</pre>`;
 }
 
+function renderBatchExecuteResponse(bodyText, req) {
+  try {
+    let cleaned = bodyText.trim();
+    if (cleaned.startsWith(")]}'")) {
+      cleaned = cleaned.substring(4).trim();
+    }
+
+    const calls = [];
+    const lines = cleaned.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (/^\d+$/.test(line) && i + 1 < lines.length) {
+        try {
+          const chunk = JSON.parse(lines[i + 1]);
+          if (Array.isArray(chunk)) {
+            for (const item of chunk) {
+              if (item[0] === "wrb.fr") {
+                const [tag, rpcId, innerJson] = item;
+                let data = null;
+                try { data = JSON.parse(innerJson); } catch(e) { data = innerJson; }
+                calls.push({ rpcId, data: data });
+              }
+            }
+          }
+          i++;
+        } catch (e) {}
+      }
+    }
+
+    if (calls.length === 0) return `<pre class="resp-body">${esc(bodyText)}</pre>`;
+
+    let html = '<div class="pb-tree">';
+    const svc = req.service;
+    const doc = tabData?.discoveryDocs?.[svc]?.doc;
+
+    for (const call of calls) {
+      const nodes = jspbToTree(Array.isArray(call.data) ? call.data : [call.data]);
+      let schema = null;
+      if (doc) {
+        const schemaName = `${call.rpcId}Response`;
+        schema = doc.schemas?.[schemaName];
+      }
+
+      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+        <div class="card-label">RPC ID: <strong>${esc(call.rpcId)}</strong></div>
+        <div class="pb-container" style="margin-bottom:0;box-shadow:none;background:transparent;border:none;padding:0">
+          ${renderPbTree(nodes, schema)}
+        </div>
+      </div>`;
+    }
+    html += '</div>';
+    return html;
+  } catch (e) {
+    return `<pre class="resp-body">${esc(bodyText)}</pre>`;
+  }
+}
+
+function renderBatchExecuteRequest(req) {
+  try {
+    const rawBody = base64ToUint8(req.rawBodyB64);
+    const text = new TextDecoder().decode(rawBody);
+    const params = new URLSearchParams(text);
+    const fReq = params.get("f.req");
+    if (!fReq) return `<pre class="resp-body">${esc(text)}</pre>`;
+
+    const outer = JSON.parse(fReq);
+    let html = '<div class="pb-tree">';
+    
+    const svc = req.service;
+    const doc = tabData?.discoveryDocs?.[svc]?.doc;
+
+    for (const call of outer[0]) {
+      const [rpcId, innerJson] = call;
+      let data = null;
+      try { data = JSON.parse(innerJson); } catch(e) { data = innerJson; }
+      
+      const nodes = jspbToTree(Array.isArray(data) ? data : [data]);
+      
+      // Try to find schema
+      let schema = null;
+      if (doc) {
+        const schemaName = `${rpcId}Request`;
+        schema = doc.schemas?.[schemaName];
+      }
+
+      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+        <div class="card-label">RPC ID: <strong>${esc(rpcId)}</strong></div>
+        <div class="pb-container" style="margin-bottom:0;box-shadow:none;background:transparent;border:none;padding:0">
+          ${renderPbTree(nodes, schema)}
+        </div>
+      </div>`;
+    }
+    html += '</div>';
+    return html;
+  } catch (e) {
+    return `<pre class="resp-body">Failed to parse batch request: ${esc(e.message)}</pre>`;
+  }
+}
+
+function parseBatchExecuteRequestFromB64(b64) {
+  try {
+    const bytes = base64ToUint8(b64);
+    const text = new TextDecoder().decode(bytes);
+    const params = new URLSearchParams(text);
+    const fReq = params.get("f.req");
+    if (!fReq) return null;
+
+    const outer = JSON.parse(fReq);
+    const calls = [];
+    for (const call of outer[0]) {
+      const [rpcId, innerJson] = call;
+      let data = null;
+      try { data = JSON.parse(innerJson); } catch(e) { data = innerJson; }
+      calls.push({ rpcId, data });
+    }
+    return calls;
+  } catch (e) {
+    return null;
+  }
+}
+
 function getStatusBadge(status) {
   if (status === "pending")
     return '<span class="badge badge-pending">pending</span>';
@@ -1321,8 +1524,8 @@ function getStatusBadge(status) {
 }
 
 function replayRequest(reqId) {
-  // Use loose equality because reqId from dataset might be integer or string
-  const req = tabData.requestLog.find((r) => r.id == reqId);
+  // Use string comparison for IDs
+  const req = tabData.requestLog.find((r) => String(r.id) === String(reqId));
   if (!req) {
     console.error(`[Replay] Request ${reqId} not found in log`);
     return;
@@ -1333,44 +1536,77 @@ function replayRequest(reqId) {
   let found = false;
 
   if (epSelect) {
+    // Check if it's a batchexecute request
+    const isBatch = req.url.includes("batchexecute");
+    let targetRpcId = null;
+    
+    if (isBatch && req.rawBodyB64) {
+      const calls = parseBatchExecuteRequestFromB64(req.rawBodyB64);
+      if (calls && calls.length > 0) {
+        targetRpcId = calls[0].rpcId; // Primary RPC ID
+      }
+    }
+
     for (const opt of epSelect.options) {
       if (opt.dataset.isVirtual === "true" && opt.dataset.svc === req.service) {
-        // Match by methodId or by path template if available
+        // 1. For batch, attempt strict RPC ID match first
+        if (isBatch && targetRpcId) {
+          if (opt.dataset.discoveryId && opt.dataset.discoveryId.endsWith("." + targetRpcId)) {
+            opt.selected = true;
+            found = true;
+            break;
+          }
+          // If it's a batch request but this option isn't the right RPC ID, 
+          // skip further checks for this option to avoid incorrect path matching.
+          continue;
+        }
+
+        // 2. Match by methodId specifically
         if (req.methodId && opt.dataset.discoveryId === req.methodId) {
           opt.selected = true;
           found = true;
           break;
         }
 
-        // Fallback for path-based matching (strip query params and domain)
-        try {
-          const reqPath = new URL(req.url).pathname;
-          if (opt.dataset.path && reqPath.endsWith(opt.dataset.path)) {
-            opt.selected = true;
-            found = true;
-            break;
-          }
-        } catch (e) {}
+        // 3. Fallback for path-based matching (Non-batch only)
+        if (!isBatch) {
+          try {
+            const reqPath = new URL(req.url).pathname;
+            if (opt.dataset.path && reqPath.endsWith(opt.dataset.path)) {
+              opt.selected = true;
+              found = true;
+              break;
+            }
+          } catch (e) {}
+        }
       }
     }
 
     if (found) {
-      // Trigger the selection handler to load schema
-      // We pass initialData to loadVirtualSchema via a modified onSendEndpointSelected or direct call
       const svc = req.service;
-      const discoveryId =
-        req.methodId ||
-        epSelect.options[epSelect.selectedIndex].dataset.discoveryId;
+      const selectedOpt = epSelect.options[epSelect.selectedIndex];
+      const discoveryId = selectedOpt.dataset.discoveryId;
 
       epSelect.dataset.svc = svc;
       epSelect.dataset.discoveryId = discoveryId;
 
-      const initialData = pbTreeToMap(req.decodedBody);
+      // Extract the correct initial data for the selected RPC call
+      let initialData = null;
+      if (isBatch && req.rawBodyB64) {
+        const calls = parseBatchExecuteRequestFromB64(req.rawBodyB64);
+        if (calls && calls.length > 0) {
+          initialData = jspbToTree(Array.isArray(calls[0].data) ? calls[0].data : [calls[0].data]);
+          initialData = pbTreeToMap(initialData);
+        }
+      } else {
+        initialData = pbTreeToMap(req.decodedBody);
+      }
+
       loadVirtualSchema(svc, discoveryId, initialData);
     }
   }
 
-  // Populate SEND tab (override URL if manual replay logic needed it specifically)
+  // Populate SEND tab
   document.getElementById("send-url").value = req.url;
   document.getElementById("send-method").value = req.method;
 

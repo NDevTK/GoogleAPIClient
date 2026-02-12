@@ -567,6 +567,19 @@ details summary:hover { color: #58a6ff; }
 .field-type { color: #f0883e; font-size: 10px; margin-left: 4px; }
 .field-required { color: #f85149; font-size: 10px; font-weight: 600; margin-left: 4px; }
 .field-repeated { color: #d2a8ff; font-size: 10px; margin-left: 4px; }
+
+.btn-rename {
+  font-size: 10px;
+  cursor: pointer;
+  color: #484f58;
+  margin-left: 4px;
+  opacity: 0.6;
+}
+.btn-rename:hover {
+  opacity: 1;
+  color: #58a6ff;
+}
+
 .field-description {
   color: #484f58;
   font-size: 10px;
