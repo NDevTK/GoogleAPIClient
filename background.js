@@ -684,6 +684,41 @@ chrome.webRequest.onHeadersReceived.addListener(
   ["responseHeaders"],
 );
 
+function calculateMethodMetadata(urlObj, interfaceName) {
+  const segments = urlObj.pathname.split('/').filter(Boolean);
+  const interfaceParts = interfaceName.split('/');
+  
+  // Method segments are everything after the interface prefix
+  // If interface is "example.com/api/v1" and path is "/api/v1/users/get"
+  // startIdx should skip "api" and "v1".
+  
+  const hostname = urlObj.hostname;
+  let startIdx = 0;
+  if (interfaceName.startsWith(hostname)) {
+    startIdx = interfaceParts.length - 1;
+  }
+
+  let methodSegments = segments.slice(startIdx);
+  
+  // Strip segments that look like hashes or long ID lists
+  methodSegments = methodSegments.filter(s => {
+    if (s.length > 32) return false; 
+    if (s.includes('=') && s.includes(',')) return false; 
+    return true;
+  });
+
+  let methodName = methodSegments.join('_') || 'root';
+  
+  // If it's a gRPC-style path, use the actual method name
+  if (urlObj.pathname.includes('$rpc')) {
+    methodName = segments[segments.length - 1];
+  }
+  
+  const methodId = `${interfaceName.replace(/\//g, '.')}.${methodName}`;
+  
+  return { methodName, methodId };
+}
+
 // ─── Smart Learning ──────────────────────────────────────────────────────────
 
 function learnFromRequest(tabId, interfaceName, details, headers) {
@@ -712,30 +747,7 @@ function learnFromRequest(tabId, interfaceName, details, headers) {
   const doc = docEntry.doc;
   if (!doc.resources.learned) doc.resources.learned = { methods: {} };
 
-  const segments = url.pathname.split('/').filter(Boolean);
-  
-  // Heuristic for method name: 
-  // Look for segments AFTER the interface name
-  const interfaceParts = interfaceName.split('/');
-  const startIdx = interfaceParts.length - 1;
-  let methodSegments = segments.slice(startIdx);
-  
-  // Strip segments that look like hashes or long ID lists
-  methodSegments = methodSegments.filter(s => {
-    if (s.length > 32) return false; // Likely a hash/token
-    if (s.includes('=') && s.includes(',')) return false; // Likely module list
-    return true;
-  });
-
-  let methodName = methodSegments.join('_') || 'root';
-  
-  // If it's a gRPC-style path, keep it cleaner
-  if (url.pathname.includes('$rpc')) {
-    const rpcParts = url.pathname.split('/');
-    methodName = rpcParts[rpcParts.length - 1];
-  }
-  
-  const methodId = `${interfaceName.replace(/\//g, '.')}.${methodName}`;
+  const { methodName, methodId } = calculateMethodMetadata(url, interfaceName);
   
   if (!doc.resources.learned.methods[methodName]) {
     doc.resources.learned.methods[methodName] = {
@@ -786,11 +798,7 @@ function learnFromResponse(tabId, interfaceName, entry) {
   
   const tab = getTab(tabId);
   const url = new URL(entry.url);
-  const segments = url.pathname.split('/').filter(Boolean);
-  let methodName = segments[segments.length - 1] || 'root';
-  if (url.pathname.includes('$rpc')) {
-    methodName = url.pathname.split('/').slice(-2).join('_');
-  }
+  const { methodName } = calculateMethodMetadata(url, interfaceName);
 
   const docEntry = tab.discoveryDocs.get(interfaceName);
   if (!docEntry || !docEntry.doc) return;
@@ -1340,14 +1348,9 @@ function updateOrCreateVirtualDoc(service, seedUrl, probeResult, existingDoc) {
   const origin = `${u.protocol}//${u.host}`;
   const fullPath = u.pathname.substring(1); // remove leading /
 
-  // Heuristic for method name: last non-empty segment, or "request"
-  // e.g. /maps/api/staticmap -> staticmap
-  const segments = u.pathname.split("/").filter(Boolean);
-  const methodName = segments[segments.length - 1] || "request";
-  // Make unique if collision? For now assume unique paths map to unique methods
-  const methodId = `${service}.${methodName}`;
-  const schemaName = `${methodName}Request`;
-  const responseSchemaName = `${methodName}Response`;
+  const { methodName, methodId } = calculateMethodMetadata(u, service);
+  const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Request`;
+  const responseSchemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Response`;
 
   let doc = existingDoc
     ? JSON.parse(JSON.stringify(existingDoc))
