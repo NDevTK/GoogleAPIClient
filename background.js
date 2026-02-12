@@ -11,6 +11,8 @@ const state = {
   tabs: new Map(),
   // Map<tabId, boolean>
   attachedTabs: new Map(),
+  // Map<requestId, url> for transient key scanning (scripts etc)
+  tempRequestMap: new Map(),
 };
 
 // ─── Debugger Management ─────────────────────────────────────────────────────
@@ -70,23 +72,26 @@ chrome.debugger.onEvent.addListener(async (source, method, params) => {
   if (method === "Network.loadingFinished") {
     const { requestId } = params;
     const tab = getTab(tabId);
-    const entry = tab.requestLog.find(r => r.id === requestId);
-    if (!entry) return;
-
+    
     const bodyData = await DebuggerManager.getResponseBody(tabId, requestId);
     if (bodyData) {
-      entry.responseBody = bodyData.body;
-      entry.responseBase64 = bodyData.base64Encoded;
-      
-      // 1. Learn keys from the response body!
+      // Always scan for keys in captured bodies (scripts, JSON, etc)
       if (!bodyData.base64Encoded) {
-        extractKeysFromText(tabId, bodyData.body, entry.url, "response_body");
+        const url = state.tempRequestMap.get(requestId);
+        extractKeysFromText(tabId, bodyData.body, url, "response_body");
       }
+      state.tempRequestMap.delete(requestId);
 
-      // 2. Learn schema from the response!
-      const service = entry.service || extractInterfaceName(new URL(entry.url));
-      learnFromResponse(tabId, service, entry);
-      notifyPopup(tabId);
+      const entry = tab.requestLog.find(r => r.id === requestId);
+      if (entry) {
+        entry.responseBody = bodyData.body;
+        entry.responseBase64 = bodyData.base64Encoded;
+        
+        // Learn schema from the response!
+        const service = entry.service || extractInterfaceName(new URL(entry.url));
+        learnFromResponse(tabId, service, entry);
+        notifyPopup(tabId);
+      }
     }
   }
 });
@@ -438,15 +443,25 @@ chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
     const url = new URL(details.url);
+    
+    // Auto-attach debugger for response capture on APIs AND scripts
+    const isScript = url.pathname.endsWith('.js') || url.pathname.includes('/xjs/');
+    if (isApiRequest(url, details) || isScript) {
+      DebuggerManager.attach(details.tabId);
+      state.tempRequestMap.set(details.requestId, details.url);
+      // Prune map if it gets too large
+      if (state.tempRequestMap.size > 200) {
+        const firstKey = state.tempRequestMap.keys().next().value;
+        state.tempRequestMap.delete(firstKey);
+      }
+    }
+
     if (!isApiRequest(url, details)) return;
 
     // Skip internal probe requests (req2proto) to avoid interception loops
     if (url.searchParams.has("_probe")) return;
 
     const tab = getTab(details.tabId);
-    
-    // Auto-attach debugger for response capture
-    DebuggerManager.attach(details.tabId);
 
     // Capture initiator as distinct from Origin header (more reliable for context)
     if (details.initiator) {
