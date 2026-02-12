@@ -106,8 +106,7 @@ function renderDataPanel() {
   servicesContainer.innerHTML = "";
 
   const keys = tabData?.apiKeys ? Object.entries(tabData.apiKeys) : [];
-  const endpoints = tabData?.endpoints ? Object.entries(tabData.endpoints) : [];
-  const hasData = keys.length > 0 || endpoints.length > 0;
+  const hasData = keys.length > 0;
   empty.style.display = hasData ? "none" : "block";
 
   // Keys section
@@ -151,83 +150,6 @@ function renderDataPanel() {
       html += `</div>`;
     }
     keysContainer.innerHTML = html;
-  }
-
-  // Services section (endpoints grouped by service + inline discovery)
-  if (endpoints.length) {
-    const grouped = {};
-    for (const [key, ep] of endpoints) {
-      const svc = ep.service || "unknown";
-      if (!grouped[svc]) grouped[svc] = [];
-      grouped[svc].push({ key, ...ep });
-    }
-
-    let html = '<div class="section-header">Services &amp; Endpoints</div>';
-
-    for (const [svc, eps] of Object.entries(grouped)) {
-      const svcScopes = tabData?.scopes?.[svc];
-      const disc = tabData?.discoveryDocs?.[svc];
-
-      // Service header with discovery badge
-      let discBadge = "";
-      if (disc) {
-        if (disc.status === "found")
-          discBadge = ' <span class="badge badge-found">discovery</span>';
-        else if (disc.status === "pending")
-          discBadge = ' <span class="badge badge-pending">fetching...</span>';
-        else if (disc.status === "not_found")
-          discBadge = ' <span class="badge badge-notfound">no discovery</span>';
-      }
-
-      html += `<div class="card">
-        <div class="card-label">${esc(svc)} <span class="badge badge-status">${eps.length}</span>${discBadge}</div>`;
-
-      if (svcScopes?.length) {
-        html += `<div class="card-meta scopes-row">Scopes: ${svcScopes.map((s) => `<code>${esc(s)}</code>`).join(" ")}</div>`;
-      }
-
-      // Inline discovery summary
-      if (disc?.status === "found" && disc.summary) {
-        const s = disc.summary;
-        let accessNote = "";
-        if (disc.method === "POST")
-          accessNote =
-            ' <span class="badge badge-status">via POST+Override</span>';
-        const keyNote = disc.apiKey
-          ? ` <span class="badge badge-source" title="${esc(disc.apiKey)}">key: ${esc(disc.apiKey.slice(0, 12))}...</span>`
-          : "";
-
-        html += `<details class="discovery-inline"><summary class="discovery-summary">${esc(s.title || svc)} <span class="badge badge-source">${esc(s.version || "")}</span>${accessNote}${keyNote}</summary>`;
-        html += `<div class="card-meta">
-          ${s.baseUrl ? `Base: ${esc(s.baseUrl)}` : ""}
-          &middot; ${s.resourceCount} resources &middot; ${s.methodCount} methods
-          &middot; ${s.schemas?.length || 0} schemas
-        </div>`;
-        if (s.auth?.scopes?.length) {
-          html += `<div class="card-meta scopes-row">Scopes: ${s.auth.scopes.map((sc) => `<code>${esc(sc)}</code>`).join(", ")}</div>`;
-        }
-        for (const [rName, methods] of Object.entries(s.resources || {})) {
-          const methodRows = methods
-            .map(
-              (m) =>
-                `<div class="method-row clickable-method" data-svc="${esc(svc)}" data-id="${esc(m.id)}" data-path="${esc(m.path)}" data-method="${esc(m.httpMethod)}">
-              <span class="badge badge-method">${esc(m.httpMethod)}</span>
-              <span class="method-id">${esc(m.id)}</span>
-              ${m.scopes?.length ? `<span style="color:#484f58;font-size:10px"> [${m.scopes.length} scope(s)]</span>` : ""}
-            </div>`,
-            )
-            .join("");
-          html += `<details class="resource-group">
-            <summary class="resource-name">${esc(rName)} (${methods.length})</summary>
-            ${methodRows}
-          </details>`;
-        }
-        html += `</details>`;
-      }
-
-      html += `</div>`;
-    }
-    servicesContainer.innerHTML = html;
   }
 }
 
