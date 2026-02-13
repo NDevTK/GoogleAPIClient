@@ -478,7 +478,7 @@ loadGlobalStore();
 
 const API_KEY_RE = /AIzaSy[\w-]{33}/g;
 
-function isApiRequest(url, details) {
+function isApiRequest(url, details, headers = {}) {
   // Ignore common non-API static assets
   const ext = url.pathname.split('.').pop().toLowerCase();
   const staticExts = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'css', 'js', 'woff', 'woff2', 'ttf', 'otf', 'ico', 'map'];
@@ -494,20 +494,24 @@ function isApiRequest(url, details) {
   ];
   if (noisePaths.some(p => url.pathname.includes(p))) return false;
 
-  // Look for API indicators
+  // Look for API indicators in URL
   if (url.hostname.includes('api')) return true;
   if (/\bv\d+\b/.test(url.pathname)) return true; // versioning like /v1/
   if (url.pathname.includes('graphql')) return true;
   if (url.pathname.includes('$rpc')) return true;
   if (url.searchParams.has('alt') && url.searchParams.get('alt') === 'json') return true;
   
-  if (details.method !== 'GET') return true; // Most POST/PUT/DELETE are APIs
-  if (details.type === 'xmlhttprequest' || details.type === 'fetch') {
-    // If it's XHR/Fetch but not a GET, it's definitely an API.
-    // If it IS a GET, check if it's likely returning JSON/Data
-    const isDataPath = /json|data|query|search|async|rpc/.test(url.pathname);
-    if (isDataPath) return true;
+  // Method indicator
+  if (details.method !== 'GET') return true; 
+
+  // Header indicators (if provided)
+  if (headers['x-requested-with'] || headers['authorization'] || headers['x-api-key'] || headers['x-goog-api-key']) {
+    return true;
   }
+
+  // Heuristic: If it's a GET, check if the path looks like a data endpoint
+  const isDataPath = /json|data|query|search|async|rpc/.test(url.pathname);
+  if (isDataPath) return true;
 
   return false;
 }
@@ -587,6 +591,9 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (details.tabId < 0) return;
     const url = new URL(details.url);
     
+    // Skip internal probe requests (req2proto/discovery) immediately
+    if (url.searchParams.has("_probe")) return;
+
     // Auto-attach debugger for response capture on APIs and relevant scripts.
     const isScript = url.pathname.endsWith('.js') || url.pathname.includes('/xjs/');
     const isApi = isApiRequest(url, details);
@@ -601,9 +608,6 @@ chrome.webRequest.onBeforeRequest.addListener(
     }
 
     if (!isApi) return;
-
-    // Skip internal probe requests (req2proto) to avoid interception loops
-    if (url.searchParams.has("_probe")) return;
 
     const tab = getTab(details.tabId);
 
@@ -659,6 +663,9 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     if (details.tabId < 0) return;
     const url = new URL(details.url);
 
+    // Skip internal probe requests (req2proto/discovery) early
+    if (url.searchParams.has("_probe")) return;
+
     // ─── CRITICAL: Universal Key Scanning ───
     // Scan EVERY request (scripts, assets, etc) for keys in URL and Headers
     // before any early exits.
@@ -667,7 +674,12 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       extractKeysFromText(details.tabId, `${h.name}: ${h.value}`, details.url, "header");
     }
 
-    if (!isApiRequest(url, details)) return;
+    const headerMap = {};
+    for (const h of details.requestHeaders || []) {
+      headerMap[h.name.toLowerCase()] = h.value;
+    }
+
+    if (!isApiRequest(url, details, headerMap)) return;
 
     // Skip internal probe requests
     if (url.searchParams.has("_probe")) return;
@@ -683,7 +695,6 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       }
     }
 
-    const headerMap = {};
     let authorization = null;
     let cookie = null;
     let contentType = null;
@@ -697,9 +708,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       if (name === "cookie") {
         cookie = "[PRESENT]";
         headerMap[name] = "[REDACTED]";
-      } else {
-        headerMap[name] = h.value;
-      }
+      } 
 
       if (name === "authorization") authorization = h.value;
       if (name === "origin") origin = h.value;
@@ -710,6 +719,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 
     // Store API key with service/host tracking
     const service = extractInterfaceName(url);
+    const discoveryStatus = tab.discoveryDocs.get(service);
     
     // Update auth context
     if (authorization || cookie) {
@@ -738,9 +748,27 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     
     learnFromRequest(details.tabId, service, entry, headerMap);
 
-    // 2. Automatic Background Discovery
+    // 2. Proactive Active Probing for Protobuf
+    // If it's a Protobuf request, check if we already have a detailed schema.
+    // If not, trigger a probe to leak field names/numbers.
+    const isProtobuf = (headerMap["content-type"] || "").includes("protobuf") || url.pathname.includes("$rpc");
+    if (isProtobuf && details.method === "POST") {
+      const doc = discoveryStatus?.doc;
+      const match = doc ? findDiscoveryMethod(doc, url.pathname, details.method) : null;
+      
+      // If no match OR method is in "learned" resource (meaning it lacks probed field numbers)
+      const isLearnedOnly = match && discoveryStatus.doc.resources?.learned?.methods[match.method.id.split('.').pop()];
+      
+      if (!match || isLearnedOnly) {
+        console.log(`[Prober] Undocumented Protobuf method detected: ${url.pathname}. Triggering active probe...`);
+        const keysForService = collectKeysForService(tab, service, url.hostname);
+        if (apiKey && !keysForService.includes(apiKey)) keysForService.push(apiKey);
+        performProbeAndPatch(details.tabId, service, details.url, apiKey || keysForService[0] || null);
+      }
+    }
+
+    // 3. Automatic Background Discovery
     // If we haven't tried to find an official discovery doc for this service yet, do it now.
-    const discoveryStatus = tab.discoveryDocs.get(service);
     if (!discoveryStatus || discoveryStatus.status === "not_found") {
       if (!discoveryStatus) {
         tab.discoveryDocs.set(service, { status: "pending", seedUrl: details.url });
@@ -759,7 +787,6 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 
     // Log request for Response tab
     const logContentType = headerMap["content-type"] || "";
-    const isProtobuf = logContentType.includes("protobuf") || logContentType.includes("grpc");
 
     if (!entry) {
       entry = {
@@ -818,8 +845,13 @@ chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     if (details.tabId < 0) return;
 
+    const headerMap = {};
+    for (const h of details.responseHeaders || []) {
+      headerMap[h.name.toLowerCase()] = h.value;
+    }
+
     const url = new URL(details.url);
-    if (!isApiRequest(url, details)) return;
+    if (!isApiRequest(url, details, headerMap)) return;
 
     const tab = getTab(details.tabId);
     const service = extractInterfaceName(url);
