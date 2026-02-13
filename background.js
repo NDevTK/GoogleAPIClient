@@ -49,6 +49,7 @@ const DebuggerManager = {
       );
       return result; // { body, base64Encoded }
     } catch (err) {
+      console.warn("[Debugger] Get response body failed:", err);
       return null;
     }
   },
@@ -147,85 +148,6 @@ const KEY_PATTERNS = [
 ];
 
 // ─── batchexecute Decoding ──────────────────────────────────────────────────
-
-function parseBatchExecuteRequest(bodyText) {
-  try {
-    // Usually f.req=[[[rpcid, inner_json, null, "generic"]]]
-    const params = new URLSearchParams(bodyText);
-    const fReq = params.get("f.req");
-    if (!fReq) return null;
-
-    const outer = JSON.parse(fReq);
-    if (!Array.isArray(outer)) return null;
-
-    const calls = [];
-    for (const call of outer[0]) {
-      const [rpcId, innerJson] = call;
-      let decodedInner = null;
-      try {
-        decodedInner = JSON.parse(innerJson);
-      } catch (e) {
-        decodedInner = innerJson; // Fallback to raw string
-      }
-      calls.push({ rpcId, data: decodedInner });
-    }
-    return calls;
-  } catch (e) {
-    return null;
-  }
-}
-
-function parseBatchExecuteResponse(bodyText) {
-  try {
-    // Strip security prefix )]}'
-    let cleaned = bodyText.trim();
-    if (cleaned.startsWith(")]}'")) {
-      cleaned = cleaned.substring(4).trim();
-    }
-
-    // batchexecute often has length-prefixed chunks
-    // Example: 123\n[[...]]\n
-    const chunks = [];
-    const lines = cleaned.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (/^\d+$/.test(line)) {
-        // Next line is the JSON chunk
-        if (i + 1 < lines.length) {
-          try {
-            const chunk = JSON.parse(lines[i + 1]);
-            chunks.push(chunk);
-            i++; // skip next line
-          } catch (e) {}
-        }
-      } else if (line.startsWith("[")) {
-        try {
-          chunks.push(JSON.parse(line));
-        } catch (e) {}
-      }
-    }
-
-    const results = [];
-    for (const chunk of chunks) {
-      if (!Array.isArray(chunk)) continue;
-      for (const item of chunk) {
-        if (item[0] === "wrb.fr") {
-          const [tag, rpcId, innerJson] = item;
-          let decodedInner = null;
-          try {
-            decodedInner = JSON.parse(innerJson);
-          } catch (e) {
-            decodedInner = innerJson;
-          }
-          results.push({ rpcId, data: decodedInner });
-        }
-      }
-    }
-    return results;
-  } catch (e) {
-    return null;
-  }
-}
 
 function extractKeysFromText(tabId, text, sourceUrl, sourceContext, depth = 0) {
   if (!text || depth > 3) return; // Prevent infinite recursion
@@ -369,7 +291,9 @@ async function saveGlobalStore() {
   };
   try {
     await chrome.storage.local.set({ gapiStore: serialized });
-  } catch (_) {}
+  } catch (_) {
+    console.error("[Storage] Save failed:", _);
+  }
 }
 
 async function loadGlobalStore() {
@@ -407,7 +331,9 @@ async function loadGlobalStore() {
         globalStore.scopes.set(k, v);
       }
     }
-  } catch (_) {}
+  } catch (_) {
+    console.error("[Storage] Load failed:", _);
+  }
 }
 
 function mergeToGlobal(tab) {
@@ -480,7 +406,9 @@ async function clearGlobalStore() {
   globalStore.scopes.clear();
   try {
     await chrome.storage.local.remove("gapiStore");
-  } catch (_) {}
+  } catch (_) {
+    console.error("[Storage] Clear failed:", _);
+  }
 }
 
 // Load persisted data on startup
@@ -2804,38 +2732,6 @@ async function executeSendRequest(tabId, msg) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function jspbToTree(arr) {
-  const nodes = [];
-  if (!Array.isArray(arr)) return nodes;
-
-  // Heuristic: same mapping logic as popup.js
-  const offset = arr.length > 1 && arr[0] === null ? 0 : 1;
-
-  arr.forEach((val, idx) => {
-    if (val === null || val === undefined) return;
-
-    const fieldNum = idx + offset;
-    let node = {
-      field: fieldNum,
-      value: val,
-      isJspb: true,
-      wire: 2, // Default to length-delimited for JS values
-    };
-
-    if (Array.isArray(val)) {
-      node.message = jspbToTree(val);
-      node.wire = 2;
-    } else if (typeof val === "number") {
-      node.wire = Number.isInteger(val) ? 0 : 5; // varint vs 32-bit float? Heuristic.
-    } else if (typeof val === "boolean") {
-      node.wire = 0;
-    }
-
-    nodes.push(node);
-  });
-  return nodes;
-}
 
 function notifyPopup(tabId) {
   chrome.runtime.sendMessage({ type: "STATE_UPDATED", tabId }).catch(() => {});

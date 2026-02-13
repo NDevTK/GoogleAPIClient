@@ -327,38 +327,6 @@ function renderFieldsTable(fields, depth) {
   return html;
 }
 
-function jspbToTree(arr) {
-  const nodes = [];
-  if (!Array.isArray(arr)) return nodes;
-
-  // Heuristic: same mapping logic as background.js
-  const offset = arr.length > 1 && arr[0] === null ? 0 : 1;
-
-  arr.forEach((val, idx) => {
-    if (val === null || val === undefined) return;
-
-    const fieldNum = idx + offset;
-    let node = {
-      field: fieldNum,
-      value: val,
-      isJspb: true,
-      wire: 2, // Default to length-delimited
-    };
-
-    if (Array.isArray(val)) {
-      node.message = jspbToTree(val);
-      node.wire = 2;
-    } else if (typeof val === "number") {
-      node.wire = Number.isInteger(val) ? 0 : 5;
-    } else if (typeof val === "boolean") {
-      node.wire = 0;
-    }
-
-    nodes.push(node);
-  });
-  return nodes;
-}
-
 // ─── Send Panel: Endpoint Selection + Schema ─────────────────────────────────
 
 function onSendEndpointSelected() {
@@ -846,7 +814,9 @@ async function sendRequest() {
         }
         url = urlObj.toString();
         document.getElementById("send-url").value = url;
-      } catch (_) {}
+      } catch (_) {
+        console.warn("[Send] URL construction failed:", _);
+      }
     }
     body = {
       mode: "form",
@@ -1246,93 +1216,33 @@ function renderResponsePanel() {
 }
 
 function renderBatchExecuteResponse(bodyText, req, overrideDoc = null) {
-  try {
-    let cleaned = bodyText.trim();
-    if (cleaned.startsWith(")]}'")) {
-      cleaned = cleaned.substring(4).trim();
-    }
-
-    const calls = [];
-    const lines = cleaned.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (/^\d+$/.test(line) && i + 1 < lines.length) {
-        try {
-          const chunk = JSON.parse(lines[i + 1]);
-          if (Array.isArray(chunk)) {
-            for (const item of chunk) {
-              if (item[0] === "wrb.fr") {
-                const [tag, rpcId, innerJson] = item;
-                let data = null;
-                try {
-                  data = JSON.parse(innerJson);
-                } catch (e) {
-                  data = innerJson;
-                }
-                calls.push({ rpcId, data: data });
-              }
-            }
-          }
-          i++;
-        } catch (e) {}
-      }
-    }
-
-    if (calls.length === 0)
-      return `<pre class="resp-body">${esc(bodyText)}</pre>`;
-
-    let html = '<div class="pb-tree">';
-    const svc = req.service;
-    const doc = overrideDoc || tabData?.discoveryDocs?.[svc]?.doc;
-
-    for (const call of calls) {
-      const nodes = jspbToTree(
-        Array.isArray(call.data) ? call.data : [call.data],
-      );
-      let schema = null;
-      if (doc) {
-        const schemaName = `${call.rpcId}Response`;
-        schema = doc.schemas?.[schemaName];
-      }
-
-      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
-        <div class="card-label">RPC ID: <strong>${esc(call.rpcId)}</strong></div>
-        <div class="pb-container" style="margin-bottom:0;box-shadow:none;background:transparent;border:none;padding:0">
-          ${renderPbTree(nodes, schema)}
-        </div>
-      </div>`;
-    }
-    html += "</div>";
-    return html;
-  } catch (e) {
+  const calls = parseBatchExecuteResponse(bodyText);
+  if (!calls || calls.length === 0)
     return `<pre class="resp-body">${esc(bodyText)}</pre>`;
-  }
-}
 
-function parseBatchExecuteRequestFromB64(b64) {
-  try {
-    const bytes = base64ToUint8(b64);
-    const text = new TextDecoder().decode(bytes);
-    const params = new URLSearchParams(text);
-    const fReq = params.get("f.req");
-    if (!fReq) return null;
+  let html = '<div class="pb-tree">';
+  const svc = req.service;
+  const doc = overrideDoc || tabData?.discoveryDocs?.[svc]?.doc;
 
-    const outer = JSON.parse(fReq);
-    const calls = [];
-    for (const call of outer[0]) {
-      const [rpcId, innerJson] = call;
-      let data = null;
-      try {
-        data = JSON.parse(innerJson);
-      } catch (e) {
-        data = innerJson;
-      }
-      calls.push({ rpcId, data });
+  for (const call of calls) {
+    const nodes = jspbToTree(
+      Array.isArray(call.data) ? call.data : [call.data],
+    );
+    let schema = null;
+    if (doc) {
+      const schemaName = `${call.rpcId}Response`;
+      schema = doc.schemas?.[schemaName];
     }
-    return calls;
-  } catch (e) {
-    return null;
+
+    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      <div class="card-label">RPC ID: <strong>${esc(call.rpcId)}</strong></div>
+      <div class="pb-container" style="margin-bottom:0;box-shadow:none;background:transparent;border:none;padding:0">
+        ${renderPbTree(nodes, schema)}
+      </div>
+    </div>`;
   }
+  html += "</div>";
+  return html;
 }
 
 function getStatusBadge(status) {
@@ -1364,7 +1274,9 @@ function replayRequest(reqId) {
     let targetRpcId = null;
 
     if (isBatch && req.rawBodyB64) {
-      const calls = parseBatchExecuteRequestFromB64(req.rawBodyB64);
+      const bytes = base64ToUint8(req.rawBodyB64);
+      const text = new TextDecoder().decode(bytes);
+      const calls = parseBatchExecuteRequest(text);
       if (calls && calls.length > 0) {
         targetRpcId = calls[0].rpcId; // Primary RPC ID
       }
@@ -1403,7 +1315,9 @@ function replayRequest(reqId) {
               found = true;
               break;
             }
-          } catch (e) {}
+          } catch (e) {
+            console.warn("[Replay] URL path resolution failed:", e);
+          }
         }
       }
     }
@@ -1419,7 +1333,9 @@ function replayRequest(reqId) {
       // Extract the correct initial data for the selected RPC call
       let initialData = null;
       if (isBatch && req.rawBodyB64) {
-        const calls = parseBatchExecuteRequestFromB64(req.rawBodyB64);
+        const bytes = base64ToUint8(req.rawBodyB64);
+        const text = new TextDecoder().decode(bytes);
+        const calls = parseBatchExecuteRequest(text);
         if (calls && calls.length > 0) {
           initialData = jspbToTree(
             Array.isArray(calls[0].data) ? calls[0].data : [calls[0].data],
