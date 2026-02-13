@@ -3,6 +3,8 @@
 let currentTabId = null;
 let tabData = null;
 let currentSchema = null;
+let currentRequestUrl = "";
+let currentRequestMethod = "POST";
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
@@ -60,7 +62,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (newName && newName !== currentName) {
         const select = document.getElementById("send-ep-select");
         const svc = select.dataset.svc;
-        const url = document.getElementById("send-url").value;
+        const url = currentRequestUrl;
         await chrome.runtime.sendMessage({
           type: "RENAME_FIELD",
           tabId: currentTabId,
@@ -353,16 +355,8 @@ function onSendEndpointSelected() {
       baseUrl = baseUrl.slice(0, -1);
     }
 
-    document.getElementById("send-url").value = baseUrl + pathTemplate;
-
-    // Set method
-    const methodSelect = document.getElementById("send-method");
-    for (const opt of methodSelect.options) {
-      if (opt.value === validMethod) {
-        opt.selected = true;
-        break;
-      }
-    }
+    currentRequestUrl = baseUrl + pathTemplate;
+    currentRequestMethod = validMethod;
 
     select.dataset.svc = svc;
     select.dataset.discoveryId = discoveryId;
@@ -373,7 +367,8 @@ function onSendEndpointSelected() {
   }
 
   // Fallback if no matching endpoint found
-  document.getElementById("send-url").value = "";
+  currentRequestUrl = "";
+  currentRequestMethod = "POST";
   document.getElementById("send-form-fields").innerHTML =
     '<div class="hint">Select a method to load its schema.</div>';
 }
@@ -470,7 +465,9 @@ function buildFormFields(schema, initialData = null) {
           },
           "param",
           0,
-          null, // Params don't usually come from body map
+          initialData && initialData[name] !== undefined
+            ? initialData[name]
+            : null,
         ),
       );
     }
@@ -780,8 +777,8 @@ async function sendRequest() {
   const isFormMode =
     document.querySelector("#send-body-toggle .toggle-btn.active").dataset
       .mode === "form";
-  let url = document.getElementById("send-url").value.trim();
-  const httpMethod = document.getElementById("send-method").value;
+  let url = currentRequestUrl;
+  const httpMethod = currentRequestMethod;
   const contentType = document.getElementById("send-ct").value;
   const epKey = document.getElementById("send-ep-select").value;
 
@@ -806,7 +803,7 @@ async function sendRequest() {
           urlObj.searchParams.set(k, String(v));
         }
         url = urlObj.toString();
-        document.getElementById("send-url").value = url;
+        currentRequestUrl = url;
       } catch (_) {
         console.warn("[Send] URL construction failed:", _);
       }
@@ -914,9 +911,7 @@ function renderResultBody(result) {
 
   if (result.body.format === "json") {
     return `<pre class="resp-body">${esc(JSON.stringify(result.body.parsed, null, 2))}</pre>`;
-  } else if (
-    document.getElementById("send-url").value.includes("batchexecute")
-  ) {
+  } else if (currentRequestUrl.includes("batchexecute")) {
     // Force batch rendering for batchexecute requests
     return renderBatchExecuteResponse(
       result.body.raw || "",
@@ -1275,6 +1270,11 @@ function replayRequest(reqId) {
       }
     }
 
+    // Set current state from the replayed request
+    currentRequestUrl = req.url;
+    currentRequestMethod = "POST"; // Default for replayed backend requests or detect from req
+    if (req.method) currentRequestMethod = req.method;
+
     for (const opt of epSelect.options) {
       if (opt.dataset.isVirtual === "true" && opt.dataset.svc === req.service) {
         // 1. For batch, attempt strict RPC ID match first
@@ -1336,16 +1336,27 @@ function replayRequest(reqId) {
           initialData = pbTreeToMap(initialData);
         }
       } else {
-        initialData = pbTreeToMap(req.decodedBody);
+        initialData = pbTreeToMap(req.decodedBody) || {};
+      }
+
+      // Merge query parameters from URL for pre-filling
+      try {
+        const urlObj = new URL(req.url);
+        urlObj.searchParams.forEach((val, key) => {
+          // Prefer body data if it already provides this key, but for GET it's usually just URL params
+          if (initialData[key] === undefined || initialData[key] === null) {
+            initialData[key] = val;
+          }
+        });
+      } catch (e) {
+        console.warn("[Replay] Failed to extract URL parameters:", e);
       }
 
       loadVirtualSchema(svc, discoveryId, initialData);
     }
   }
 
-  // Populate SEND tab
-  document.getElementById("send-url").value = req.url;
-  document.getElementById("send-method").value = req.method;
+  // Internal state already updated in replayRequest
 
   // Handle Content-Type synchronization
   let originalContentType = "";
