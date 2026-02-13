@@ -591,8 +591,8 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (details.tabId < 0) return;
     const url = new URL(details.url);
     
-    // Skip internal probe requests (req2proto/discovery) immediately
-    if (url.searchParams.has("_probe")) return;
+    // Skip internal probe requests immediately
+    if (url.hash.includes("_internal_probe")) return;
 
     // Auto-attach debugger for response capture on APIs and relevant scripts.
     const isScript = url.pathname.endsWith('.js') || url.pathname.includes('/xjs/');
@@ -663,8 +663,8 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     if (details.tabId < 0) return;
     const url = new URL(details.url);
 
-    // Skip internal probe requests (req2proto/discovery) early
-    if (url.searchParams.has("_probe")) return;
+    // Skip internal probe requests early
+    if (url.hash.includes("_internal_probe")) return;
 
     // ─── CRITICAL: Universal Key Scanning ───
     // Scan EVERY request (scripts, assets, etc) for keys in URL and Headers
@@ -1574,10 +1574,8 @@ async function performProbeAndPatch(tabId, service, targetUrl, apiKey) {
 
   const probeHeader = apiKey ? { "x-goog-api-key": apiKey } : {};
 
-  // Add _probe=1 param to avoid interception loop
-  const targetUrlObj = new URL(targetUrl);
-  targetUrlObj.searchParams.set("_probe", "1");
-  const safeTargetUrl = targetUrlObj.toString();
+  // Add #_internal_probe fragment to avoid interception loop
+  const safeTargetUrl = targetUrl + "#_internal_probe";
 
   try {
     const probeResult = await probeApiEndpoint(safeTargetUrl, probeHeader, {
@@ -2105,7 +2103,7 @@ async function executeFuzzing(tabId, msg) {
       const result = await executeSendRequest(tabId, {
         service: msg.service,
         methodId: msg.methodId,
-        url: url,
+        url: url + "#_internal_probe",
         httpMethod: schema.method?.httpMethod || "POST",
         contentType: schema.contentTypes[0],
         body: {
