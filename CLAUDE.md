@@ -9,13 +9,15 @@ A specialized Chrome Extension for API discovery, protocol reverse-engineering (
   - `batchexecute`: Deeply unpacks Google's double-encoded batch RPCs using `parseBatchExecuteRequest`.
   - `lib/protobuf.js`: Wire-format codec with recursive base64 scanning for nested keys.
   - `lib/req2proto.js`: Universal error-based probing (Specialized Google + Generic logic).
-- **Smart Learning**: Built-in VDD engine that automatically maps request/response schemas and URL parameters.
-- **Collaborative Mapping**: Persistent field renaming stored in `chrome.storage.local`.
+  - **Normalization**: `convertOpenApiToDiscovery` translates OpenAPI/Swagger definitions into unified internal Discovery schemas.
+- **Smart Learning**: Built-in VDD engine that automatically maps request/response schemas and URL parameters from observed traffic.
+- **Autonomous Discovery**: Universal probing engine (`buildDiscoveryUrls`) that automatically searches for official documentation on encounters with new interfaces.
+- **Collaborative Mapping**: Persistent field and parameter renaming stored in `chrome.storage.local`.
 - **UI Management**: State-aware rendering in `popup.js` using `expandedReqId` to maintain expansion and scroll states during background traffic updates.
 
 ## Development Standards
 - **Naming**: `camelCase` for logic, `UPPER_SNAKE_CASE` for constants. Unified `methodId` format: `interface.name.method`.
-- **MV3 Compliance**: Non-blocking `webRequest` observers. Debugger auto-attaches on API detection.
+- **MV3 Compliance**: Non-blocking `webRequest` observers. Debugger auto-attaches on API/Script detection.
 - **UI Security**: Strict origin checks in `onMessage` handlers. All dynamic content passed through `esc()` to prevent XSS.
 - **Data Persistence**: Use `scheduleSave()` pattern to deduplicate and batch storage writes.
 

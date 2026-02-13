@@ -273,10 +273,15 @@ function extractKeysFromText(tabId, text, sourceUrl, sourceContext, depth = 0) {
       // Don't try to decode if it's already a known key to avoid loops
       if (tab.apiKeys.has(candidate)) continue;
 
-      const decoded = atob(candidate);
-      // If it looks like printable text or JSON, scan it recursively
-      if (/[\x20-\x7E\t\n\r]/.test(decoded)) {
-        extractKeysFromText(tabId, decoded, sourceUrl, sourceContext + " > b64", depth + 1);
+      // Ensure proper padding for atob
+      const padded = candidate.length % 4 === 0 ? candidate : candidate + "=".repeat(4 - (candidate.length % 4));
+      const decoded = atob(padded);
+      
+      // Heuristic: If it looks like printable text or JSON, scan it recursively
+      // Filter out non-printable garbage to avoid regex hangs
+      const printable = decoded.replace(/[^\x20-\x7E\t\n\r]/g, "");
+      if (printable.length > 10) {
+        extractKeysFromText(tabId, printable, sourceUrl, sourceContext + " > b64", depth + 1);
       }
     } catch (e) {
       // Not valid base64, ignore
@@ -582,19 +587,20 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (details.tabId < 0) return;
     const url = new URL(details.url);
     
-    // Auto-attach debugger for response capture on APIs AND scripts
+    // Auto-attach debugger for response capture on APIs and relevant scripts.
     const isScript = url.pathname.endsWith('.js') || url.pathname.includes('/xjs/');
-    if (isApiRequest(url, details) || isScript) {
+    const isApi = isApiRequest(url, details);
+
+    if (isApi || isScript) {
       DebuggerManager.attach(details.tabId);
       state.tempRequestMap.set(details.requestId, details.url);
-      // Prune map if it gets too large
-      if (state.tempRequestMap.size > 200) {
+      if (state.tempRequestMap.size > 500) {
         const firstKey = state.tempRequestMap.keys().next().value;
         state.tempRequestMap.delete(firstKey);
       }
     }
 
-    if (!isApiRequest(url, details)) return;
+    if (!isApi) return;
 
     // Skip internal probe requests (req2proto) to avoid interception loops
     if (url.searchParams.has("_probe")) return;
@@ -604,7 +610,6 @@ chrome.webRequest.onBeforeRequest.addListener(
     // Capture initiator as distinct from Origin header (more reliable for context)
     if (details.initiator) {
       tab.authContext = tab.authContext || {};
-      // trigger a save if we're setting it for the first time
       if (!tab.authContext.origin) {
         tab.authContext.origin = details.initiator;
         scheduleSave();
@@ -653,6 +658,15 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     if (details.tabId < 0) return;
     const url = new URL(details.url);
+
+    // ─── CRITICAL: Universal Key Scanning ───
+    // Scan EVERY request (scripts, assets, etc) for keys in URL and Headers
+    // before any early exits.
+    extractKeysFromText(details.tabId, details.url, details.url, "url");
+    for (const h of details.requestHeaders || []) {
+      extractKeysFromText(details.tabId, `${h.name}: ${h.value}`, details.url, "header");
+    }
+
     if (!isApiRequest(url, details)) return;
 
     // Skip internal probe requests
@@ -691,15 +705,8 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       if (name === "origin") origin = h.value;
       if (name === "referer") referer = h.value;
       if (name === "content-type") contentType = h.value;
-      if (name === "cookie") cookie = h.value;
       if (name === "x-goog-api-key" || name === "x-api-key" || name === "apikey") apiKey = h.value;
-
-      // Extract keys from headers (X-API-Key, Authorization, etc)
-      extractKeysFromText(details.tabId, `${h.name}: ${h.value}`, details.url, "header");
     }
-
-    // Extract keys from URL params
-    extractKeysFromText(details.tabId, details.url, details.url, "url");
 
     // Store API key with service/host tracking
     const service = extractInterfaceName(url);
@@ -714,10 +721,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 
     // ─── Smart Learning (Virtual Discovery) ──────────────────────────────────
     
-    const discoveryStatus = tab.discoveryDocs.get(service);
-    const isGoogle = url.hostname.endsWith('google.com') || url.hostname.endsWith('googleapis.com');
-
-    // Always learn from the current request to build the VDD immediately
+    // 1. Always learn from the current request to build the VDD immediately
     let entry = tab.requestLog.find((r) => r.id === details.requestId);
     if (!entry) {
       entry = {
@@ -734,8 +738,10 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     
     learnFromRequest(details.tabId, service, entry, headerMap);
 
-    if (isGoogle && (!discoveryStatus || discoveryStatus.status === "not_found")) {
-      // For Google, also try to fetch the official Discovery Document in the background
+    // 2. Automatic Background Discovery
+    // If we haven't tried to find an official discovery doc for this service yet, do it now.
+    const discoveryStatus = tab.discoveryDocs.get(service);
+    if (!discoveryStatus || discoveryStatus.status === "not_found") {
       if (!discoveryStatus) {
         tab.discoveryDocs.set(service, { status: "pending", seedUrl: details.url });
       } else {
@@ -744,6 +750,8 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       
       const keysForService = collectKeysForService(tab, service, url.hostname);
       if (apiKey && !keysForService.includes(apiKey)) keysForService.push(apiKey);
+      
+      console.log(`[Discovery] Automatically probing for official doc for: ${service}`);
       fetchDiscoveryForService(details.tabId, service, url.hostname, keysForService, details.url);
     }
 
@@ -1388,12 +1396,18 @@ async function fetchDiscoveryForService(
 
         if (
           doc &&
-          (doc.discoveryVersion || doc.kind === "discovery#restDescription")
+          (doc.discoveryVersion || doc.kind === "discovery#restDescription" || doc.openapi || doc.swagger)
         ) {
           console.log(`[Debug] Discovery FOUND for ${service} at ${url}`);
+          
+          let unifiedDoc = doc;
+          // If it's OpenAPI/Swagger, convert it to our internal Discovery-like format
+          if (doc.openapi || doc.swagger) {
+            unifiedDoc = convertOpenApiToDiscovery(doc, url);
+          }
 
           const existingEntry = tab.discoveryDocs.get(service);
-          const mergedDoc = mergeVirtualParts(doc, existingEntry?.doc);
+          const mergedDoc = mergeVirtualParts(unifiedDoc, existingEntry?.doc);
 
           tab.discoveryDocs.set(service, {
             status: "found",
@@ -1460,10 +1474,15 @@ async function fetchDiscoveryForService(
 
       if (
         doc &&
-        (doc.discoveryVersion || doc.kind === "discovery#restDescription")
+        (doc.discoveryVersion || doc.kind === "discovery#restDescription" || doc.openapi || doc.swagger)
       ) {
+        let unifiedDoc = doc;
+        if (doc.openapi || doc.swagger) {
+          unifiedDoc = convertOpenApiToDiscovery(doc, url);
+        }
+
         const existingEntry = tab.discoveryDocs.get(service);
-        const mergedDoc = mergeVirtualParts(doc, existingEntry?.doc);
+        const mergedDoc = mergeVirtualParts(unifiedDoc, existingEntry?.doc);
 
         tab.discoveryDocs.set(service, {
           status: "found",
