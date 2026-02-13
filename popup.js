@@ -7,6 +7,15 @@ let expandedReqId = null; // Track which request is currently expanded
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
+let renderTimer = null;
+function throttledLoadState() {
+  if (renderTimer) return;
+  renderTimer = setTimeout(async () => {
+    renderTimer = null;
+    await loadState();
+  }, 100);
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTabId = tab?.id ?? null;
@@ -152,7 +161,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       sender.url && sender.url.startsWith(EXTENSION_ORIGIN + "/");
     if (!isExtensionPage) return;
 
-    if (msg.type === "STATE_UPDATED" && msg.tabId === currentTabId) loadState();
+    if (msg.type === "STATE_UPDATED" && msg.tabId === currentTabId)
+      throttledLoadState();
     if (msg.type === "FUZZ_UPDATE" && msg.tabId === currentTabId)
       renderFuzzUpdate(msg.update);
   });
@@ -1219,8 +1229,17 @@ function toggleRequestDetails(reqId) {
 
 function renderResponsePanel() {
   const container = document.getElementById("response-log");
+  const scrollEl = document.getElementById("panel-response");
+  const oldScrollHeight = scrollEl.scrollHeight;
+  const oldScrollTop = scrollEl.scrollTop;
+  const wasAtTop = oldScrollTop < 15;
+
+  // Stabilize container height during re-render
+  container.style.minHeight = container.scrollHeight + "px";
+
   if (!tabData?.requestLog?.length) {
     container.innerHTML = '<div class="empty">No requests captured yet.</div>';
+    container.style.minHeight = "";
     return;
   }
 
@@ -1277,6 +1296,22 @@ function renderResponsePanel() {
     </div>`;
   }
   container.innerHTML = html;
+
+  container.innerHTML = html;
+
+  // Use requestAnimationFrame to ensure DOM is updated before scroll correction
+  requestAnimationFrame(() => {
+    if (wasAtTop) {
+      scrollEl.scrollTop = 0;
+    } else {
+      const heightDelta = scrollEl.scrollHeight - oldScrollHeight;
+      if (heightDelta !== 0) {
+        scrollEl.scrollTop = oldScrollTop + heightDelta;
+      }
+    }
+    // Clear the stabilizer
+    container.style.minHeight = "";
+  });
 
   // Scroll expanded item into view only if it was just opened
   // We use a small check to see if we should scroll

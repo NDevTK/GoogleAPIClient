@@ -6,12 +6,14 @@
 
 body {
   width: 580px;
-  max-height: 640px;
-  overflow-y: auto;
+  height: 600px;
+  overflow: hidden;
   font-family: "Segoe UI", system-ui, sans-serif;
   font-size: 12px;
   background: #0d1117;
   color: #c9d1d9;
+  display: flex;
+  flex-direction: column;
 }
 
 header {
@@ -20,6 +22,7 @@ header {
   justify-content: space-between;
   padding: 10px 14px 6px;
   border-bottom: 1px solid #21262d;
+  flex-shrink: 0;
 }
 
 header h1 {
@@ -49,6 +52,7 @@ nav {
   display: flex;
   border-bottom: 1px solid #21262d;
   padding: 0 8px;
+  flex-shrink: 0;
 }
 .tab {
   background: none;
@@ -75,6 +79,8 @@ nav {
 .panel {
   display: none;
   padding: 10px 14px;
+  flex: 1;
+  overflow-y: auto;
 }
 .panel.active {
   display: block;
