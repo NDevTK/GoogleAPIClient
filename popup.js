@@ -879,9 +879,6 @@ async function sendRequest() {
     });
     renderResponse(result);
 
-    // Collapse any open request details
-    expandedReqId = null;
-
     // Scroll result into view
     setTimeout(() => {
       document

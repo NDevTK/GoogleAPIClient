@@ -23,7 +23,7 @@ A powerful Chrome Extension for reverse-engineering and security testing APIs ac
 
 - **Fuzzing Engine**: Automated field-level probing for SQLi, XSS, Overflow, and type-confusion across any discovered method.
 - **Session-Aware Replay**: The "Send" panel executes requests within the target page's context, automatically attaching active cookies and authentication.
-- **Integrated Workspace**: Build your API map directly while reviewing traffic in the **Requests** tab using interactive renaming and structured details.
+- **Unified Inspection Workflow**: Click any request in the **Requests** log to instantly inspect its structured details (Protobuf, JSON, Headers) and historical response directly in the **Send** tab for seamless analysis and replay.
 
 ## Installation
 
@@ -37,7 +37,7 @@ A powerful Chrome Extension for reverse-engineering and security testing APIs ac
 
 1. **Browse**: Browse any website. The extension passively maps APIs and searches for documentation in the background.
 2. **Inspect**: Open the popup to see discovered keys and mapped interfaces.
-3. **Analyze**: Use the **Requests** tab to view decoded Protobuf, JSON, or `batchexecute` traffic.
+3. **Analyze**: Click a request in the **Requests** tab to view decoded Protobuf, JSON, or `batchexecute` traffic and historical responses in the **Send** tab.
 4. **Map**: Click the **✎** icon next to any field to give it a descriptive name.
 5. **Test**: Load any method into the **Send** tab to replay it, or use the **Fuzz** tab for automated vulnerability probing.
 

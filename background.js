@@ -40,14 +40,6 @@ const DebuggerManager = {
     }
   },
 
-  async detach(tabId) {
-    if (!state.attachedTabs.get(tabId)) return;
-    try {
-      await chrome.debugger.detach({ tabId });
-      state.attachedTabs.delete(tabId);
-    } catch (_) {}
-  },
-
   async getResponseBody(tabId, requestId) {
     try {
       const result = await chrome.debugger.sendCommand(
@@ -2977,10 +2969,6 @@ function serializeTabData(tab) {
 }
 
 // ─── Request Completion Tracking ─────────────────────────────────────────────
-
-const REQUEST_FILTER = {
-  urls: ["<all_urls>"],
-};
 
 chrome.webRequest.onCompleted.addListener(
   (details) => {
