@@ -39,7 +39,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     .addEventListener("click", addHeaderRow);
 
   // Fuzz panel
-  document.getElementById("btn-start-fuzz").addEventListener("click", startFuzzing);
+  document
+    .getElementById("btn-start-fuzz")
+    .addEventListener("click", startFuzzing);
   document.getElementById("fuzz-ep-select").addEventListener("change", (e) => {
     // Optional: show schema preview for fuzzing
   });
@@ -61,7 +63,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           schemaName: schema,
           fieldKey: key,
           newName,
-          url
+          url,
         });
         // Reload schema to reflect change
         loadVirtualSchema(svc, select.dataset.discoveryId);
@@ -91,26 +93,26 @@ document.addEventListener("DOMContentLoaded", async () => {
     const select = document.getElementById("fuzz-ep-select");
     const epKey = select.value;
     if (!epKey) return;
-  
+
     const opt = select.options[select.selectedIndex];
     const config = {
       strings: document.getElementById("fuzz-strings").checked,
       numbers: document.getElementById("fuzz-numbers").checked,
       objects: document.getElementById("fuzz-objects").checked,
     };
-  
+
     const btn = document.getElementById("btn-start-fuzz");
     btn.disabled = true;
     btn.textContent = "Fuzzing...";
     document.getElementById("fuzz-log").innerHTML = "";
-  
+
     try {
       await chrome.runtime.sendMessage({
         type: "EXECUTE_FUZZ",
         tabId: currentTabId,
         service: opt.dataset.svc,
         methodId: opt.dataset.discoveryId,
-        config
+        config,
       });
     } catch (err) {
       console.error("Fuzzing failed:", err);
@@ -119,12 +121,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       btn.textContent = "Start Fuzzing";
     }
   }
-  
+
   function renderFuzzUpdate(update) {
     const log = document.getElementById("fuzz-log");
     const card = el("div", "card fuzz-card");
-    const statusClass = update.status >= 200 && update.status < 300 ? "badge-found" : "badge-error";
-    
+    const statusClass =
+      update.status >= 200 && update.status < 300
+        ? "badge-found"
+        : "badge-error";
+
     card.innerHTML = `
       <div class="card-label">
         Field: <strong>${esc(update.field)}</strong> &middot; 
@@ -135,7 +140,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     `;
     log.prepend(card);
   }
-  
+
   const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;
 
   chrome.runtime.onMessage.addListener((msg, sender) => {
@@ -143,13 +148,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Security: Only accept coordination messages from internal extension contexts (e.g. background.js)
     // Content scripts will have the website's URL here, not the extension's origin.
-    const isExtensionPage = sender.url && sender.url.startsWith(EXTENSION_ORIGIN + "/");
+    const isExtensionPage =
+      sender.url && sender.url.startsWith(EXTENSION_ORIGIN + "/");
     if (!isExtensionPage) return;
 
     if (msg.type === "STATE_UPDATED" && msg.tabId === currentTabId) loadState();
-    if (msg.type === "FUZZ_UPDATE" && msg.tabId === currentTabId) renderFuzzUpdate(msg.update);
+    if (msg.type === "FUZZ_UPDATE" && msg.tabId === currentTabId)
+      renderFuzzUpdate(msg.update);
   });
-    loadState();
+  loadState();
 });
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -221,7 +228,7 @@ function renderSendPanel() {
   const fuzzSelect = document.getElementById("fuzz-ep-select");
   const prev = select.value;
   const fuzzPrev = fuzzSelect.value;
-  
+
   select.innerHTML = '<option value="">-- select method --</option>';
   fuzzSelect.innerHTML = '<option value="">-- select method --</option>';
 
@@ -402,7 +409,6 @@ function onSendEndpointSelected() {
 }
 
 async function loadVirtualSchema(service, methodId, initialData = null) {
-  console.log("Loading virtual schema for", service, methodId);
   currentSchema = null;
   document.getElementById("send-form-fields").innerHTML =
     '<div class="hint">Loading schema...</div>';
@@ -422,7 +428,7 @@ async function loadVirtualSchema(service, methodId, initialData = null) {
     }
 
     currentSchema = schema;
-    console.log("Loaded schema:", schema);
+
     buildFormFields(schema, initialData);
   } catch (err) {
     console.error("Error loading virtual schema:", err);
@@ -490,7 +496,7 @@ function buildFormFields(schema, initialData = null) {
             children: null,
             enum: param.enum || null,
             location: param.location,
-            parentSchema: "params"
+            parentSchema: "params",
           },
           "param",
           0,
@@ -510,7 +516,13 @@ function buildFormFields(schema, initialData = null) {
     for (const field of schema.requestBody.fields) {
       const fieldVal = initialData ? initialData[field.number] : null;
       section.appendChild(
-        createFieldInput(field.name, { ...field, parentSchema: schema.requestBody.schemaName }, "body", 0, fieldVal),
+        createFieldInput(
+          field.name,
+          { ...field, parentSchema: schema.requestBody.schemaName },
+          "body",
+          0,
+          fieldVal,
+        ),
       );
     }
     container.appendChild(section);
@@ -542,10 +554,10 @@ function createFieldInput(
   const labelEl = el("label", "form-field-label");
   const displayName = fieldDef.name || name;
   let labelHtml = `<span class="field-name">${esc(displayName)}</span>`;
-  
+
   // Add rename button for learned/indexed fields or parameters
   if (fieldDef.number || name.startsWith("field") || category === "param") {
-    labelHtml += ` <span class="btn-rename" title="Rename field" data-schema="${esc(fieldDef.parentSchema || 'params')}" data-key="${esc(name)}">✎</span>`;
+    labelHtml += ` <span class="btn-rename" title="Rename field" data-schema="${esc(fieldDef.parentSchema || "params")}" data-key="${esc(name)}">✎</span>`;
   }
 
   if (fieldDef.number)
@@ -576,7 +588,13 @@ function createFieldInput(
     for (const child of fieldDef.children) {
       const childVal = initialValue ? initialValue[child.number] : null;
       childContainer.appendChild(
-        createFieldInput(child.name, { ...child, parentSchema: fieldDef.$ref || fieldDef.parentSchema }, category, depth + 1, childVal),
+        createFieldInput(
+          child.name,
+          { ...child, parentSchema: fieldDef.$ref || fieldDef.parentSchema },
+          category,
+          depth + 1,
+          childVal,
+        ),
       );
     }
     details.appendChild(childContainer);
@@ -851,16 +869,18 @@ async function sendRequest() {
       body,
     });
     renderResponse(result);
-    
+
     // Collapse any open request details
     expandedReqId = null;
-    
+
     // Switch to Response tab
     document.querySelector(".tab[data-panel='response']").click();
 
     // Scroll result into view
     setTimeout(() => {
-      document.getElementById("send-response").scrollIntoView({ behavior: 'smooth', block: 'start' });
+      document
+        .getElementById("send-response")
+        .scrollIntoView({ behavior: "smooth", block: "start" });
     }, 100);
   } catch (err) {
     renderResponse({ error: err.message });
@@ -915,28 +935,9 @@ function renderResponse(result) {
   if (svc && methodId && discoveryInfo?.doc) {
     const doc = discoveryInfo.doc;
     const methodInfo = findMethodById(doc, methodId);
-    console.log("[Debug] renderResponse: methodInfo found", methodInfo);
     if (methodInfo?.method?.response?.$ref) {
-      console.log(
-        "[Debug] renderResponse: resolving response ref",
-        methodInfo.method.response.$ref,
-      );
       respSchema = resolveDiscoverySchema(doc, methodInfo.method.response.$ref);
-      console.log(
-        "[Debug] renderResponse: respSchema resolved. Length:",
-        respSchema?.length,
-      );
-    } else {
-      console.log(
-        "[Debug] renderResponse: NO response ref found in methodInfo",
-      );
     }
-  } else {
-    console.log("[Debug] renderResponse: missing svc/methodId/doc", {
-      svc,
-      methodId,
-      doc: !!discoveryInfo?.doc,
-    });
   }
 
   if (result.body.format === "json") {
@@ -1007,29 +1008,13 @@ function renderDetails(tabId, entryId) {
   const doc = tab.discoveryDocs.get(service)?.doc;
   const url = new URL(entry.url);
 
-  console.log(`[Debug] renderDetails: service=${service}, hasDoc=${!!doc}`);
-
   const method = findDiscoveryMethod(doc, url.pathname, entry.method);
-  console.log(
-    `[Debug] renderDetails: found method for ${url.pathname}:`,
-    method,
-  );
 
   let reqSchema = method?.request;
   if (reqSchema && reqSchema.$ref && doc?.schemas) {
-    console.log(
-      `[Debug] renderDetails: Resolving request $ref: ${reqSchema.$ref}`,
-    );
     const resolved = doc.schemas[reqSchema.$ref];
     if (resolved) {
       reqSchema = resolved;
-      console.log(
-        `[Debug] renderDetails: Resolved to schema with keys: ${Object.keys(reqSchema)}`,
-      );
-    } else {
-      console.log(
-        `[Debug] renderDetails: FAILED to resolve $ref ${reqSchema.$ref}`,
-      );
     }
   }
 
@@ -1043,7 +1028,6 @@ function renderPbTree(nodes, schema = null) {
   // If passed a full method definition, use its request schema
   // (This handles the top-level call from renderDetails)
   if (schema && schema.request) {
-    console.log("[Debug] renderPbTree: Using request schema", schema.request);
     schema = schema.request;
   }
 
@@ -1054,12 +1038,6 @@ function renderPbTree(nodes, schema = null) {
     if (schema.properties) fieldMap = schema.properties;
     else if (schema.parameters) fieldMap = schema.parameters;
     else fieldMap = schema; // Fallback for raw probed fields
-
-    console.log(
-      `[Debug] renderPbTree: fieldMap resolved. Type: ${Array.isArray(fieldMap) ? "Array" : typeof fieldMap}, Keys:`,
-      Object.keys(fieldMap).slice(0, 5),
-      fieldMap.length || "",
-    );
   }
 
   let html = '<div class="pb-tree">';
@@ -1094,12 +1072,6 @@ function renderPbTree(nodes, schema = null) {
         if (fieldDef) {
           fieldName = fieldDef.name || fieldName;
         } else {
-          if (node.field == 10) {
-            console.log(
-              "[Debug] Field 10 NOT found in fieldMap Array. Full Map:",
-              fieldMap,
-            );
-          }
         }
       } else {
         const entries = Object.entries(fieldMap);
@@ -1126,12 +1098,6 @@ function renderPbTree(nodes, schema = null) {
             fieldName = fieldDef.name;
           }
         } else {
-          if (node.field == 10) {
-            console.log(
-              "[Debug] Field 10 NOT found in fieldMap Object. Keys:",
-              Object.keys(fieldMap),
-            );
-          }
         }
       }
     }
@@ -1139,17 +1105,17 @@ function renderPbTree(nodes, schema = null) {
     // Fallback: If no ID match, maybe it IS the key? (unlikely for numbers)
 
     // Debug log for the first 20 fields to avoid spam
-    if (node.field <= 20)
-      console.log(`[Debug] Field ${node.field} -> Name: ${fieldName}`, {
-        fieldDef,
-      });
 
     const typeLabel = fieldDef
       ? `<span class="pb-type-badge">${fieldDef.type}</span>`
       : `<span class="pb-wire-badge">${node.wire === 0 ? "varint" : node.wire === 1 ? "64bit" : node.wire === 2 ? "len" : "32bit"}</span>`;
 
-    const renameAttr = fieldDef ? `data-schema="${esc(schema.id || '')}" data-key="${esc(fieldName)}"` : "";
-    const renameBtn = renameAttr ? ` <span class="btn-rename" title="Rename field" ${renameAttr}>✎</span>` : "";
+    const renameAttr = fieldDef
+      ? `data-schema="${esc(schema.id || "")}" data-key="${esc(fieldName)}"`
+      : "";
+    const renameBtn = renameAttr
+      ? ` <span class="btn-rename" title="Rename field" ${renameAttr}>✎</span>`
+      : "";
 
     html += `<div class="pb-node">
       <span class="pb-field">${esc(fieldName)}</span>${renameBtn}
@@ -1207,10 +1173,6 @@ function findSchemaForRequest(req) {
   // We need the full discovery doc
   const doc = svcInfo.doc;
   if (!doc) {
-    console.log(
-      "[Debug] findSchemaForRequest: No doc found for service",
-      req.service,
-    );
     return null;
   }
   const url = new URL(req.url);
@@ -1256,9 +1218,10 @@ function renderResponsePanel() {
   let html = "";
   for (const req of tabData.requestLog) {
     const hasProto = !!req.decodedBody;
-    const isExpanded = expandedReqId !== null && String(expandedReqId) === String(req.id);
-    
-    html += `<div class="card request-card" style="margin-bottom:8px; ${isExpanded ? 'border-color:#58a6ff' : ''}" data-id="${req.id}">
+    const isExpanded =
+      expandedReqId !== null && String(expandedReqId) === String(req.id);
+
+    html += `<div class="card request-card" style="margin-bottom:8px; ${isExpanded ? "border-color:#58a6ff" : ""}" data-id="${req.id}">
       <div class="card-label" style="display:flex;justify-content:space-between;align-items:center">
         <span>
           <span class="badge ${req.method}">${req.method}</span>
@@ -1272,7 +1235,7 @@ function renderResponsePanel() {
         ${hasProto ? ' <span class="badge badge-found">PROTOBUF BODY</span>' : ""}
       </div>
       
-      <div class="request-details" style="display:${isExpanded ? 'block' : 'none'}; margin-top:8px; border-top:1px solid #eee; padding-top:8px">
+      <div class="request-details" style="display:${isExpanded ? "block" : "none"}; margin-top:8px; border-top:1px solid #eee; padding-top:8px">
         ${
           req.url.includes("batchexecute") && req.rawBodyB64
             ? `
@@ -1299,7 +1262,7 @@ function renderResponsePanel() {
       </div>
 
       <div class="card-actions" style="margin-top:6px;text-align:right">
-        <button class="btn-small btn-expand">${isExpanded ? 'Collapse' : 'Details'}</button>
+        <button class="btn-small btn-expand">${isExpanded ? "Collapse" : "Details"}</button>
         <button class="btn-small btn-replay" data-id="${req.id}">Load into Send</button>
       </div>
     </div>`;
@@ -1308,10 +1271,16 @@ function renderResponsePanel() {
 
   // Scroll expanded item into view only if it was just opened
   // We use a small check to see if we should scroll
-  if (expandedReqId && document.activeElement && document.activeElement.classList.contains('btn-expand')) {
-    const expandedCard = container.querySelector(`.request-card[data-id="${expandedReqId}"]`);
+  if (
+    expandedReqId &&
+    document.activeElement &&
+    document.activeElement.classList.contains("btn-expand")
+  ) {
+    const expandedCard = container.querySelector(
+      `.request-card[data-id="${expandedReqId}"]`,
+    );
     if (expandedCard) {
-      expandedCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      expandedCard.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
   }
 
@@ -1362,7 +1331,8 @@ function renderResponseBody(req) {
     (req.requestHeaders &&
       Object.entries(req.requestHeaders).some(
         ([k, v]) =>
-          k.toLowerCase() === "content-type" && v.toLowerCase().includes("protobuf"),
+          k.toLowerCase() === "content-type" &&
+          v.toLowerCase().includes("protobuf"),
       ));
 
   if (isProtobuf) {
@@ -1410,7 +1380,11 @@ function renderBatchExecuteResponse(bodyText, req) {
               if (item[0] === "wrb.fr") {
                 const [tag, rpcId, innerJson] = item;
                 let data = null;
-                try { data = JSON.parse(innerJson); } catch(e) { data = innerJson; }
+                try {
+                  data = JSON.parse(innerJson);
+                } catch (e) {
+                  data = innerJson;
+                }
                 calls.push({ rpcId, data: data });
               }
             }
@@ -1420,14 +1394,17 @@ function renderBatchExecuteResponse(bodyText, req) {
       }
     }
 
-    if (calls.length === 0) return `<pre class="resp-body">${esc(bodyText)}</pre>`;
+    if (calls.length === 0)
+      return `<pre class="resp-body">${esc(bodyText)}</pre>`;
 
     let html = '<div class="pb-tree">';
     const svc = req.service;
     const doc = tabData?.discoveryDocs?.[svc]?.doc;
 
     for (const call of calls) {
-      const nodes = jspbToTree(Array.isArray(call.data) ? call.data : [call.data]);
+      const nodes = jspbToTree(
+        Array.isArray(call.data) ? call.data : [call.data],
+      );
       let schema = null;
       if (doc) {
         const schemaName = `${call.rpcId}Response`;
@@ -1441,7 +1418,7 @@ function renderBatchExecuteResponse(bodyText, req) {
         </div>
       </div>`;
     }
-    html += '</div>';
+    html += "</div>";
     return html;
   } catch (e) {
     return `<pre class="resp-body">${esc(bodyText)}</pre>`;
@@ -1458,17 +1435,21 @@ function renderBatchExecuteRequest(req) {
 
     const outer = JSON.parse(fReq);
     let html = '<div class="pb-tree">';
-    
+
     const svc = req.service;
     const doc = tabData?.discoveryDocs?.[svc]?.doc;
 
     for (const call of outer[0]) {
       const [rpcId, innerJson] = call;
       let data = null;
-      try { data = JSON.parse(innerJson); } catch(e) { data = innerJson; }
-      
+      try {
+        data = JSON.parse(innerJson);
+      } catch (e) {
+        data = innerJson;
+      }
+
       const nodes = jspbToTree(Array.isArray(data) ? data : [data]);
-      
+
       // Try to find schema
       let schema = null;
       if (doc) {
@@ -1483,7 +1464,7 @@ function renderBatchExecuteRequest(req) {
         </div>
       </div>`;
     }
-    html += '</div>';
+    html += "</div>";
     return html;
   } catch (e) {
     return `<pre class="resp-body">Failed to parse batch request: ${esc(e.message)}</pre>`;
@@ -1503,7 +1484,11 @@ function parseBatchExecuteRequestFromB64(b64) {
     for (const call of outer[0]) {
       const [rpcId, innerJson] = call;
       let data = null;
-      try { data = JSON.parse(innerJson); } catch(e) { data = innerJson; }
+      try {
+        data = JSON.parse(innerJson);
+      } catch (e) {
+        data = innerJson;
+      }
       calls.push({ rpcId, data });
     }
     return calls;
@@ -1539,7 +1524,7 @@ function replayRequest(reqId) {
     // Check if it's a batchexecute request
     const isBatch = req.url.includes("batchexecute");
     let targetRpcId = null;
-    
+
     if (isBatch && req.rawBodyB64) {
       const calls = parseBatchExecuteRequestFromB64(req.rawBodyB64);
       if (calls && calls.length > 0) {
@@ -1551,12 +1536,15 @@ function replayRequest(reqId) {
       if (opt.dataset.isVirtual === "true" && opt.dataset.svc === req.service) {
         // 1. For batch, attempt strict RPC ID match first
         if (isBatch && targetRpcId) {
-          if (opt.dataset.discoveryId && opt.dataset.discoveryId.endsWith("." + targetRpcId)) {
+          if (
+            opt.dataset.discoveryId &&
+            opt.dataset.discoveryId.endsWith("." + targetRpcId)
+          ) {
             opt.selected = true;
             found = true;
             break;
           }
-          // If it's a batch request but this option isn't the right RPC ID, 
+          // If it's a batch request but this option isn't the right RPC ID,
           // skip further checks for this option to avoid incorrect path matching.
           continue;
         }
@@ -1595,7 +1583,9 @@ function replayRequest(reqId) {
       if (isBatch && req.rawBodyB64) {
         const calls = parseBatchExecuteRequestFromB64(req.rawBodyB64);
         if (calls && calls.length > 0) {
-          initialData = jspbToTree(Array.isArray(calls[0].data) ? calls[0].data : [calls[0].data]);
+          initialData = jspbToTree(
+            Array.isArray(calls[0].data) ? calls[0].data : [calls[0].data],
+          );
           initialData = pbTreeToMap(initialData);
         }
       } else {

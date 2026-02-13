@@ -21,20 +21,19 @@ const DebuggerManager = {
   async attach(tabId) {
     const status = state.attachedTabs.get(tabId);
     if (status === true || status === "pending") return;
-    
+
     state.attachedTabs.set(tabId, "pending");
     try {
       await chrome.debugger.attach({ tabId }, "1.3");
       state.attachedTabs.set(tabId, true);
       await chrome.debugger.sendCommand({ tabId }, "Network.enable");
-      console.log(`[Debugger] Attached to tab ${tabId}`);
     } catch (err) {
       state.attachedTabs.delete(tabId);
       // Silence expected browser restricted errors
-      const isExpectedError = 
+      const isExpectedError =
         err.message.includes("Another debugger is already attached") ||
         err.message.includes("Cannot access a chrome:// URL");
-        
+
       if (!isExpectedError) {
         console.error(`[Debugger] Attach failed for ${tabId}:`, err);
       }
@@ -54,17 +53,21 @@ const DebuggerManager = {
       const result = await chrome.debugger.sendCommand(
         { tabId },
         "Network.getResponseBody",
-        { requestId }
+        { requestId },
       );
       return result; // { body, base64Encoded }
     } catch (err) {
       return null;
     }
-  }
+  },
 };
 
 chrome.debugger.onEvent.addListener(async (source, method, params) => {
   const tabId = source.tabId;
+  if (method === "Network.requestWillBeSent") {
+    state.tempRequestMap.set(params.requestId, params.request.url);
+  }
+
   if (method === "Network.responseReceived") {
     const { requestId, response } = params;
     const url = new URL(response.url);
@@ -72,7 +75,7 @@ chrome.debugger.onEvent.addListener(async (source, method, params) => {
 
     // Store response metadata
     const tab = getTab(tabId);
-    const entry = tab.requestLog.find(r => r.id === requestId);
+    const entry = tab.requestLog.find((r) => r.id === requestId);
     if (entry) {
       entry.responseHeaders = response.headers;
       entry.status = response.status;
@@ -83,7 +86,7 @@ chrome.debugger.onEvent.addListener(async (source, method, params) => {
   if (method === "Network.loadingFinished") {
     const { requestId } = params;
     const tab = getTab(tabId);
-    
+
     const bodyData = await DebuggerManager.getResponseBody(tabId, requestId);
     if (bodyData) {
       let textBody = bodyData.body;
@@ -96,20 +99,25 @@ chrome.debugger.onEvent.addListener(async (source, method, params) => {
         }
       }
 
+      const entry = tab.requestLog.find((r) => r.id === requestId);
+
       // Always scan for keys in captured bodies (scripts, JSON, etc)
       if (textBody) {
-        const url = state.tempRequestMap.get(requestId);
+        let url = state.tempRequestMap.get(requestId);
+        if (!url && entry) {
+          url = entry.url;
+        }
         extractKeysFromText(tabId, textBody, url, "response_body");
       }
       state.tempRequestMap.delete(requestId);
 
-      const entry = tab.requestLog.find(r => r.id === requestId);
       if (entry) {
         entry.responseBody = bodyData.body;
         entry.responseBase64 = bodyData.base64Encoded;
-        
+
         // Learn schema from the response!
-        const service = entry.service || extractInterfaceName(new URL(entry.url));
+        const service =
+          entry.service || extractInterfaceName(new URL(entry.url));
         learnFromResponse(tabId, service, entry);
         notifyPopup(tabId);
       }
@@ -136,11 +144,14 @@ const KEY_PATTERNS = [
   { name: "Google API Key", re: /AIzaSy[\w-]{33}/g },
   { name: "Firebase Key", re: /AIza[0-9A-Za-z-_]{35}/g },
   { name: "Bearer Token", re: /bearer\s+([a-zA-Z0-9-._~+/]+=*)/gi },
-  { name: "Generic API Key", re: /(?:api[-_]?key|access[-_]?token|auth[-_]?token)['"]?\s*[:=]\s*['"]?([a-zA-Z0-9\-_]{16,})['"]?/gi },
+  {
+    name: "Generic API Key",
+    re: /(?:api[-_]?key|access[-_]?token|auth[-_]?token)['"]?\s*[:=]\s*['"]?([a-zA-Z0-9\-_]{16,})['"]?/gi,
+  },
   { name: "JWT", re: /ey[a-zA-Z0-9-_]+\.ey[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+/g },
   { name: "Mapbox Token", re: /pk\.[a-zA-Z0-9.]+/g },
   { name: "GitHub Token", re: /ghp_[a-zA-Z0-9]{36}/g },
-  { name: "Stripe Key", re: /[sk|pk]_(?:test|live)_[0-9a-zA-Z]{24}/g }
+  { name: "Stripe Key", re: /[sk|pk]_(?:test|live)_[0-9a-zA-Z]{24}/g },
 ];
 
 // ─── batchexecute Decoding ──────────────────────────────────────────────────
@@ -149,7 +160,7 @@ function parseBatchExecuteRequest(bodyText) {
   try {
     // Usually f.req=[[[rpcid, inner_json, null, "generic"]]]
     const params = new URLSearchParams(bodyText);
-    const fReq = params.get('f.req');
+    const fReq = params.get("f.req");
     if (!fReq) return null;
 
     const outer = JSON.parse(fReq);
@@ -183,7 +194,7 @@ function parseBatchExecuteResponse(bodyText) {
     // batchexecute often has length-prefixed chunks
     // Example: 123\n[[...]]\n
     const chunks = [];
-    const lines = cleaned.split('\n');
+    const lines = cleaned.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (/^\d+$/.test(line)) {
@@ -195,7 +206,7 @@ function parseBatchExecuteResponse(bodyText) {
             i++; // skip next line
           } catch (e) {}
         }
-      } else if (line.startsWith('[')) {
+      } else if (line.startsWith("[")) {
         try {
           chunks.push(JSON.parse(line));
         } catch (e) {}
@@ -252,7 +263,7 @@ function extractKeysFromText(tabId, text, sourceUrl, sourceContext, depth = 0) {
           requestCount: 0,
         });
       }
-      
+
       const keyData = tab.apiKeys.get(key);
       keyData.lastSeen = Date.now();
       if (url) {
@@ -274,14 +285,23 @@ function extractKeysFromText(tabId, text, sourceUrl, sourceContext, depth = 0) {
       if (tab.apiKeys.has(candidate)) continue;
 
       // Ensure proper padding for atob
-      const padded = candidate.length % 4 === 0 ? candidate : candidate + "=".repeat(4 - (candidate.length % 4));
+      const padded =
+        candidate.length % 4 === 0
+          ? candidate
+          : candidate + "=".repeat(4 - (candidate.length % 4));
       const decoded = atob(padded);
-      
+
       // Heuristic: If it looks like printable text or JSON, scan it recursively
       // Filter out non-printable garbage to avoid regex hangs
       const printable = decoded.replace(/[^\x20-\x7E\t\n\r]/g, "");
       if (printable.length > 10) {
-        extractKeysFromText(tabId, printable, sourceUrl, sourceContext + " > b64", depth + 1);
+        extractKeysFromText(
+          tabId,
+          printable,
+          sourceUrl,
+          sourceContext + " > b64",
+          depth + 1,
+        );
       }
     } catch (e) {
       // Not valid base64, ignore
@@ -480,32 +500,61 @@ const API_KEY_RE = /AIzaSy[\w-]{33}/g;
 
 function isApiRequest(url, details, headers = {}) {
   // Ignore common non-API static assets
-  const ext = url.pathname.split('.').pop().toLowerCase();
-  const staticExts = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'css', 'js', 'woff', 'woff2', 'ttf', 'otf', 'ico', 'map'];
+  const ext = url.pathname.split(".").pop().toLowerCase();
+  const staticExts = [
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "svg",
+    "css",
+    "js",
+    "woff",
+    "woff2",
+    "ttf",
+    "otf",
+    "ico",
+    "map",
+  ];
   if (staticExts.includes(ext)) return false;
 
   // batchexecute is always an API
-  if (url.pathname.includes('batchexecute')) return true;
+  if (url.pathname.includes("batchexecute")) return true;
 
   // Ignore specific tracking/asset paths that aren't useful APIs
   const noisePaths = [
-    '/gen_204', '/_/js/', '/_/ss/', '/xjs/', '/client_204', '/vt/', '/jserror',
-    '/ulog', '/log', '/error', '/collect'
+    "/gen_204",
+    "/_/js/",
+    "/_/ss/",
+    "/xjs/",
+    "/client_204",
+    "/vt/",
+    "/jserror",
+    "/ulog",
+    "/log",
+    "/error",
+    "/collect",
   ];
-  if (noisePaths.some(p => url.pathname.includes(p))) return false;
+  if (noisePaths.some((p) => url.pathname.includes(p))) return false;
 
   // Look for API indicators in URL
-  if (url.hostname.includes('api')) return true;
+  if (url.hostname.includes("api")) return true;
   if (/\bv\d+\b/.test(url.pathname)) return true; // versioning like /v1/
-  if (url.pathname.includes('graphql')) return true;
-  if (url.pathname.includes('$rpc')) return true;
-  if (url.searchParams.has('alt') && url.searchParams.get('alt') === 'json') return true;
-  
+  if (url.pathname.includes("graphql")) return true;
+  if (url.pathname.includes("$rpc")) return true;
+  if (url.searchParams.has("alt") && url.searchParams.get("alt") === "json")
+    return true;
+
   // Method indicator
-  if (details.method !== 'GET') return true; 
+  if (details.method !== "GET") return true;
 
   // Header indicators (if provided)
-  if (headers['x-requested-with'] || headers['authorization'] || headers['x-api-key'] || headers['x-goog-api-key']) {
+  if (
+    headers["x-requested-with"] ||
+    headers["authorization"] ||
+    headers["x-api-key"] ||
+    headers["x-goog-api-key"]
+  ) {
     return true;
   }
 
@@ -519,29 +568,41 @@ function isApiRequest(url, details, headers = {}) {
 // Extract interface name from URL with better granularity
 function extractInterfaceName(urlObj) {
   const hostname = urlObj.hostname;
-  const segments = urlObj.pathname.split('/').filter(Boolean);
+  const segments = urlObj.pathname.split("/").filter(Boolean);
 
   // batchexecute handling: /_/PlayStoreUi/data/batchexecute -> PlayStoreUi
-  if (urlObj.pathname.includes('batchexecute')) {
-    const dataIdx = segments.indexOf('data');
+  if (urlObj.pathname.includes("batchexecute")) {
+    const dataIdx = segments.indexOf("data");
     if (dataIdx > 0) {
-      return hostname + '/' + segments[dataIdx - 1];
+      return hostname + "/" + segments[dataIdx - 1];
     }
-    const underscoreIdx = segments.indexOf('_');
+    const underscoreIdx = segments.indexOf("_");
     if (underscoreIdx !== -1 && segments.length > underscoreIdx + 1) {
-      return hostname + '/' + segments[underscoreIdx + 1];
+      return hostname + "/" + segments[underscoreIdx + 1];
     }
   }
 
   // Special handling for Google (keep legacy support)
-  if (hostname.endsWith('.googleapis.com') || hostname.endsWith('.clients6.google.com')) {
+  if (
+    hostname.endsWith(".googleapis.com") ||
+    hostname.endsWith(".clients6.google.com")
+  ) {
     const m = hostname.match(/^(?:staging-)?([^.]+)\./);
     return m ? m[1] : hostname;
   }
 
   // Common API root patterns
-  const apiRoots = ['api', 'v1', 'v2', 'v3', 'rest', 'graphql', 'grpc', 'async'];
-  
+  const apiRoots = [
+    "api",
+    "v1",
+    "v2",
+    "v3",
+    "rest",
+    "graphql",
+    "grpc",
+    "async",
+  ];
+
   // Find where the API "root" starts
   let rootIdx = -1;
   for (let i = 0; i < segments.length; i++) {
@@ -553,13 +614,13 @@ function extractInterfaceName(urlObj) {
 
   if (rootIdx !== -1) {
     // Interface is hostname + path up to the root (e.g. example.com/api/v1)
-    return hostname + '/' + segments.slice(0, rootIdx + 1).join('/');
+    return hostname + "/" + segments.slice(0, rootIdx + 1).join("/");
   }
 
-  // Fallback: If it's a known non-API hostname but we're here, 
+  // Fallback: If it's a known non-API hostname but we're here,
   // it might be an internal app endpoint. Use 1 segment of path.
   if (segments.length > 0) {
-    return hostname + '/' + segments[0];
+    return hostname + "/" + segments[0];
   }
 
   return hostname;
@@ -590,12 +651,13 @@ chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
     const url = new URL(details.url);
-    
+
     // Skip internal probe requests immediately
     if (url.hash.includes("_internal_probe")) return;
 
     // Auto-attach debugger for response capture on APIs and relevant scripts.
-    const isScript = url.pathname.endsWith('.js') || url.pathname.includes('/xjs/');
+    const isScript =
+      url.pathname.endsWith(".js") || url.pathname.includes("/xjs/");
     const isApi = isApiRequest(url, details);
 
     if (isApi || isScript) {
@@ -629,7 +691,9 @@ chrome.webRequest.onBeforeRequest.addListener(
     } else if (details.requestBody?.formData) {
       // For application/x-www-form-urlencoded
       const params = new URLSearchParams();
-      for (const [key, values] of Object.entries(details.requestBody.formData)) {
+      for (const [key, values] of Object.entries(
+        details.requestBody.formData,
+      )) {
         for (const val of values) {
           params.append(key, val);
         }
@@ -669,9 +733,15 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     // ─── CRITICAL: Universal Key Scanning ───
     // Scan EVERY request (scripts, assets, etc) for keys in URL and Headers
     // before any early exits.
+    // before any early exits.
     extractKeysFromText(details.tabId, details.url, details.url, "url");
     for (const h of details.requestHeaders || []) {
-      extractKeysFromText(details.tabId, `${h.name}: ${h.value}`, details.url, "header");
+      extractKeysFromText(
+        details.tabId,
+        `${h.name}: ${h.value}`,
+        details.url,
+        "header",
+      );
     }
 
     const headerMap = {};
@@ -704,23 +774,28 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 
     for (const h of details.requestHeaders || []) {
       const name = h.name.toLowerCase();
-      
+
       if (name === "cookie") {
         cookie = "[PRESENT]";
         headerMap[name] = "[REDACTED]";
-      } 
+      }
 
       if (name === "authorization") authorization = h.value;
       if (name === "origin") origin = h.value;
       if (name === "referer") referer = h.value;
       if (name === "content-type") contentType = h.value;
-      if (name === "x-goog-api-key" || name === "x-api-key" || name === "apikey") apiKey = h.value;
+      if (
+        name === "x-goog-api-key" ||
+        name === "x-api-key" ||
+        name === "apikey"
+      )
+        apiKey = h.value;
     }
 
     // Store API key with service/host tracking
     const service = extractInterfaceName(url);
     const discoveryStatus = tab.discoveryDocs.get(service);
-    
+
     // Update auth context
     if (authorization || cookie) {
       tab.authContext = tab.authContext || {};
@@ -730,7 +805,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     }
 
     // ─── Smart Learning (Virtual Discovery) ──────────────────────────────────
-    
+
     // 1. Always learn from the current request to build the VDD immediately
     let entry = tab.requestLog.find((r) => r.id === details.requestId);
     if (!entry) {
@@ -745,25 +820,42 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       tab.requestLog.unshift(entry);
       if (tab.requestLog.length > 50) tab.requestLog.pop();
     }
-    
+
     learnFromRequest(details.tabId, service, entry, headerMap);
 
     // 2. Proactive Active Probing for Protobuf
     // If it's a Protobuf request, check if we already have a detailed schema.
     // If not, trigger a probe to leak field names/numbers.
-    const isProtobuf = (headerMap["content-type"] || "").includes("protobuf") || url.pathname.includes("$rpc");
+    const isProtobuf =
+      (headerMap["content-type"] || "").includes("protobuf") ||
+      url.pathname.includes("$rpc");
     if (isProtobuf && details.method === "POST") {
       const doc = discoveryStatus?.doc;
-      const match = doc ? findDiscoveryMethod(doc, url.pathname, details.method) : null;
-      
+      const match = doc
+        ? findDiscoveryMethod(doc, url.pathname, details.method)
+        : null;
+
       // If no match OR method is in "learned" resource (meaning it lacks probed field numbers)
-      const isLearnedOnly = match && discoveryStatus.doc.resources?.learned?.methods[match.method.id.split('.').pop()];
-      
+      const isLearnedOnly =
+        match &&
+        discoveryStatus.doc.resources?.learned?.methods[
+          match.method.id.split(".").pop()
+        ];
+
       if (!match || isLearnedOnly) {
-        console.log(`[Prober] Undocumented Protobuf method detected: ${url.pathname}. Triggering active probe...`);
-        const keysForService = collectKeysForService(tab, service, url.hostname);
-        if (apiKey && !keysForService.includes(apiKey)) keysForService.push(apiKey);
-        performProbeAndPatch(details.tabId, service, details.url, apiKey || keysForService[0] || null);
+        const keysForService = collectKeysForService(
+          tab,
+          service,
+          url.hostname,
+        );
+        if (apiKey && !keysForService.includes(apiKey))
+          keysForService.push(apiKey);
+        performProbeAndPatch(
+          details.tabId,
+          service,
+          details.url,
+          apiKey || keysForService[0] || null,
+        );
       }
     }
 
@@ -771,16 +863,25 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     // If we haven't tried to find an official discovery doc for this service yet, do it now.
     if (!discoveryStatus || discoveryStatus.status === "not_found") {
       if (!discoveryStatus) {
-        tab.discoveryDocs.set(service, { status: "pending", seedUrl: details.url });
+        tab.discoveryDocs.set(service, {
+          status: "pending",
+          seedUrl: details.url,
+        });
       } else {
         discoveryStatus.status = "pending";
       }
-      
+
       const keysForService = collectKeysForService(tab, service, url.hostname);
-      if (apiKey && !keysForService.includes(apiKey)) keysForService.push(apiKey);
-      
-      console.log(`[Discovery] Automatically probing for official doc for: ${service}`);
-      fetchDiscoveryForService(details.tabId, service, url.hostname, keysForService, details.url);
+      if (apiKey && !keysForService.includes(apiKey))
+        keysForService.push(apiKey);
+
+      fetchDiscoveryForService(
+        details.tabId,
+        service,
+        url.hostname,
+        keysForService,
+        details.url,
+      );
     }
 
     mergeToGlobal(tab);
@@ -808,7 +909,10 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     if (isProtobuf && entry.rawBodyB64) {
       try {
         const bytes = base64ToUint8(entry.rawBodyB64);
-        if (logContentType.includes("json") || logContentType.includes("text")) {
+        if (
+          logContentType.includes("json") ||
+          logContentType.includes("text")
+        ) {
           // Try JSPB (JSON array) parsing
           try {
             const text = new TextDecoder().decode(bytes);
@@ -823,8 +927,13 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
         } else {
           // Binary protobuf
           entry.decodedBody = pbDecodeTree(bytes, 8, (val) => {
-            if (typeof val === 'string') {
-              extractKeysFromText(details.tabId, val, details.url, "protobuf_body");
+            if (typeof val === "string") {
+              extractKeysFromText(
+                details.tabId,
+                val,
+                details.url,
+                "protobuf_body",
+              );
             }
           });
         }
@@ -877,8 +986,8 @@ chrome.webRequest.onHeadersReceived.addListener(
         }
       }
     }
-    
-    // Potential to learn from response body too, but we need to use debugger or another way 
+
+    // Potential to learn from response body too, but we need to use debugger or another way
     // to get response body in MV3 reliably if we want it for all requests.
     // For now, we learn from the request side which is easier.
   },
@@ -890,18 +999,21 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 function calculateMethodMetadata(urlObj, interfaceName) {
   // batchexecute: use rpcids param
-  if (urlObj.pathname.includes('batchexecute')) {
-    const rpcids = urlObj.searchParams.get('rpcids') || 'batch';
-    return { methodName: rpcids, methodId: `${interfaceName.replace(/\//g, '.')}.${rpcids}` };
+  if (urlObj.pathname.includes("batchexecute")) {
+    const rpcids = urlObj.searchParams.get("rpcids") || "batch";
+    return {
+      methodName: rpcids,
+      methodId: `${interfaceName.replace(/\//g, ".")}.${rpcids}`,
+    };
   }
 
-  const segments = urlObj.pathname.split('/').filter(Boolean);
-  const interfaceParts = interfaceName.split('/');
-  
+  const segments = urlObj.pathname.split("/").filter(Boolean);
+  const interfaceParts = interfaceName.split("/");
+
   // Method segments are everything after the interface prefix
   // If interface is "example.com/api/v1" and path is "/api/v1/users/get"
   // startIdx should skip "api" and "v1".
-  
+
   const hostname = urlObj.hostname;
   let startIdx = 0;
   if (interfaceName.startsWith(hostname)) {
@@ -909,23 +1021,23 @@ function calculateMethodMetadata(urlObj, interfaceName) {
   }
 
   let methodSegments = segments.slice(startIdx);
-  
+
   // Strip segments that look like hashes or long ID lists
-  methodSegments = methodSegments.filter(s => {
-    if (s.length > 32) return false; 
-    if (s.includes('=') && s.includes(',')) return false; 
+  methodSegments = methodSegments.filter((s) => {
+    if (s.length > 32) return false;
+    if (s.includes("=") && s.includes(",")) return false;
     return true;
   });
 
-  let methodName = methodSegments.join('_') || 'root';
-  
+  let methodName = methodSegments.join("_") || "root";
+
   // If it's a gRPC-style path, use the actual method name
-  if (urlObj.pathname.includes('$rpc')) {
+  if (urlObj.pathname.includes("$rpc")) {
     methodName = segments[segments.length - 1];
   }
-  
-  const methodId = `${interfaceName.replace(/\//g, '.')}.${methodName}`;
-  
+
+  const methodId = `${interfaceName.replace(/\//g, ".")}.${methodName}`;
+
   return { methodName, methodId };
 }
 
@@ -935,7 +1047,7 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
   const tab = getTab(tabId);
   const url = new URL(entry.url);
   const method = entry.method;
-  
+
   let docEntry = tab.discoveryDocs.get(interfaceName);
   if (!docEntry || !docEntry.doc) {
     docEntry = {
@@ -946,83 +1058,92 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
         name: interfaceName,
         title: `${interfaceName} (Learned)`,
         resources: {
-          learned: { methods: {} }
+          learned: { methods: {} },
         },
-        schemas: {}
-      }
+        schemas: {},
+      },
     };
     tab.discoveryDocs.set(interfaceName, docEntry);
   }
-  
+
   const doc = docEntry.doc;
   if (!doc.resources.learned) doc.resources.learned = { methods: {} };
 
   const { methodName, methodId } = calculateMethodMetadata(url, interfaceName);
-  
+
   if (!doc.resources.learned.methods[methodName]) {
     doc.resources.learned.methods[methodName] = {
       id: methodId,
       path: url.pathname.substring(1),
       httpMethod: method,
       parameters: {},
-      request: null
+      request: null,
     };
   }
-  
+
   const m = doc.resources.learned.methods[methodName];
-  
+
   // Learn parameters from URL
   url.searchParams.forEach((value, name) => {
-    if (name === 'key' || name === 'api_key') return;
+    if (name === "key" || name === "api_key") return;
     if (!m.parameters[name]) {
       m.parameters[name] = {
-        type: isNaN(value) ? 'string' : 'number',
-        location: 'query',
-        description: `Learned from request`
+        type: isNaN(value) ? "string" : "number",
+        location: "query",
+        description: `Learned from request`,
       };
     }
   });
-  
+
   // Learn request body if present
   if (entry.rawBodyB64) {
-     const bytes = base64ToUint8(entry.rawBodyB64);
-     const text = new TextDecoder().decode(bytes);
-     const isBatch = url.pathname.includes('batchexecute');
+    const bytes = base64ToUint8(entry.rawBodyB64);
+    const text = new TextDecoder().decode(bytes);
+    const isBatch = url.pathname.includes("batchexecute");
 
-     if (isBatch) {
-       const calls = parseBatchExecuteRequest(text);
-       if (calls) {
-         for (const call of calls) {
-           const callMethodId = `${interfaceName.replace(/\//g, '.')}.${call.rpcId}`;
-           if (!doc.resources.learned.methods[call.rpcId]) {
-             doc.resources.learned.methods[call.rpcId] = {
-               id: callMethodId,
-               path: url.pathname.substring(1),
-               httpMethod: "POST",
-               parameters: {},
-               request: null
-             };
-           }
-           const callM = doc.resources.learned.methods[call.rpcId];
-           const schemaName = `${call.rpcId}Request`;
-           callM.request = { $ref: schemaName };
-           doc.schemas[schemaName] = generateSchemaFromJson(call.data, schemaName, doc.schemas, true);
-         }
-       }
-     } else if (headers['content-type']?.includes('json')) {
-       try {
-         const json = JSON.parse(text);
-         const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Request`;
-         m.request = { $ref: schemaName };
-         doc.schemas[schemaName] = generateSchemaFromJson(json, schemaName, doc.schemas);
-       } catch(e) {}
-     }
+    if (isBatch) {
+      const calls = parseBatchExecuteRequest(text);
+      if (calls) {
+        for (const call of calls) {
+          const callMethodId = `${interfaceName.replace(/\//g, ".")}.${call.rpcId}`;
+          if (!doc.resources.learned.methods[call.rpcId]) {
+            doc.resources.learned.methods[call.rpcId] = {
+              id: callMethodId,
+              path: url.pathname.substring(1),
+              httpMethod: "POST",
+              parameters: {},
+              request: null,
+            };
+          }
+          const callM = doc.resources.learned.methods[call.rpcId];
+          const schemaName = `${call.rpcId}Request`;
+          callM.request = { $ref: schemaName };
+          doc.schemas[schemaName] = generateSchemaFromJson(
+            call.data,
+            schemaName,
+            doc.schemas,
+            true,
+          );
+        }
+      }
+    } else if (headers["content-type"]?.includes("json")) {
+      try {
+        const json = JSON.parse(text);
+        const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Request`;
+        m.request = { $ref: schemaName };
+        doc.schemas[schemaName] = generateSchemaFromJson(
+          json,
+          schemaName,
+          doc.schemas,
+        );
+      } catch (e) {}
+    }
   }
 }
 
 function learnFromResponse(tabId, interfaceName, entry) {
   if (!entry.responseBody) return;
-  
+
   const tab = getTab(tabId);
   const url = new URL(entry.url);
   const { methodName } = calculateMethodMetadata(url, interfaceName);
@@ -1030,9 +1151,13 @@ function learnFromResponse(tabId, interfaceName, entry) {
   const docEntry = tab.discoveryDocs.get(interfaceName);
   if (!docEntry || !docEntry.doc) return;
   const doc = docEntry.doc;
-  const m = doc.resources.learned ? doc.resources.learned.methods[methodName] : null;
+  const m = doc.resources.learned
+    ? doc.resources.learned.methods[methodName]
+    : null;
   // Also check probed methods
-  const proM = doc.resources.probed ? doc.resources.probed.methods[methodName] : null;
+  const proM = doc.resources.probed
+    ? doc.resources.probed.methods[methodName]
+    : null;
   const targetM = m || proM;
   if (!targetM) return;
 
@@ -1048,8 +1173,8 @@ function learnFromResponse(tabId, interfaceName, entry) {
   }
   if (!textBody) return;
 
-  const mimeType = entry.mimeType || '';
-  if (url.pathname.includes('batchexecute')) {
+  const mimeType = entry.mimeType || "";
+  if (url.pathname.includes("batchexecute")) {
     const results = parseBatchExecuteResponse(textBody);
     if (results) {
       for (const res of results) {
@@ -1057,30 +1182,48 @@ function learnFromResponse(tabId, interfaceName, entry) {
         if (callM) {
           const schemaName = `${res.rpcId}Response`;
           callM.response = { $ref: schemaName };
-          doc.schemas[schemaName] = generateSchemaFromJson(res.data, schemaName, doc.schemas, true);
+          doc.schemas[schemaName] = generateSchemaFromJson(
+            res.data,
+            schemaName,
+            doc.schemas,
+            true,
+          );
         }
       }
     }
-  } else if (mimeType.includes('json')) {
+  } else if (mimeType.includes("json")) {
     try {
       const json = JSON.parse(textBody);
-      const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Response`;
+      const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Response`;
       targetM.response = { $ref: schemaName };
-      doc.schemas[schemaName] = generateSchemaFromJson(json, schemaName, doc.schemas);
-    } catch(e) {}
-  } else if (mimeType.includes('protobuf') || entry.contentType?.includes('protobuf')) {
+      doc.schemas[schemaName] = generateSchemaFromJson(
+        json,
+        schemaName,
+        doc.schemas,
+      );
+    } catch (e) {}
+  } else if (
+    mimeType.includes("protobuf") ||
+    entry.contentType?.includes("protobuf")
+  ) {
     // Decode response protobuf heuristically
     try {
-      const bytes = entry.responseBase64 ? base64ToUint8(entry.responseBody) : new TextEncoder().encode(entry.responseBody);
+      const bytes = entry.responseBase64
+        ? base64ToUint8(entry.responseBody)
+        : new TextEncoder().encode(entry.responseBody);
       const tree = pbDecodeTree(bytes, 8, (val) => {
-        if (typeof val === 'string') {
+        if (typeof val === "string") {
           extractKeysFromText(tabId, val, entry.url, "response_protobuf");
         }
       });
-      const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Response`;
+      const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Response`;
       m.response = { $ref: schemaName };
-      doc.schemas[schemaName] = generateSchemaFromPbTree(tree, schemaName, doc.schemas);
-    } catch(e) {}
+      doc.schemas[schemaName] = generateSchemaFromPbTree(
+        tree,
+        schemaName,
+        doc.schemas,
+      );
+    } catch (e) {}
   }
 }
 
@@ -1091,22 +1234,33 @@ function generateSchemaFromPbTree(tree, name, schemas) {
     const prop = {
       id: node.field,
       number: node.field,
-      type: node.wire === 0 ? 'int64' : node.wire === 5 ? 'float' : node.wire === 1 ? 'double' : 'string',
-      description: `Discovered via response capture`
+      type:
+        node.wire === 0
+          ? "int64"
+          : node.wire === 5
+            ? "float"
+            : node.wire === 1
+              ? "double"
+              : "string",
+      description: `Discovered via response capture`,
     };
 
     if (node.message) {
       const nestedName = `${name}Field${node.field}`;
-      prop.type = 'message';
+      prop.type = "message";
       prop.$ref = nestedName;
-      schemas[nestedName] = generateSchemaFromPbTree(node.message, nestedName, schemas);
+      schemas[nestedName] = generateSchemaFromPbTree(
+        node.message,
+        nestedName,
+        schemas,
+      );
     } else if (node.string) {
-      prop.type = 'string';
+      prop.type = "string";
     }
 
     properties[fieldKey] = prop;
   }
-  return { id: name, type: 'object', properties };
+  return { id: name, type: "object", properties };
 }
 
 function generateSchemaFromJson(json, name, schemas, isIndexed = false) {
@@ -1117,40 +1271,65 @@ function generateSchemaFromJson(json, name, schemas, isIndexed = false) {
         const fieldNum = idx + 1;
         const fieldKey = `field${fieldNum}`;
         const nestedName = `${name}_f${fieldNum}`;
-        
+
         if (val === null || val === undefined) {
-          properties[fieldKey] = { id: fieldNum, number: fieldNum, type: 'string', description: 'Learned (null)' };
+          properties[fieldKey] = {
+            id: fieldNum,
+            number: fieldNum,
+            type: "string",
+            description: "Learned (null)",
+          };
         } else if (Array.isArray(val)) {
-          properties[fieldKey] = { id: fieldNum, number: fieldNum, $ref: nestedName };
-          schemas[nestedName] = generateSchemaFromJson(val, nestedName, schemas, true);
+          properties[fieldKey] = {
+            id: fieldNum,
+            number: fieldNum,
+            $ref: nestedName,
+          };
+          schemas[nestedName] = generateSchemaFromJson(
+            val,
+            nestedName,
+            schemas,
+            true,
+          );
         } else {
-          properties[fieldKey] = { id: fieldNum, number: fieldNum, type: typeof val };
+          properties[fieldKey] = {
+            id: fieldNum,
+            number: fieldNum,
+            type: typeof val,
+          };
         }
       });
-      return { id: name, type: 'object', properties };
+      return { id: name, type: "object", properties };
     } else {
-      const items = json.length > 0 ? generateSchemaFromJson(json[0], name + 'Item', schemas, false) : { type: 'string' };
-      return { type: 'array', items };
+      const items =
+        json.length > 0
+          ? generateSchemaFromJson(json[0], name + "Item", schemas, false)
+          : { type: "string" };
+      return { type: "array", items };
     }
-  } else if (typeof json === 'object' && json !== null) {
+  } else if (typeof json === "object" && json !== null) {
     const properties = {};
     for (const key in json) {
       const val = json[key];
-      const safeKey = key.replace(/[^a-zA-Z0-9]/g, '');
+      const safeKey = key.replace(/[^a-zA-Z0-9]/g, "");
       if (Array.isArray(val)) {
-        properties[key] = { 
-          type: 'array', 
-          items: val.length > 0 ? generateSchemaFromJson(val[0], name + safeKey + 'Item', schemas) : { type: 'string' } 
+        properties[key] = {
+          type: "array",
+          items:
+            val.length > 0
+              ? generateSchemaFromJson(val[0], name + safeKey + "Item", schemas)
+              : { type: "string" },
         };
-      } else if (typeof val === 'object' && val !== null) {
-        const nestedName = name + safeKey.charAt(0).toUpperCase() + safeKey.slice(1);
+      } else if (typeof val === "object" && val !== null) {
+        const nestedName =
+          name + safeKey.charAt(0).toUpperCase() + safeKey.slice(1);
         properties[key] = { $ref: nestedName };
         schemas[nestedName] = generateSchemaFromJson(val, nestedName, schemas);
       } else {
         properties[key] = { type: typeof val };
       }
     }
-    return { id: name, type: 'object', properties };
+    return { id: name, type: "object", properties };
   } else {
     return { type: typeof json };
   }
@@ -1204,20 +1383,17 @@ async function acquireTempTab(origin) {
   }
 
   // Create new entry
-  console.log(`[Debug] acquireTempTab: Creating new tab for ${origin}`);
+
   const promise = (async () => {
     try {
       const tab = await chrome.tabs.create({ url: origin, active: false });
-      console.log(
-        `[Debug] acquireTempTab: Tab created ${tab.id}, waiting for PING...`,
-      );
 
       // Wait for content script (max 15s)
       const deadline = Date.now() + 15000;
       while (Date.now() < deadline) {
         try {
           await chrome.tabs.sendMessage(tab.id, { type: "PING" });
-          console.log(`[Debug] acquireTempTab: Tab ${tab.id} ready!`);
+
           return tab.id;
         } catch (_) {
           await new Promise((r) => setTimeout(r, 500));
@@ -1293,9 +1469,6 @@ async function pageContextFetch(tabId, url, opts, initiatorOrigin) {
         if (tab && tab.url) {
           const tabOrigin = new URL(tab.url).origin;
           if (initiatorOrigin && tabOrigin === initiatorOrigin) {
-            console.log(
-              `[Debug] pageContextFetch: reusing same-origin tab ${tabId}`,
-            );
             // It IS the correct context, just not ready. Wait for it.
             // Poll for up to 5s
             const deadline = Date.now() + 5000;
@@ -1387,9 +1560,6 @@ async function fetchDiscoveryForService(
 
   // Find the initiator origin for this service
   let initiatorOrigin = tab.authContext?.origin || null;
-  console.log(
-    `[Debug] fetchDiscoveryForService: ${service} with keys: ${apiKeys?.length}, initiator: ${initiatorOrigin}`,
-  );
 
   const fetchFn = makePageFetchFn(tabId, initiatorOrigin);
   const triedKeys = new Set();
@@ -1404,17 +1574,10 @@ async function fetchDiscoveryForService(
   for (const apiKey of keysToTry) {
     if (apiKey) triedKeys.add(apiKey);
     const candidates = buildDiscoveryUrls(hostname, apiKey);
-    console.log(
-      `[Debug] Trying ${candidates.length} candidates for key ${apiKey ? "..." + apiKey.slice(-4) : "(none)"}`,
-    );
 
     for (const { url, headers, method } of candidates) {
       try {
-        console.log(`[Debug] Fetching candidate: ${url}`);
         const resp = await fetchFn(url, { method: method || "GET", headers });
-        console.log(
-          `[Debug] Fetch result: ${resp.status} (ok: ${resp.ok}, err: ${resp.error})`,
-        );
 
         if (resp.error || !resp.ok) continue;
 
@@ -1422,16 +1585,16 @@ async function fetchDiscoveryForService(
         try {
           doc = JSON.parse(resp.body);
         } catch (_) {
-          console.log(`[Debug] JSON parse failed for ${url}`);
           continue;
         }
 
         if (
           doc &&
-          (doc.discoveryVersion || doc.kind === "discovery#restDescription" || doc.openapi || doc.swagger)
+          (doc.discoveryVersion ||
+            doc.kind === "discovery#restDescription" ||
+            doc.openapi ||
+            doc.swagger)
         ) {
-          console.log(`[Debug] Discovery FOUND for ${service} at ${url}`);
-          
           let unifiedDoc = doc;
           // If it's OpenAPI/Swagger, convert it to our internal Discovery-like format
           if (doc.openapi || doc.swagger) {
@@ -1458,10 +1621,6 @@ async function fetchDiscoveryForService(
             // We can assume POST for gRPC-Web usually, or just check path coverage
             const match = findDiscoveryMethod(doc, seedUrlObj.pathname, "POST");
             if (!match) {
-              console.log(
-                `[Debug] Method for seedUrl ${seedUrl} NOT found in discovered doc. Triggering immediate hybrid probe.`,
-              );
-
               // We need to wait for this probe to finish before notifying popup?
               // Or notify now (partial) and then notify again after patch?
               // Better to patch first if fast, but probing takes time.
@@ -1476,10 +1635,8 @@ async function fetchDiscoveryForService(
           notifyPopup(tabId);
           return;
         } else {
-          console.log(`[Debug] Valid JSON but not a discovery doc at ${url}`);
         }
       } catch (err) {
-        console.log(`[Debug] Candidate fetch error:`, err);
         // continue to next candidate
       }
     }
@@ -1506,7 +1663,10 @@ async function fetchDiscoveryForService(
 
       if (
         doc &&
-        (doc.discoveryVersion || doc.kind === "discovery#restDescription" || doc.openapi || doc.swagger)
+        (doc.discoveryVersion ||
+          doc.kind === "discovery#restDescription" ||
+          doc.openapi ||
+          doc.swagger)
       ) {
         let unifiedDoc = doc;
         if (doc.openapi || doc.swagger) {
@@ -1537,9 +1697,6 @@ async function fetchDiscoveryForService(
   const finalSeedUrl = seedUrl || currentStatus?.seedUrl;
 
   if (finalSeedUrl) {
-    console.log(
-      `[Debug] Discovery failed for ${service}. Attempting req2proto probe fallback on ${finalSeedUrl}`,
-    );
     // Pick a key to try probing with (use the first available one if any)
     const probeKey = keysToTry[0] || null;
     await performProbeAndPatch(tabId, service, finalSeedUrl, probeKey);
@@ -1559,9 +1716,6 @@ async function fetchDiscoveryForService(
  */
 async function performProbeAndPatch(tabId, service, targetUrl, apiKey) {
   const tab = getTab(tabId);
-  console.log(
-    `[Debug] Invoking probeApiEndpoint for ${targetUrl} (Key: ${apiKey ? "Yes" : "No"})...`,
-  );
 
   if (typeof probeApiEndpoint === "undefined") {
     console.error("[Debug] CRITICAL: probeApiEndpoint is not defined!");
@@ -1582,8 +1736,6 @@ async function performProbeAndPatch(tabId, service, targetUrl, apiKey) {
       fetchFn,
     });
 
-    console.log("[Debug] Probe result:", probeResult);
-
     if (probeResult && probeResult.fields) {
       // Convert probe result to a "Virtual" Discovery Doc
       // Merge with existing if available
@@ -1597,16 +1749,8 @@ async function performProbeAndPatch(tabId, service, targetUrl, apiKey) {
         existingDoc,
       );
 
-      console.log(
-        `[Debug] Patching doc for ${service}. schemas:`,
-        Object.keys(virtualDoc.schemas || {}),
-      );
       if (virtualDoc.schemas) {
         for (const sName of Object.keys(virtualDoc.schemas)) {
-          console.log(
-            `[Debug] Schema ${sName} properties:`,
-            Object.keys(virtualDoc.schemas[sName].properties || {}),
-          );
         }
       }
 
@@ -1635,8 +1779,8 @@ function updateOrCreateVirtualDoc(service, seedUrl, probeResult, existingDoc) {
   const fullPath = u.pathname.substring(1); // remove leading /
 
   const { methodName, methodId } = calculateMethodMetadata(u, service);
-  const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Request`;
-  const responseSchemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, '')}Response`;
+  const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Request`;
+  const responseSchemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Response`;
 
   let doc = existingDoc
     ? JSON.parse(JSON.stringify(existingDoc))
@@ -1676,9 +1820,7 @@ function updateOrCreateVirtualDoc(service, seedUrl, probeResult, existingDoc) {
     for (const cand of responseCandidates) {
       if (doc.schemas[cand]) {
         actualResponseRef = cand;
-        console.log(
-          `[Debug] updateOrCreateVirtualDoc: Matched response schema ${cand} for ${methodName}`,
-        );
+
         break;
       }
     }
@@ -1781,10 +1923,6 @@ function convertProbeFieldsToSchema(fieldsObj, schemas, prefix = "") {
           field.messageType ||
           `${prefix}${field.name.charAt(0).toUpperCase() + field.name.slice(1)}Entry`;
 
-        console.log(
-          `[Debug] convertProbeFieldsToSchema: Adding nested repeated schema ${nestedName} for ${field.name}`,
-        );
-
         if (!schemas[nestedName]) {
           const nestedProperties = convertProbeFieldsToSchema(
             field.children,
@@ -1805,10 +1943,6 @@ function convertProbeFieldsToSchema(fieldsObj, schemas, prefix = "") {
       const nestedName =
         field.messageType ||
         `${prefix}${field.name.charAt(0).toUpperCase() + field.name.slice(1)}`;
-
-      console.log(
-        `[Debug] convertProbeFieldsToSchema: Adding nested schema ${nestedName} for ${field.name}`,
-      );
 
       if (!schemas[nestedName]) {
         const nestedProperties = convertProbeFieldsToSchema(
@@ -1971,8 +2105,7 @@ function handlePopupMessage(msg, _sender, sendResponse) {
         (result) => {
           tab.probeResults.set(`svc:${msg.endpointKey}`, result);
           if (result.scopes?.length) {
-            const svc =
-              ep.service || extractInterfaceName(new URL(ep.url));
+            const svc = ep.service || extractInterfaceName(new URL(ep.url));
             tab.scopes.set(svc, result.scopes);
           }
           mergeToGlobal(tab);
@@ -2038,15 +2171,22 @@ function handlePopupMessage(msg, _sender, sendResponse) {
     case "RENAME_FIELD": {
       if (tabId == null) return;
       const { service, schemaName, fieldKey, newName } = msg;
-      const docEntry = tab.discoveryDocs.get(service) || globalStore.discoveryDocs.get(service);
-      
+      const docEntry =
+        tab.discoveryDocs.get(service) ||
+        globalStore.discoveryDocs.get(service);
+
       if (!docEntry || !docEntry.doc) return;
       const doc = docEntry.doc;
 
       if (schemaName === "params") {
         // Find method and rename its parameter
-        const { methodName } = calculateMethodMetadata(new URL(msg.url || ""), service);
-        const m = doc.resources.learned?.methods[methodName] || doc.resources.probed?.methods[methodName];
+        const { methodName } = calculateMethodMetadata(
+          new URL(msg.url || ""),
+          service,
+        );
+        const m =
+          doc.resources.learned?.methods[methodName] ||
+          doc.resources.probed?.methods[methodName];
         if (m && m.parameters?.[fieldKey]) {
           m.parameters[fieldKey].name = newName;
           m.parameters[fieldKey].customName = true;
@@ -2075,15 +2215,30 @@ async function executeFuzzing(tabId, msg) {
   if (!schema || !schema.requestBody) return;
 
   const fields = schema.requestBody.fields;
-  const url = schema.endpoint?.url || (schema.method ? (new URL(schema.method.path, "https://" + msg.service + ".googleapis.com")).toString() : null);
+  const url =
+    schema.endpoint?.url ||
+    (schema.method
+      ? new URL(
+          schema.method.path,
+          "https://" + msg.service + ".googleapis.com",
+        ).toString()
+      : null);
   if (!url) return;
 
   const payloads = [];
   if (msg.config.strings) {
-    payloads.push("", "A".repeat(1000), "' OR 1=1 --", "<script>alert(1)</script>", "\0", "NaN", "undefined");
+    payloads.push(
+      "",
+      "A".repeat(1000),
+      "' OR 1=1 --",
+      "<script>alert(1)</script>",
+      "\0",
+      "NaN",
+      "undefined",
+    );
   }
   if (msg.config.numbers) {
-    payloads.push(0, -1, 2147483648, 9007199254740991, 1.1e+38, -1.1e+38);
+    payloads.push(0, -1, 2147483648, 9007199254740991, 1.1e38, -1.1e38);
   }
   if (msg.config.objects) {
     payloads.push(null, [], {});
@@ -2092,12 +2247,15 @@ async function executeFuzzing(tabId, msg) {
   for (const field of fields) {
     for (const payload of payloads) {
       // Create a copy of default fields with one fuzzed field
-      const fuzzedFields = fields.map(f => {
+      const fuzzedFields = fields.map((f) => {
         if (f.name === field.name) {
           return { ...f, value: payload };
         }
         // Use a safe default value for other fields
-        return { ...f, value: f.type === 'string' ? "test" : f.type === 'bool' ? false : 1 };
+        return {
+          ...f,
+          value: f.type === "string" ? "test" : f.type === "bool" ? false : 1,
+        };
       });
 
       const result = await executeSendRequest(tabId, {
@@ -2108,8 +2266,8 @@ async function executeFuzzing(tabId, msg) {
         contentType: schema.contentTypes[0],
         body: {
           mode: "form",
-          formData: { fields: fuzzedFields }
-        }
+          formData: { fields: fuzzedFields },
+        },
       });
 
       chrome.runtime.sendMessage({
@@ -2119,12 +2277,12 @@ async function executeFuzzing(tabId, msg) {
           field: field.name,
           payload: payload,
           status: result.status,
-          error: result.error
-        }
+          error: result.error,
+        },
       });
-      
+
       // Small delay to avoid rate limiting
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
     }
   }
 }
@@ -2566,7 +2724,7 @@ async function executeSendRequest(tabId, msg) {
           ? base64ToUint8(resp.body)
           : new TextEncoder().encode(resp.body);
       const tree = pbDecodeTree(bytes, 8, (val) => {
-        if (typeof val === 'string') {
+        if (typeof val === "string") {
           extractKeysFromText(tabId, val, url, "send_response_protobuf");
         }
       });
@@ -2675,13 +2833,13 @@ function notifyPopup(tabId) {
 
 function mergeVirtualParts(newDoc, oldDoc) {
   if (!oldDoc || !newDoc) return newDoc;
-  
+
   // Preserve "learned" methods
   if (oldDoc.resources?.learned) {
     if (!newDoc.resources) newDoc.resources = {};
     newDoc.resources.learned = oldDoc.resources.learned;
   }
-  
+
   // Preserve "probed" methods
   if (oldDoc.resources?.probed) {
     if (!newDoc.resources) newDoc.resources = {};
@@ -2696,7 +2854,7 @@ function mergeVirtualParts(newDoc, oldDoc) {
       }
     }
   }
-  
+
   return newDoc;
 }
 
@@ -2806,29 +2964,35 @@ const REQUEST_FILTER = {
   urls: ["<all_urls>"],
 };
 
-chrome.webRequest.onCompleted.addListener((details) => {
-  if (details.tabId < 0) return;
-  const tab = state.tabs.get(details.tabId);
-  if (!tab) return;
+chrome.webRequest.onCompleted.addListener(
+  (details) => {
+    if (details.tabId < 0) return;
+    const tab = state.tabs.get(details.tabId);
+    if (!tab) return;
 
-  const entry = tab.requestLog.find((r) => r.id === details.requestId);
-  if (entry) {
-    entry.status = details.statusCode;
-    entry.completedAt = Date.now();
-    notifyPopup(details.tabId);
-  }
-}, { urls: ["<all_urls>"] });
+    const entry = tab.requestLog.find((r) => r.id === details.requestId);
+    if (entry) {
+      entry.status = details.statusCode;
+      entry.completedAt = Date.now();
+      notifyPopup(details.tabId);
+    }
+  },
+  { urls: ["<all_urls>"] },
+);
 
-chrome.webRequest.onErrorOccurred.addListener((details) => {
-  if (details.tabId < 0) return;
-  const tab = state.tabs.get(details.tabId);
-  if (!tab) return;
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    if (details.tabId < 0) return;
+    const tab = state.tabs.get(details.tabId);
+    if (!tab) return;
 
-  const entry = tab.requestLog.find((r) => r.id === details.requestId);
-  if (entry) {
-    entry.status = "error";
-    entry.error = details.error;
-    entry.completedAt = Date.now();
-    notifyPopup(details.tabId);
-  }
-}, { urls: ["<all_urls>"] });
+    const entry = tab.requestLog.find((r) => r.id === details.requestId);
+    if (entry) {
+      entry.status = "error";
+      entry.error = details.error;
+      entry.completedAt = Date.now();
+      notifyPopup(details.tabId);
+    }
+  },
+  { urls: ["<all_urls>"] },
+);

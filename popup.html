@@ -29,9 +29,7 @@
         Copy
       </button>
 
-      <div class="empty" id="data-empty">
-        No data captured yet.
-      </div>
+      <div class="empty" id="data-empty">No data captured yet.</div>
       <div id="data-keys"></div>
     </section>
 
@@ -102,9 +100,18 @@
         <button id="btn-start-fuzz">Start Fuzzing</button>
       </div>
       <div id="fuzz-config">
-        <label><input type="checkbox" id="fuzz-strings" checked> Strings (Overflow/Injection)</label><br>
-        <label><input type="checkbox" id="fuzz-numbers" checked> Numbers (Limits/Types)</label><br>
-        <label><input type="checkbox" id="fuzz-objects" checked> Structures (Null/Circular)</label>
+        <label
+          ><input type="checkbox" id="fuzz-strings" checked /> Strings
+          (Overflow/Injection)</label
+        ><br />
+        <label
+          ><input type="checkbox" id="fuzz-numbers" checked /> Numbers
+          (Limits/Types)</label
+        ><br />
+        <label
+          ><input type="checkbox" id="fuzz-objects" checked /> Structures
+          (Null/Circular)</label
+        >
       </div>
       <div id="fuzz-log-container">
         <div class="section-header">Fuzzing Log</div>

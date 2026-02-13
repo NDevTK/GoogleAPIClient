@@ -7,11 +7,14 @@
   const API_KEY_PATTERNS = [
     { name: "Google API Key", re: /AIzaSy[\w-]{33}/g },
     { name: "Bearer Token", re: /bearer\s+[a-zA-Z0-9-._~+/]+=*/gi },
-    { name: "Generic API Key", re: /(?:api[-_]?key|access[-_]?token|auth[-_]?token)['"]?\s*[:=]\s*['"]?([a-zA-Z0-9\-_]{16,})['"]?/gi },
+    {
+      name: "Generic API Key",
+      re: /(?:api[-_]?key|access[-_]?token|auth[-_]?token)['"]?\s*[:=]\s*['"]?([a-zA-Z0-9\-_]{16,})['"]?/gi,
+    },
     { name: "Firebase Key", re: /AIza[0-9A-Za-z-_]{35}/g },
     { name: "Mapbox Token", re: /pk\.[a-zA-Z0-9.]+/g },
     { name: "GitHub Token", re: /ghp_[a-zA-Z0-9]{36}/g },
-    { name: "Stripe Key", re: /[sk|pk]_(?:test|live)_[0-9a-zA-Z]{24}/g }
+    { name: "Stripe Key", re: /[sk|pk]_(?:test|live)_[0-9a-zA-Z]{24}/g },
   ];
 
   const ENDPOINT_RE = /https?:\/\/[\w.-]+\.[a-z]{2,}(?::\d+)?\/[^\s"'<>)}\]]+/g;
@@ -35,9 +38,9 @@
       // Basic heuristic: must look like an API (often has 'api' or '/v1/' or '.json')
       const url = m[0];
       if (
-        url.includes("api") || 
-        /\bv\d+\b/.test(url) || 
-        url.endsWith(".json") || 
+        url.includes("api") ||
+        /\bv\d+\b/.test(url) ||
+        url.endsWith(".json") ||
         url.includes("/$rpc/") ||
         url.includes("graphql")
       ) {
