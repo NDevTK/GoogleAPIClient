@@ -560,7 +560,10 @@ function createFieldInput(
       childContainer.appendChild(
         createFieldInput(
           child.name,
-          { ...child, parentSchema: fieldDef.$ref || fieldDef.parentSchema },
+          {
+            ...child,
+            parentSchema: fieldDef.messageType || fieldDef.parentSchema,
+          },
           category,
           depth + 1,
           childVal,
