@@ -62,11 +62,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (newName && newName !== currentName) {
         const select = document.getElementById("send-ep-select");
         const svc = select.dataset.svc;
+        const methodId = select.dataset.discoveryId; // This is the ID of the selected method/endpoint
         const url = currentRequestUrl;
         await chrome.runtime.sendMessage({
           type: "RENAME_FIELD",
           tabId: currentTabId,
           service: svc,
+          methodId, // Crucial for reliable lookup
           schemaName: schema,
           fieldKey: key,
           newName,
@@ -447,6 +449,7 @@ function buildFormFields(schema, initialData = null) {
         createFieldInput(
           name,
           {
+            name: param.name, // Pass the name (which might be an alias)
             type:
               param.type === "integer"
                 ? "int32"

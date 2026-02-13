@@ -2092,6 +2092,7 @@ function handlePopupMessage(msg, _sender, sendResponse) {
 
     case "RENAME_FIELD": {
       if (tabId == null) return;
+      const tab = getTab(tabId);
       const { service, schemaName, fieldKey, newName } = msg;
       const docEntry =
         tab.discoveryDocs.get(service) ||
@@ -2102,18 +2103,51 @@ function handlePopupMessage(msg, _sender, sendResponse) {
 
       if (schemaName === "params") {
         // Find method and rename its parameter
-        const { methodName } = calculateMethodMetadata(
-          new URL(msg.url || ""),
+        let m = null;
+        console.log("[BG] RENAME_FIELD: Starting for params", {
           service,
-        );
-        const m =
-          doc.resources.learned?.methods[methodName] ||
-          doc.resources.probed?.methods[methodName];
-        if (m && m.parameters?.[fieldKey]) {
-          m.parameters[fieldKey].name = newName;
-          m.parameters[fieldKey].customName = true;
-          mergeToGlobal(tab);
-          sendResponse({ ok: true });
+          methodId: msg.methodId,
+          fieldKey,
+          newName,
+        });
+        if (msg.methodId) {
+          // Direct lookup by ID (reliable)
+          const match = findMethodById(doc, msg.methodId);
+          if (match) {
+            m = match.method;
+            console.log("[BG] Found method by ID:", m.id);
+          } else {
+            console.warn(
+              "[BG] Method ID provided but not found:",
+              msg.methodId,
+            );
+          }
+        }
+
+        if (!m) {
+          // Fallback: Calculate from URL (less reliable)
+          const { methodName } = calculateMethodMetadata(
+            new URL(msg.url || ""),
+            service,
+          );
+          console.log("[BG] Fallback to URL method name:", methodName);
+          m =
+            doc.resources.learned?.methods[methodName] ||
+            doc.resources.probed?.methods[methodName];
+        }
+
+        if (m) {
+          if (m.parameters?.[fieldKey]) {
+            console.log("[BG] Renaming param:", fieldKey, "to", newName);
+            m.parameters[fieldKey].name = newName;
+            m.parameters[fieldKey].customName = true;
+            mergeToGlobal(tab);
+            sendResponse({ ok: true });
+          } else {
+            console.warn("[BG] Param not found in method:", fieldKey);
+          }
+        } else {
+          console.warn("[BG] Method not found for rename.");
         }
       } else if (doc.schemas?.[schemaName]) {
         const schema = doc.schemas[schemaName];
@@ -2298,6 +2332,8 @@ function resolveEndpointSchema(tabId, endpointKey, service, methodId) {
         parameters = {};
         for (const [pName, pDef] of Object.entries(match.method.parameters)) {
           parameters[pName] = {
+            name: pDef.name || pName, // Add name property!
+            customName: !!pDef.customName, // Add customName flag!
             type: pDef.type || "string",
             location: pDef.location || "query",
             required: !!pDef.required,
