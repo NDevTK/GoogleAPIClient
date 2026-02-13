@@ -16,7 +16,6 @@
     <nav>
       <button class="tab active" data-panel="response">Requests</button>
       <button class="tab" data-panel="send">Send</button>
-      <button class="tab" data-panel="fuzz">Fuzz</button>
       <button class="tab" data-panel="data">Keys</button>
     </nav>
 
@@ -91,6 +90,22 @@
 
       <button id="btn-send" type="button">Send Request</button>
 
+      <details id="send-fuzz-section">
+        <summary>Fuzzing Controls</summary>
+        <div class="fuzz-inner">
+          <div id="fuzz-config">
+            <label><input type="checkbox" id="fuzz-strings" checked /> Strings</label>
+            <label><input type="checkbox" id="fuzz-numbers" checked /> Numbers</label>
+            <label><input type="checkbox" id="fuzz-objects" checked /> Structures</label>
+          </div>
+          <button id="btn-start-fuzz" class="btn-fuzz-start" type="button">Start Fuzzing</button>
+          <div id="fuzz-log-container">
+            <div class="section-header">Fuzzing Log</div>
+            <div id="fuzz-log" class="log-list"></div>
+          </div>
+        </div>
+      </details>
+
       <div
         id="send-response"
         style="
@@ -110,33 +125,6 @@
       </div>
     </section>
 
-    <!-- Fuzz Panel -->
-    <section id="panel-fuzz" class="panel">
-      <div id="fuzz-controls">
-        <select id="fuzz-ep-select">
-          <option value="">-- select target --</option>
-        </select>
-        <button id="btn-start-fuzz">Start Fuzzing</button>
-      </div>
-      <div id="fuzz-config">
-        <label
-          ><input type="checkbox" id="fuzz-strings" checked /> Strings
-          (Overflow/Injection)</label
-        ><br />
-        <label
-          ><input type="checkbox" id="fuzz-numbers" checked /> Numbers
-          (Limits/Types)</label
-        ><br />
-        <label
-          ><input type="checkbox" id="fuzz-objects" checked /> Structures
-          (Null/Circular)</label
-        >
-      </div>
-      <div id="fuzz-log-container">
-        <div class="section-header">Fuzzing Log</div>
-        <div id="fuzz-log" class="log-list"></div>
-      </div>
-    </section>
 
     <!-- Response Panel -->
     <section id="panel-response" class="panel active">

@@ -8,10 +8,9 @@ A specialized Chrome Extension for API discovery, protocol reverse-engineering (
 
 - **Passive Discovery**: `webRequest` for metadata, `debugger` (CDP) for full response bodies.
 - **Protocol Handlers**:
-  - `batchexecute`: Deeply unpacks Google's double-encoded batch RPCs using `parseBatchExecuteRequest`.
-  - `lib/protobuf.js`: Wire-format codec with recursive base64 scanning for nested keys.
+  - `lib/discovery.js`: Standardized `batchexecute` parsing (`parseBatchExecuteRequest/Response`) and OpenAPI-to-Discovery conversion.
+  - `lib/protobuf.js`: Wire-format codec and `jspbToTree` logic with recursive base64 scanning for nested keys.
   - `lib/req2proto.js`: Universal error-based probing (Specialized Google + Generic logic).
-  - **Normalization**: `convertOpenApiToDiscovery` translates OpenAPI/Swagger definitions into unified internal Discovery schemas.
 - **Smart Learning**: Built-in VDD engine that automatically maps request/response schemas and URL parameters from observed traffic.
 - **Autonomous Discovery**: Universal probing engine (`buildDiscoveryUrls`) that automatically searches for official documentation on encounters with new interfaces.
 - **Collaborative Mapping**: Persistent field and parameter renaming stored in `chrome.storage.local`.
@@ -29,4 +28,4 @@ A specialized Chrome Extension for API discovery, protocol reverse-engineering (
 - **Extend Key Patterns**: Update `KEY_PATTERNS` in `background.js`.
 - **Add Fuzzing Payload**: Update `payloads` array in `executeFuzzing` (`background.js`).
 - **Adjust Method Heuristics**: Modify `calculateMethodMetadata` in `background.js`.
-- **UI Changes**: Ensure new components maintain scroll position in their respective panels to avoid state loss on re-render.
+- **UI Changes**: Ensure new components maintain scroll position in their respective panels. The "Send" panel now includes integrated Fuzzing controls and logs.

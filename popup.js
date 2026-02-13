@@ -50,9 +50,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   document
     .getElementById("btn-start-fuzz")
     .addEventListener("click", startFuzzing);
-  document.getElementById("fuzz-ep-select").addEventListener("change", (e) => {
-    // Optional: show schema preview for fuzzing
-  });
 
   // Global rename handler
   document.addEventListener("click", async (e) => {
@@ -98,9 +95,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function startFuzzing() {
-    const select = document.getElementById("fuzz-ep-select");
+    const select = document.getElementById("send-ep-select");
     const epKey = select.value;
-    if (!epKey) return;
+    if (!epKey) {
+      alert("Please select an endpoint first.");
+      return;
+    }
 
     const opt = select.options[select.selectedIndex];
     const config = {
@@ -234,12 +234,9 @@ function renderDataPanel() {
 
 function renderSendPanel() {
   const select = document.getElementById("send-ep-select");
-  const fuzzSelect = document.getElementById("fuzz-ep-select");
   const prev = select.value;
-  const fuzzPrev = fuzzSelect.value;
 
   select.innerHTML = '<option value="">-- select method --</option>';
-  fuzzSelect.innerHTML = '<option value="">-- select method --</option>';
 
   // Populate from Discovery Docs
   if (tabData?.discoveryDocs) {
@@ -262,7 +259,6 @@ function renderSendPanel() {
         if (methods.length > 0) {
           const group = document.createElement("optgroup");
           group.label = svcData.summary.title || svcName;
-          const fuzzGroup = group.cloneNode(true);
 
           for (const m of methods) {
             const opt = document.createElement("option");
@@ -275,17 +271,14 @@ function renderSendPanel() {
             opt.dataset.path = m.path;
             opt.dataset.discoveryId = m.id;
             group.appendChild(opt);
-            fuzzGroup.appendChild(opt.cloneNode(true));
           }
           select.appendChild(group);
-          fuzzSelect.appendChild(fuzzGroup);
         }
       }
     }
   }
 
   if (prev) select.value = prev;
-  if (fuzzPrev) fuzzSelect.value = fuzzPrev;
 }
 
 function renderFieldsTable(fields, depth) {

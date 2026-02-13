@@ -931,3 +931,75 @@ details summary:hover {
   color: #c9d1d9;
   margin-bottom: 2px;
 }
+
+/* ─── Integrated Fuzzer ─── */
+.btn-fuzz-start {
+  background: #1f6feb;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  transition: background-color 0.2s;
+}
+.btn-fuzz-start:hover {
+  background: #388bfd;
+}
+.btn-fuzz-start:disabled {
+  background: #21262d;
+  color: #484f58;
+  cursor: not-allowed;
+}
+
+#send-fuzz-section {
+  border-top: 1px solid #21262d;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+#send-fuzz-section summary {
+  font-size: 11px;
+  font-weight: 600;
+  color: #8b949e;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+#send-fuzz-section summary::before {
+  content: "▶";
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 8px;
+  transition: transform 0.2s;
+}
+#send-fuzz-section[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.fuzz-inner {
+  margin-top: 8px;
+  padding-left: 4px;
+}
+
+#fuzz-config {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: #8b949e;
+}
+#fuzz-config input {
+  margin-right: 4px;
+}
+
+#fuzz-log {
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid #21262d;
+  background: #0d1117;
+  border-radius: 4px;
+  padding: 4px;
+}
