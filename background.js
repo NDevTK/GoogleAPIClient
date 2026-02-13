@@ -1084,16 +1084,18 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
   const m = doc.resources.learned.methods[methodName];
 
   // Learn parameters from URL
-  url.searchParams.forEach((value, name) => {
-    if (name === "key" || name === "api_key") return;
-    if (!m.parameters[name]) {
-      m.parameters[name] = {
-        type: isNaN(value) ? "string" : "number",
-        location: "query",
-        description: `Learned from request`,
-      };
-    }
-  });
+  if (!url.pathname.includes("batchexecute")) {
+    url.searchParams.forEach((value, name) => {
+      if (name === "key" || name === "api_key") return;
+      if (!m.parameters[name]) {
+        m.parameters[name] = {
+          type: isNaN(value) ? "string" : "number",
+          location: "query",
+          description: `Learned from request`,
+        };
+      }
+    });
+  }
 
   // Learn request body if present
   if (entry.rawBodyB64) {
@@ -2668,7 +2670,23 @@ async function executeSendRequest(tabId, msg) {
   let bodyEncoding = null;
 
   if (msg.httpMethod !== "GET" && msg.httpMethod !== "DELETE" && msg.body) {
-    if (msg.body.mode === "raw" && msg.body.rawBody) {
+    if (url.includes("batchexecute") && msg.body.mode === "form") {
+      // Special handling for batchexecute: wrap in f.req envelope
+      const fields = msg.body.formData?.fields || [];
+      const argsArray = encodeFormToJspb(fields); // Convert fields back to positional array
+      const innerJson = JSON.stringify(argsArray);
+
+      // Extract RPC ID from methodId (e.g. "Google.Photos.p1Takd" -> "p1Takd")
+      const rpcId = methodId ? methodId.split(".").pop() : "unknown";
+
+      const envelope = [[[rpcId, innerJson, null, "generic"]]];
+      const params = new URLSearchParams();
+      params.set("f.req", JSON.stringify(envelope));
+
+      body = params.toString();
+      headers["Content-Type"] =
+        "application/x-www-form-urlencoded;charset=UTF-8";
+    } else if (msg.body.mode === "raw" && msg.body.rawBody) {
       if (msg.contentType === "application/x-protobuf") {
         body = msg.body.rawBody;
         bodyEncoding = "base64";

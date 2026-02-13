@@ -942,6 +942,15 @@ function renderResponse(result) {
 
   if (result.body.format === "json") {
     bodyEl.innerHTML = `<pre class="resp-body">${esc(JSON.stringify(result.body.parsed, null, 2))}</pre>`;
+  } else if (
+    document.getElementById("send-url").value.includes("batchexecute")
+  ) {
+    // Force batch rendering for batchexecute requests
+    bodyEl.innerHTML = renderBatchExecuteResponse(
+      result.body.raw || "",
+      { service: result.service || svc },
+      discoveryInfo?.doc,
+    );
   } else if (result.body.format === "protobuf_tree") {
     bodyEl.innerHTML =
       `<div class="card-label">Decoded Protobuf</div>` +
@@ -1361,7 +1370,7 @@ function renderResponseBody(req) {
   return `<pre class="resp-body">${esc(req.responseBody.substring(0, 2000))}${req.responseBody.length > 2000 ? "..." : ""}</pre>`;
 }
 
-function renderBatchExecuteResponse(bodyText, req) {
+function renderBatchExecuteResponse(bodyText, req, overrideDoc = null) {
   try {
     let cleaned = bodyText.trim();
     if (cleaned.startsWith(")]}'")) {
@@ -1399,7 +1408,7 @@ function renderBatchExecuteResponse(bodyText, req) {
 
     let html = '<div class="pb-tree">';
     const svc = req.service;
-    const doc = tabData?.discoveryDocs?.[svc]?.doc;
+    const doc = overrideDoc || tabData?.discoveryDocs?.[svc]?.doc;
 
     for (const call of calls) {
       const nodes = jspbToTree(
