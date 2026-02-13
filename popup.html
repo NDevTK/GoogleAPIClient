@@ -90,6 +90,24 @@
       </div>
 
       <button id="btn-send" type="button">Send Request</button>
+
+      <div
+        id="send-response"
+        style="
+          display: none;
+          margin-top: 16px;
+          border-top: 1px solid #21262d;
+          padding-top: 16px;
+        "
+      >
+        <div class="section-header">Manual Send Result</div>
+        <div id="send-response-status"></div>
+        <details id="send-response-headers-section">
+          <summary>Response Headers</summary>
+          <table id="send-response-headers" class="auth-table"></table>
+        </details>
+        <div id="send-response-body"></div>
+      </div>
     </section>
 
     <!-- Fuzz Panel -->
@@ -130,23 +148,6 @@
           </button>
         </div>
         <div id="response-log" class="log-list"></div>
-      </div>
-      <div
-        id="send-response"
-        style="
-          display: none;
-          margin-top: 16px;
-          border-top: 1px solid #eee;
-          padding-top: 16px;
-        "
-      >
-        <div class="section-header">Manual Send Result</div>
-        <div id="send-response-status"></div>
-        <details id="send-response-headers-section">
-          <summary>Response Headers</summary>
-          <table id="send-response-headers" class="auth-table"></table>
-        </details>
-        <div id="send-response-body"></div>
       </div>
     </section>
 

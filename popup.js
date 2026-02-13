@@ -3,7 +3,6 @@
 let currentTabId = null;
 let tabData = null;
 let currentSchema = null;
-let expandedReqId = null; // Track which request is currently expanded
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
@@ -883,9 +882,6 @@ async function sendRequest() {
     // Collapse any open request details
     expandedReqId = null;
 
-    // Switch to Response tab
-    document.querySelector(".tab[data-panel='response']").click();
-
     // Scroll result into view
     setTimeout(() => {
       document
@@ -910,7 +906,10 @@ function renderResponse(result) {
   }
 
   const statusEl = document.getElementById("send-response-status");
-  const statusClass = result.ok ? "resp-status-ok" : "resp-status-error";
+  const statusClass =
+    result.ok || (result.status >= 200 && result.status < 300)
+      ? "resp-status-ok"
+      : "resp-status-error";
   statusEl.innerHTML =
     `<span class="${statusClass}">${result.status} ${esc(result.statusText || "")}</span>` +
     ` <span class="resp-timing">${result.timing || 0}ms</span>` +
@@ -930,8 +929,11 @@ function renderResponse(result) {
     return;
   }
 
+  bodyEl.innerHTML = renderResultBody(result);
+}
+
+function renderResultBody(result) {
   // Use schema-aware rendering if possible
-  // Use metadata from result first, fallback to DOM dataset
   const methodId =
     result.methodId ||
     document.getElementById("send-ep-select").dataset.discoveryId;
@@ -951,22 +953,23 @@ function renderResponse(result) {
   }
 
   if (result.body.format === "json") {
-    bodyEl.innerHTML = `<pre class="resp-body">${esc(JSON.stringify(result.body.parsed, null, 2))}</pre>`;
+    return `<pre class="resp-body">${esc(JSON.stringify(result.body.parsed, null, 2))}</pre>`;
   } else if (
     document.getElementById("send-url").value.includes("batchexecute")
   ) {
     // Force batch rendering for batchexecute requests
-    bodyEl.innerHTML = renderBatchExecuteResponse(
+    return renderBatchExecuteResponse(
       result.body.raw || "",
       { service: result.service || svc },
       discoveryInfo?.doc,
     );
   } else if (result.body.format === "protobuf_tree") {
-    bodyEl.innerHTML =
+    return (
       `<div class="card-label">Decoded Protobuf</div>` +
-      renderPbTree(result.body.parsed, respSchema);
+      renderPbTree(result.body.parsed, respSchema)
+    );
   } else {
-    bodyEl.innerHTML = `<pre class="resp-body">${esc(result.body.raw || "")}</pre>`;
+    return `<pre class="resp-body">${esc(result.body.raw || "")}</pre>`;
   }
 }
 
@@ -1213,18 +1216,6 @@ function findSchemaForRequest(req) {
   return null;
 }
 
-function toggleRequestDetails(reqId) {
-  // Update global state: if clicking the same one, collapse. Otherwise, expand new one.
-  if (expandedReqId === reqId) {
-    expandedReqId = null;
-  } else {
-    expandedReqId = reqId;
-  }
-
-  // Trigger re-render to ensure only the selected one is open and all buttons are correct
-  renderResponsePanel();
-}
-
 // ─── Response Panel (Request Log) ─────────────────────────────────────────────
 
 function renderResponsePanel() {
@@ -1246,10 +1237,8 @@ function renderResponsePanel() {
   let html = "";
   for (const req of tabData.requestLog) {
     const hasProto = !!req.decodedBody;
-    const isExpanded =
-      expandedReqId !== null && String(expandedReqId) === String(req.id);
 
-    html += `<div class="card request-card" style="margin-bottom:8px; ${isExpanded ? "border-color:#58a6ff" : ""}" data-id="${req.id}">
+    html += `<div class="card request-card clickable-card" style="margin-bottom:8px;" data-id="${req.id}">
       <div class="card-label" style="display:flex;justify-content:space-between;align-items:center">
         <span>
           <span class="badge ${req.method}">${req.method}</span>
@@ -1262,41 +1251,8 @@ function renderResponsePanel() {
         ${req.service ? `Service: <strong>${esc(req.service)}</strong>` : ""}
         ${hasProto ? ' <span class="badge badge-found">PROTOBUF BODY</span>' : ""}
       </div>
-      
-      <div class="request-details" style="display:${isExpanded ? "block" : "none"}; margin-top:8px; border-top:1px solid #eee; padding-top:8px">
-        ${
-          req.url.includes("batchexecute") && req.rawBodyB64
-            ? `
-          <div class="card-meta">Decoded Batch Request:</div>
-          <div class="pb-container" style="padding:0">${renderBatchExecuteRequest(req)}</div>
-        `
-            : hasProto
-              ? `
-          <div class="card-meta">Decoded Request Body:</div>
-          <div class="pb-container">${renderPbTree(req.decodedBody, findSchemaForRequest(req))}</div>
-        `
-              : ""
-        }
-        ${
-          req.responseBody
-            ? `
-          <div class="card-meta" style="margin-top:8px">Decoded Response Body:</div>
-          <div class="pb-container">${renderResponseBody(req)}</div>
-        `
-            : ""
-        }
-        <div class="card-meta" style="margin-top:8px">Request Headers:</div>
-        <pre class="headers-pre">${esc(JSON.stringify(req.requestHeaders, null, 2))}</pre>
-      </div>
-
-      <div class="card-actions" style="margin-top:6px;text-align:right">
-        <button class="btn-small btn-expand">${isExpanded ? "Collapse" : "Details"}</button>
-        <button class="btn-small btn-replay" data-id="${req.id}">Load into Send</button>
-      </div>
     </div>`;
   }
-  container.innerHTML = html;
-
   container.innerHTML = html;
 
   // Use requestAnimationFrame to ensure DOM is updated before scroll correction
@@ -1313,31 +1269,9 @@ function renderResponsePanel() {
     container.style.minHeight = "";
   });
 
-  // Scroll expanded item into view only if it was just opened
-  // We use a small check to see if we should scroll
-  if (
-    expandedReqId &&
-    document.activeElement &&
-    document.activeElement.classList.contains("btn-expand")
-  ) {
-    const expandedCard = container.querySelector(
-      `.request-card[data-id="${expandedReqId}"]`,
-    );
-    if (expandedCard) {
-      expandedCard.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    }
-  }
-
   // Attach listeners
-  container.querySelectorAll(".btn-replay").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      replayRequest(b.dataset.id);
-    };
-  });
-  container.querySelectorAll(".btn-expand").forEach((b) => {
-    b.onclick = () =>
-      toggleRequestDetails(b.closest(".request-card").dataset.id);
+  container.querySelectorAll(".request-card").forEach((c) => {
+    c.onclick = () => replayRequest(c.dataset.id);
   });
 }
 
@@ -1680,6 +1614,76 @@ function replayRequest(reqId) {
 
   // Clear previous body
   document.getElementById("send-raw-body").value = "";
+
+  // Populate historical response if available
+  if (req.responseBody || req.status) {
+    const historicalResult = {
+      ok: parseInt(req.status) < 400,
+      status: req.status,
+      headers: req.responseHeaders,
+      timing: 0,
+      service: req.service,
+      methodId: req.methodId,
+      body: null,
+    };
+
+    if (req.responseBody) {
+      const mimeType = req.mimeType || "";
+      const isProtobuf =
+        mimeType.includes("protobuf") ||
+        (req.requestHeaders &&
+          Object.entries(req.requestHeaders).some(
+            ([k, v]) =>
+              k.toLowerCase() === "content-type" &&
+              v.toLowerCase().includes("protobuf"),
+          ));
+
+      let bodyText = req.responseBody;
+      if (req.responseBase64) {
+        try {
+          const bytes = base64ToUint8(req.responseBody);
+          bodyText = new TextDecoder().decode(bytes);
+        } catch (e) {}
+      }
+
+      if (isProtobuf) {
+        try {
+          const bytes = req.responseBase64
+            ? base64ToUint8(req.responseBody)
+            : new TextEncoder().encode(req.responseBody);
+          historicalResult.body = {
+            format: "protobuf_tree",
+            parsed: pbDecodeTree(bytes),
+            raw: req.responseBody,
+            size: bytes.length,
+          };
+        } catch (e) {}
+      } else if (mimeType.includes("json")) {
+        try {
+          historicalResult.body = {
+            format: "json",
+            parsed: JSON.parse(bodyText),
+            raw: bodyText,
+            size: bodyText.length,
+          };
+        } catch (e) {}
+      }
+
+      if (!historicalResult.body) {
+        historicalResult.body = {
+          format: "text",
+          raw: bodyText,
+          size: bodyText.length,
+        };
+      }
+    }
+
+    renderResponse(historicalResult);
+    document.getElementById("send-response-status").innerHTML +=
+      ' <span class="badge badge-source" style="margin-left:8px">Historical</span>';
+  } else {
+    document.getElementById("send-response").style.display = "none";
+  }
 
   // Switch tab
   document.querySelector(".tab[data-panel='send']").click();
