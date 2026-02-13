@@ -1017,38 +1017,11 @@ function el(tag, className) {
   return e;
 }
 
-function renderDetails(tabId, entryId) {
-  const tab = getTab(tabId);
-  const entry = tab.requestLog.find((e) => e.id === entryId);
-  const detailsArea = document.getElementById("details-area");
-  if (!entry) {
-    detailsArea.innerHTML = '<div class="error">Request not found</div>';
-    return;
-  }
-
-  const service = entry.service;
-  const doc = tab.discoveryDocs.get(service)?.doc;
-  const url = new URL(entry.url);
-
-  const method = findDiscoveryMethod(doc, url.pathname, entry.method);
-
-  let reqSchema = method?.request;
-  if (reqSchema && reqSchema.$ref && doc?.schemas) {
-    const resolved = doc.schemas[reqSchema.$ref];
-    if (resolved) {
-      reqSchema = resolved;
-    }
-  }
-
-  const reqHtml = renderPbTree(entry.decodedBody, reqSchema);
-}
-
 function renderPbTree(nodes, schema = null) {
   if (!nodes || nodes.length === 0)
     return '<div class="pb-empty">Empty body</div>';
 
   // If passed a full method definition, use its request schema
-  // (This handles the top-level call from renderDetails)
   if (schema && schema.request) {
     schema = schema.request;
   }
@@ -1275,70 +1248,6 @@ function renderResponsePanel() {
   });
 }
 
-function renderResponseBody(req) {
-  const mimeType = req.mimeType || "";
-  const url = new URL(req.url);
-  const isBatchExecute = url.pathname.includes("batchexecute");
-
-  // Normalize body to text if it's base64 but looks like text/json/batch
-  let textBody = req.responseBody;
-  if (req.responseBase64) {
-    try {
-      const bytes = base64ToUint8(req.responseBody);
-      textBody = new TextDecoder().decode(bytes);
-    } catch (e) {
-      // Keep original for binary formats
-    }
-  }
-
-  if (isBatchExecute && textBody) {
-    return renderBatchExecuteResponse(textBody, req);
-  }
-
-  if (mimeType.includes("json") && textBody) {
-    try {
-      const parsed = JSON.parse(textBody);
-      return `<pre class="resp-body">${esc(JSON.stringify(parsed, null, 2))}</pre>`;
-    } catch (e) {
-      return `<pre class="resp-body">${esc(textBody)}</pre>`;
-    }
-  }
-
-  const isProtobuf =
-    mimeType.includes("protobuf") ||
-    (req.requestHeaders &&
-      Object.entries(req.requestHeaders).some(
-        ([k, v]) =>
-          k.toLowerCase() === "content-type" &&
-          v.toLowerCase().includes("protobuf"),
-      ));
-
-  if (isProtobuf) {
-    try {
-      const bytes = req.responseBase64
-        ? base64ToUint8(req.responseBody)
-        : new TextEncoder().encode(req.responseBody);
-      const tree = pbDecodeTree(bytes);
-      // Try to find a response schema
-      let schema = null;
-      const svc = req.service;
-      const doc = tabData?.discoveryDocs?.[svc]?.doc;
-      if (doc) {
-        const url = new URL(req.url);
-        const match = findDiscoveryMethod(doc, url.pathname, req.method);
-        if (match?.method?.response?.$ref) {
-          schema = resolveDiscoverySchema(doc, match.method.response.$ref);
-        }
-      }
-      return renderPbTree(tree, schema);
-    } catch (e) {
-      return `<pre class="resp-body">Protobuf decoding failed: ${esc(e.message)}</pre>`;
-    }
-  }
-
-  return `<pre class="resp-body">${esc(req.responseBody.substring(0, 2000))}${req.responseBody.length > 2000 ? "..." : ""}</pre>`;
-}
-
 function renderBatchExecuteResponse(bodyText, req, overrideDoc = null) {
   try {
     let cleaned = bodyText.trim();
@@ -1400,52 +1309,6 @@ function renderBatchExecuteResponse(bodyText, req, overrideDoc = null) {
     return html;
   } catch (e) {
     return `<pre class="resp-body">${esc(bodyText)}</pre>`;
-  }
-}
-
-function renderBatchExecuteRequest(req) {
-  try {
-    const rawBody = base64ToUint8(req.rawBodyB64);
-    const text = new TextDecoder().decode(rawBody);
-    const params = new URLSearchParams(text);
-    const fReq = params.get("f.req");
-    if (!fReq) return `<pre class="resp-body">${esc(text)}</pre>`;
-
-    const outer = JSON.parse(fReq);
-    let html = '<div class="pb-tree">';
-
-    const svc = req.service;
-    const doc = tabData?.discoveryDocs?.[svc]?.doc;
-
-    for (const call of outer[0]) {
-      const [rpcId, innerJson] = call;
-      let data = null;
-      try {
-        data = JSON.parse(innerJson);
-      } catch (e) {
-        data = innerJson;
-      }
-
-      const nodes = jspbToTree(Array.isArray(data) ? data : [data]);
-
-      // Try to find schema
-      let schema = null;
-      if (doc) {
-        const schemaName = `${rpcId}Request`;
-        schema = doc.schemas?.[schemaName];
-      }
-
-      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
-        <div class="card-label">RPC ID: <strong>${esc(rpcId)}</strong></div>
-        <div class="pb-container" style="margin-bottom:0;box-shadow:none;background:transparent;border:none;padding:0">
-          ${renderPbTree(nodes, schema)}
-        </div>
-      </div>`;
-    }
-    html += "</div>";
-    return html;
-  } catch (e) {
-    return `<pre class="resp-body">Failed to parse batch request: ${esc(e.message)}</pre>`;
   }
 }
 
