@@ -48,11 +48,33 @@
     return btoa(bin);
   }
 
+  // ─── Buffered emit ──────────────────────────────────────────────────────────
+  // intercept.js loads at document_start but the content script relay loads at
+  // document_idle.  Buffer captured responses until the relay signals ready,
+  // then replay and switch to live dispatch.
+
+  let _relayReady = false;
+  const _buffer = [];
+
   function emit(data) {
-    try {
-      document.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: data }));
-    } catch (_) {}
+    if (_relayReady) {
+      try {
+        document.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: data }));
+      } catch (_) {}
+    } else {
+      _buffer.push(data);
+    }
   }
+
+  document.addEventListener("__uasr_ready", () => {
+    _relayReady = true;
+    for (const data of _buffer) {
+      try {
+        document.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: data }));
+      } catch (_) {}
+    }
+    _buffer.length = 0;
+  });
 
   // ─── fetch() wrapper ───────────────────────────────────────────────────────
 

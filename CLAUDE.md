@@ -23,11 +23,11 @@ A Chrome Extension (MV3) for API discovery, protocol reverse-engineering (Protob
 
 | File | Role |
 |------|------|
-| `manifest.json` | MV3 manifest. Permissions: `webRequest`, `storage`, `activeTab`, `scripting`. |
+| `manifest.json` | MV3 manifest. Permissions: `webRequest`, `storage`, `activeTab`. |
 | `intercept.js` | Main-world content script. Wraps `fetch`/`XHR`, emits `__uasr_resp` CustomEvent with response body, headers, status. Filters out non-API content types. |
 | `content.js` | Isolated-world content script. DOM key/endpoint scanning, `PAGE_FETCH` relay for session-aware requests, `__uasr_resp` event relay to background. |
-| `background.js` | Service worker. Request interception, key extraction, schema learning, fuzzing engine, session storage, message routing. |
-| `popup.js` | Popup controller. Tab rendering, cross-tab log filtering, replay, fuzzing UI. |
+| `background.js` | Service worker. Request interception, key extraction, schema learning, request export builder, session storage, message routing. |
+| `popup.js` | Popup controller. Tab rendering, cross-tab log filtering, replay, export (curl/fetch/Python). |
 | `popup.html` | Popup markup. |
 | `popup.css` | Popup styles. |
 | `lib/discovery.js` | batchexecute parser, OpenAPI/Swagger normalization. |
@@ -46,8 +46,8 @@ A Chrome Extension (MV3) for API discovery, protocol reverse-engineering (Protob
 ## Common Tasks
 
 - **Extend Key Patterns**: Update `KEY_PATTERNS` in `background.js`.
-- **Add Fuzzing Payload**: Update `payloads` array in `executeFuzzing` (`background.js`).
 - **Adjust Method Heuristics**: Modify `calculateMethodMetadata` in `background.js`.
+- **Add Export Format**: Add a `formatXxx()` function in `popup.js` and a button in `popup.html`. The `BUILD_REQUEST` message handler in `background.js` returns the fully-encoded `{ url, method, headers, body }`.
 - **Add Intercepted Content Types**: Modify `shouldCapture()` / `isBinary()` in `intercept.js`.
-- **UI Changes**: Ensure new components maintain scroll position in their respective panels. The Send panel includes integrated fuzzing controls and logs.
+- **UI Changes**: Ensure new components maintain scroll position in their respective panels. The Send panel includes export buttons (curl, fetch, Python).
 - **Cross-Tab Features**: Tab metadata tracked in `_tabMeta` Map. Filter logic in popup controlled by `logFilter` state variable. New message types: `GET_TAB_LIST`, `GET_ALL_LOGS`.

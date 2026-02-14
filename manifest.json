@@ -2,12 +2,11 @@
   "manifest_version": 3,
   "name": "Universal API Security Researcher",
   "version": "2.0.0",
-  "description": "Universal API discovery, passive response capture, smart schema learning, and automated fuzzing.",
+  "description": "Universal API discovery, passive response capture, smart schema learning, and request export.",
   "permissions": [
     "webRequest",
     "storage",
-    "activeTab",
-    "scripting"
+    "activeTab"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

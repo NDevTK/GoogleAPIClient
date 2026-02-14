@@ -5,7 +5,6 @@ let tabData = null;
 let currentSchema = null;
 let currentRequestUrl = "";
 let currentRequestMethod = "POST";
-let fuzzRunning = false;
 let logFilter = "active"; // "active" | "all" | tabId (number)
 let allTabsData = null; // { tabId: { meta, requestLog } }
 
@@ -51,27 +50,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     .getElementById("btn-add-header")
     .addEventListener("click", addHeaderRow);
 
-  // Fuzz panel
-  document
-    .getElementById("btn-start-fuzz")
-    .addEventListener("click", () => {
-      if (fuzzRunning) {
-        cancelFuzzing();
-      } else {
-        startFuzzing();
-      }
-    });
-
-  // Restore fuzz state if a campaign is in progress or has results
-  chrome.runtime.sendMessage({ type: "GET_FUZZ_STATE", tabId: currentTabId }).then((fs) => {
-    if (!fs) return;
-    if (fs.running) setFuzzUIState(true);
-    if (fs.results?.length) {
-      for (let i = 0; i < fs.results.length; i++) {
-        renderFuzzUpdate(fs.results[i]);
-      }
-    }
-  }).catch(() => {});
+  // Export buttons
+  document.getElementById("btn-copy-curl").addEventListener("click", () => copyAsFormat("curl"));
+  document.getElementById("btn-copy-fetch").addEventListener("click", () => copyAsFormat("fetch"));
+  document.getElementById("btn-copy-python").addEventListener("click", () => copyAsFormat("python"));
 
   // Request log tab filter
   document.getElementById("log-tab-filter").addEventListener("change", async (e) => {
@@ -131,114 +113,139 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  async function startFuzzing() {
-    const select = document.getElementById("send-ep-select");
-    const epKey = select.value;
-    if (!epKey) {
-      alert("Please select an endpoint first.");
-      return;
+  // ─── Export Functions ──────────────────────────────────────────────────────
+
+  async function buildCurrentRequest() {
+    const isFormMode =
+      document.querySelector("#send-body-toggle .toggle-btn.active").dataset
+        .mode === "form";
+    let url = currentRequestUrl;
+    if (!url) return null;
+
+    const httpMethod = currentRequestMethod;
+    const contentType = document.getElementById("send-ct").value;
+    const epKey = document.getElementById("send-ep-select").value;
+    const sel = document.getElementById("send-ep-select");
+    const selectedOpt = sel.options[sel.selectedIndex];
+
+    const headers = {};
+    for (const row of document.querySelectorAll(
+      "#send-headers-list .header-row",
+    )) {
+      const key = row.querySelector(".header-key").value.trim();
+      const val = row.querySelector(".header-val").value.trim();
+      if (key) headers[key] = val;
     }
 
-    const opt = select.options[select.selectedIndex];
-    const config = {
-      strings: document.getElementById("fuzz-strings").checked,
-      numbers: document.getElementById("fuzz-numbers").checked,
-      objects: document.getElementById("fuzz-objects").checked,
-    };
-
-    if (!config.strings && !config.numbers && !config.objects) {
-      alert("Select at least one payload category.");
-      return;
-    }
-
-    setFuzzUIState(true);
-    document.getElementById("fuzz-log").innerHTML = "";
-
-    try {
-      await chrome.runtime.sendMessage({
-        type: "EXECUTE_FUZZ",
-        tabId: currentTabId,
-        service: opt.dataset.svc,
-        methodId: opt.dataset.discoveryId,
-        config,
-      });
-    } catch (err) {
-      console.error("Fuzzing failed:", err);
-      setFuzzUIState(false);
-    }
-  }
-
-  async function cancelFuzzing() {
-    try {
-      await chrome.runtime.sendMessage({
-        type: "CANCEL_FUZZ",
-        tabId: currentTabId,
-      });
-    } catch (_) {}
-  }
-
-  function setFuzzUIState(running) {
-    fuzzRunning = running;
-    const btn = document.getElementById("btn-start-fuzz");
-    if (running) {
-      btn.textContent = "Cancel";
-      btn.classList.add("btn-fuzz-cancel");
-      btn.disabled = false;
+    let body;
+    if (httpMethod === "GET" || httpMethod === "DELETE") {
+      body = null;
+    } else if (isFormMode) {
+      const formValues = collectFormValues();
+      if (Object.keys(formValues.params).length > 0) {
+        try {
+          const urlObj = new URL(url);
+          for (const [k, v] of Object.entries(formValues.params)) {
+            urlObj.searchParams.set(k, String(v));
+          }
+          url = urlObj.toString();
+        } catch (_) {}
+      }
+      body = {
+        mode: "form",
+        formData: { fields: formValues.fields },
+      };
     } else {
-      btn.textContent = "Start Fuzzing";
-      btn.classList.remove("btn-fuzz-cancel");
-      btn.disabled = false;
+      body = {
+        mode: "raw",
+        rawBody: document.getElementById("send-raw-body").value,
+      };
+    }
+
+    try {
+      return await chrome.runtime.sendMessage({
+        type: "BUILD_REQUEST",
+        tabId: currentTabId,
+        endpointKey: epKey,
+        service: selectedOpt?.dataset?.svc,
+        methodId: selectedOpt?.dataset?.discoveryId,
+        url,
+        httpMethod,
+        contentType,
+        headers,
+        body,
+      });
+    } catch (_) {
+      return null;
     }
   }
 
-  const MAX_FUZZ_LOG_ENTRIES = 200;
-
-  function renderFuzzUpdate(update) {
-    const log = document.getElementById("fuzz-log");
-
-    // Cap DOM entries
-    while (log.children.length >= MAX_FUZZ_LOG_ENTRIES) {
-      log.removeChild(log.lastChild);
+  function formatCurl(req) {
+    const parts = [`curl -X ${req.method}`];
+    for (const [k, v] of Object.entries(req.headers || {})) {
+      parts.push(`  -H '${k}: ${v}'`);
     }
-
-    const card = el("div", "card fuzz-card");
-    const tier = update.statusTier || classifyStatusLocal(update.status);
-    const statusClass =
-      tier === "interesting"
-        ? "badge-interesting"
-        : tier === "success"
-          ? "badge-found"
-          : tier === "network"
-            ? "badge-notfound"
-            : "badge-error";
-
-    const statusText =
-      update.status != null ? String(update.status) : "ERR";
-
-    let progressHtml = "";
-    if (update.progress) {
-      progressHtml = `<span class="fuzz-progress">${update.progress.done}/${update.progress.total}</span>`;
+    if (req.body) {
+      parts.push(`  -d '${req.body.replace(/'/g, "'\\''")}'`);
     }
-
-    card.innerHTML = `
-      <div class="card-label">
-        Field: <strong>${esc(update.field)}</strong> &middot;
-        <span class="badge ${statusClass}">${esc(statusText)}</span>
-        ${progressHtml}
-      </div>
-      <div class="card-meta">Payload: <code>${esc(JSON.stringify(update.payload))}</code></div>
-      ${update.error ? `<div class="card-meta fuzz-error">${esc(update.error)}</div>` : ""}
-      ${update.bodySnippet ? `<div class="card-meta fuzz-body"><code>${esc(update.bodySnippet)}</code></div>` : ""}
-    `;
-    log.prepend(card);
+    parts.push(`  '${req.url}'`);
+    return parts.join(" \\\n");
   }
 
-  function classifyStatusLocal(status) {
-    if (status == null) return "network";
-    if (status >= 500) return "interesting";
-    if (status >= 400) return "expected";
-    if (status >= 300) return "redirect";
-    return "success";
+  function formatFetch(req) {
+    const opts = { method: req.method };
+    if (Object.keys(req.headers || {}).length) opts.headers = req.headers;
+    if (req.body) opts.body = req.body;
+    return `fetch(${JSON.stringify(req.url)}, ${JSON.stringify(opts, null, 2)});`;
+  }
+
+  function formatPython(req) {
+    const lines = ["import requests", ""];
+    const kwargs = [];
+    if (Object.keys(req.headers || {}).length) {
+      kwargs.push(`    headers=${JSON.stringify(req.headers)}`);
+    }
+    if (req.body) {
+      kwargs.push(`    data=${JSON.stringify(req.body)}`);
+    }
+    const fn = req.method === "GET" ? "get" : req.method === "POST" ? "post" : req.method === "PUT" ? "put" : req.method === "DELETE" ? "delete" : "request";
+    if (fn === "request") {
+      kwargs.unshift(`    ${JSON.stringify(req.method)}`);
+    }
+    const url = `${JSON.stringify(req.url)}`;
+    if (kwargs.length) {
+      lines.push(`resp = requests.${fn}(`);
+      lines.push(`    ${url},`);
+      lines.push(kwargs.join(",\n") + ",");
+      lines.push(")");
+    } else {
+      lines.push(`resp = requests.${fn}(${url})`);
+    }
+    lines.push("print(resp.status_code, resp.text)");
+    return lines.join("\n");
+  }
+
+  async function copyAsFormat(format) {
+    const btn = document.getElementById(`btn-copy-${format}`);
+    const req = await buildCurrentRequest();
+    if (!req || req.error) {
+      btn.textContent = "No request";
+      setTimeout(() => { btn.textContent = format === "python" ? "Python" : format; }, 1500);
+      return;
+    }
+
+    let text;
+    if (format === "curl") text = formatCurl(req);
+    else if (format === "fetch") text = formatFetch(req);
+    else text = formatPython(req);
+
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = "Copied!";
+    } catch (_) {
+      btn.textContent = "Failed";
+    }
+    setTimeout(() => { btn.textContent = format === "python" ? "Python" : format; }, 1500);
   }
 
   const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;
@@ -256,22 +263,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (msg.tabId === currentTabId || logFilter !== "active") {
         throttledLoadState();
       }
-    }
-    if (msg.type === "FUZZ_UPDATE" && msg.tabId === currentTabId)
-      renderFuzzUpdate(msg.update);
-    if (msg.type === "FUZZ_COMPLETE" && msg.tabId === currentTabId) {
-      setFuzzUIState(false);
-      const log = document.getElementById("fuzz-log");
-      const summary = el("div", "card fuzz-card fuzz-summary");
-      summary.innerHTML = `<div class="card-label">${msg.cancelled ? "Cancelled" : "Complete"} — ${msg.total} requests sent</div>`;
-      log.prepend(summary);
-    }
-    if (msg.type === "FUZZ_ERROR" && msg.tabId === currentTabId) {
-      setFuzzUIState(false);
-      const log = document.getElementById("fuzz-log");
-      const card = el("div", "card fuzz-card");
-      card.innerHTML = `<div class="card-label fuzz-error">${esc(msg.error)}</div>`;
-      log.prepend(card);
     }
   });
   loadState();

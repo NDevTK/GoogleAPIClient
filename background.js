@@ -11,10 +11,6 @@ const state = {
   tabs: new Map(),
 };
 
-// Fuzzing campaign state — keyed by tabId
-// { abort: boolean, running: boolean, results: Array<{field, payload, status, error, bodySnippet, statusTier}> }
-const activeFuzz = new Map();
-
 // Session storage for request logs — survives SW restarts, clears on browser close
 const _sessionSaveTimers = new Map(); // tabId → timeoutId
 const _tabMeta = new Map(); // tabId → { title, url, closed? }
@@ -2349,28 +2345,12 @@ function handlePopupMessage(msg, _sender, sendResponse) {
       return true;
     }
 
-    case "EXECUTE_FUZZ": {
+    case "BUILD_REQUEST": {
       if (tabId == null) return;
-      executeFuzzing(tabId, msg);
-      sendResponse({ ok: true });
-      return;
-    }
-
-    case "CANCEL_FUZZ": {
-      if (tabId == null) return;
-      const fuzzState = activeFuzz.get(tabId);
-      if (fuzzState) fuzzState.abort = true;
-      sendResponse({ ok: true });
-      return;
-    }
-
-    case "GET_FUZZ_STATE": {
-      const fuzzState = activeFuzz.get(tabId);
-      sendResponse({
-        running: !!fuzzState?.running,
-        results: fuzzState?.results || [],
+      buildExportRequest(tabId, msg).then((result) => {
+        sendResponse(result);
       });
-      return;
+      return true;
     }
 
     case "RENAME_FIELD": {
@@ -2441,192 +2421,72 @@ function handlePopupMessage(msg, _sender, sendResponse) {
   }
 }
 
-// ─── Fuzzing Engine ──────────────────────────────────────────────────────────
+// ─── Export Request Builder ──────────────────────────────────────────────────
 
 /**
- * Pick a plausible default for a field that isn't being fuzzed.
- * Prefers the field's own enum/format constraints over naive fallbacks.
+ * Build a fully-encoded request (URL, headers, body) for export.
+ * Reuses the same encoding logic as executeSendRequest but returns the
+ * request instead of sending it.
  */
-function fuzzDefaultValue(f) {
-  if (f.enum && f.enum.length > 0) return f.enum[0];
-  if (f.value !== undefined && f.value !== null && f.value !== "") return f.value;
-  switch (f.type) {
-    case "boolean":
-    case "bool":
-      return false;
-    case "integer":
-    case "int32":
-    case "uint32":
-    case "sint32":
-    case "fixed32":
-    case "sfixed32":
-      return 1;
-    case "number":
-    case "float":
-    case "double":
-    case "int64":
-    case "uint64":
-    case "sint64":
-    case "fixed64":
-    case "sfixed64":
-      return 1;
-    default:
-      // For strings, use format-aware defaults
-      if (f.format === "date" || f.format === "date-time") return "2024-01-01T00:00:00Z";
-      if (f.format === "email") return "test@example.com";
-      if (f.format === "uri" || f.format === "url") return "https://example.com";
-      if (f.format === "uuid") return "00000000-0000-0000-0000-000000000001";
-      return "test";
-  }
-}
-
-/**
- * Classify an HTTP status code into a tier for UI rendering.
- */
-function classifyStatus(status) {
-  if (status == null) return "network";
-  if (status >= 500) return "interesting"; // Server errors — most valuable
-  if (status >= 400) return "expected"; // Client errors — validation rejections
-  if (status >= 300) return "redirect";
-  return "success";
-}
-
-const MAX_FUZZ_RESULTS = 200;
-
-async function executeFuzzing(tabId, msg) {
-  const schema = resolveEndpointSchema(tabId, null, msg.service, msg.methodId);
-  if (!schema || !schema.requestBody) {
-    chrome.runtime.sendMessage({
-      type: "FUZZ_ERROR",
-      tabId,
-      error: !schema
-        ? "Could not resolve endpoint schema"
-        : "Endpoint has no request body fields to fuzz",
-    }).catch(() => {});
-    return;
+async function buildExportRequest(tabId, msg) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(msg.url);
+  } catch (_) {
+    return { error: "invalid URL" };
   }
 
-  const fields = schema.requestBody.fields;
-  const url =
-    schema.endpoint?.url ||
-    (schema.method
-      ? new URL(
-          schema.method.path,
-          "https://" + msg.service + ".googleapis.com",
-        ).toString()
-      : null);
-  if (!url) {
-    chrome.runtime.sendMessage({
-      type: "FUZZ_ERROR",
-      tabId,
-      error: "Could not determine endpoint URL",
-    }).catch(() => {});
-    return;
+  const headers = { ...(msg.headers || {}) };
+  if (
+    msg.contentType &&
+    msg.httpMethod !== "GET" &&
+    msg.httpMethod !== "DELETE"
+  ) {
+    headers["Content-Type"] = msg.contentType;
   }
 
-  // Initialize campaign state
-  const campaign = { abort: false, running: true, results: [] };
-  activeFuzz.set(tabId, campaign);
-
-  const payloads = [];
-  if (msg.config.strings) {
-    payloads.push(
-      "",
-      "A".repeat(1000),
-      "' OR 1=1 --",
-      "<script>alert(1)</script>",
-      "\0",
-      "NaN",
-      "undefined",
-    );
-  }
-  if (msg.config.numbers) {
-    payloads.push(0, -1, 2147483648, 9007199254740991, 1.1e38, -1.1e38);
-  }
-  if (msg.config.objects) {
-    payloads.push(null, [], {});
-  }
-
-  let delay = 200;
-  let completed = 0;
-  const total = fields.length * payloads.length;
-
-  for (const field of fields) {
-    if (campaign.abort) break;
-    for (const payload of payloads) {
-      if (campaign.abort) break;
-
-      const fuzzedFields = fields.map((f) => {
-        if (f.name === field.name) {
-          return { ...f, value: payload };
-        }
-        return { ...f, value: fuzzDefaultValue(f) };
-      });
-
-      const result = await executeSendRequest(tabId, {
-        service: msg.service,
-        methodId: msg.methodId,
-        url: url + "#_internal_probe",
-        httpMethod: schema.method?.httpMethod || "POST",
-        contentType: schema.contentTypes[0],
-        body: {
-          mode: "form",
-          formData: { fields: fuzzedFields },
-        },
-      });
-
-      // Extract a short body snippet for context
-      let bodySnippet = null;
-      if (result.body) {
-        const raw =
-          typeof result.body === "string"
-            ? result.body
-            : JSON.stringify(result.body.parsed || result.body);
-        bodySnippet = raw.length > 200 ? raw.slice(0, 200) + "…" : raw;
-      }
-
-      completed++;
-      const statusTier = classifyStatus(result.status);
-
-      const update = {
-        field: field.name,
-        payload,
-        status: result.status,
-        error: result.error,
-        bodySnippet,
-        statusTier,
-        progress: { done: completed, total },
-      };
-
-      if (campaign.results.length < MAX_FUZZ_RESULTS) {
-        campaign.results.push(update);
-      }
-
-      chrome.runtime.sendMessage({
-        type: "FUZZ_UPDATE",
-        tabId,
-        update,
-      }).catch(() => {}); // Popup may be closed
-
-      // Adaptive delay: back off on 429/5xx, speed up on clean responses
-      if (result.status === 429) {
-        delay = Math.min(delay * 2, 5000);
-      } else if (result.status >= 500) {
-        delay = Math.min(delay + 100, 2000);
-      } else if (delay > 200) {
-        delay = Math.max(delay - 50, 200);
-      }
-      await new Promise((r) => setTimeout(r, delay));
+  // API key from endpoint
+  const tab = getTab(tabId);
+  const ep = msg.endpointKey ? tab.endpoints.get(msg.endpointKey) : null;
+  if (ep?.apiKey) {
+    if (ep.apiKeySource === "url") {
+      parsedUrl.searchParams.set("key", ep.apiKey);
+    } else {
+      headers["X-Goog-Api-Key"] = ep.apiKey;
     }
   }
 
-  campaign.running = false;
-  chrome.runtime.sendMessage({
-    type: "FUZZ_COMPLETE",
-    tabId,
-    cancelled: campaign.abort,
-    total: completed,
-  }).catch(() => {});
+  const url = parsedUrl.toString();
+
+  let body = null;
+  if (msg.httpMethod !== "GET" && msg.httpMethod !== "DELETE" && msg.body) {
+    if (url.includes("batchexecute") && msg.body.mode === "form") {
+      const fields = msg.body.formData?.fields || [];
+      const argsArray = encodeFormToJspb(fields);
+      const innerJson = JSON.stringify(argsArray);
+      const rpcId = msg.methodId ? msg.methodId.split(".").pop() : "unknown";
+      const envelope = [[[rpcId, innerJson, null, "generic"]]];
+      const params = new URLSearchParams();
+      params.set("f.req", JSON.stringify(envelope));
+      body = params.toString();
+      headers["Content-Type"] =
+        "application/x-www-form-urlencoded;charset=UTF-8";
+    } else if (msg.body.mode === "raw" && msg.body.rawBody) {
+      body = msg.body.rawBody;
+    } else if (msg.body.mode === "form" && msg.body.formData?.fields?.length) {
+      const fields = msg.body.formData.fields;
+      if (msg.contentType === "application/x-protobuf") {
+        const encoded = encodeFormToProtobuf(fields);
+        body = uint8ToBase64(encoded);
+      } else if (msg.contentType === "application/json+protobuf") {
+        body = JSON.stringify(encodeFormToJspb(fields));
+      } else {
+        body = JSON.stringify(encodeFormToJson(fields));
+      }
+    }
+  }
+
+  return { url, method: msg.httpMethod || "POST", headers, body };
 }
 
 const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;

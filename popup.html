@@ -78,23 +78,15 @@
         ></textarea>
       </div>
 
-      <button id="btn-send" type="button">Send Request</button>
-
-      <details id="send-fuzz-section">
-        <summary>Fuzzing Controls</summary>
-        <div class="fuzz-inner">
-          <div id="fuzz-config">
-            <label><input type="checkbox" id="fuzz-strings" checked /> Strings</label>
-            <label><input type="checkbox" id="fuzz-numbers" checked /> Numbers</label>
-            <label><input type="checkbox" id="fuzz-objects" checked /> Structures</label>
-          </div>
-          <button id="btn-start-fuzz" class="btn-fuzz-start" type="button">Start Fuzzing</button>
-          <div id="fuzz-log-container">
-            <div class="section-header">Fuzzing Log</div>
-            <div id="fuzz-log" class="log-list"></div>
-          </div>
+      <div class="send-actions">
+        <button id="btn-send" type="button">Send Request</button>
+        <div class="export-row">
+          <span class="export-label">Export:</span>
+          <button id="btn-copy-curl" class="btn-export" type="button">curl</button>
+          <button id="btn-copy-fetch" class="btn-export" type="button">fetch</button>
+          <button id="btn-copy-python" class="btn-export" type="button">Python</button>
         </div>
-      </details>
+      </div>
 
       <div
         id="send-response"

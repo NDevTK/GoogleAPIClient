@@ -1,9 +1,19 @@
 // Content script: scans the page DOM for API keys and endpoint URLs,
-// and acts as a fetch relay for the background service worker.
-// Content scripts share the page's cookie jar so fetches here carry
-// the same credentials as the page itself — no main-world injection needed.
+// acts as a fetch relay for the background service worker, and relays
+// intercepted response bodies from the main-world intercept script.
 
 (function () {
+  // ─── Response Body Relay (must be first — drains intercept.js buffer) ────
+
+  document.addEventListener("__uasr_resp", (e) => {
+    if (!e.detail) return;
+    chrome.runtime.sendMessage({ type: "RESPONSE_BODY", ...e.detail });
+  });
+  // Signal intercept.js that the relay is listening — replays buffered events
+  document.dispatchEvent(new CustomEvent("__uasr_ready"));
+
+  // ─── Key & Endpoint Patterns ────────────────────────────────────────────
+
   const API_KEY_PATTERNS = [
     { name: "Google API Key", re: /AIzaSy[\w-]{33}/g },
     { name: "Bearer Token", re: /bearer\s+[a-zA-Z0-9-._~+/]+=*/gi },
@@ -161,13 +171,6 @@
     if (msg.type !== "PAGE_FETCH") return;
     handlePageFetch(msg).then(sendResponse);
     return true; // async sendResponse
-  });
-
-  // ─── Response Body Relay: intercept.js (main world) → background ──────────
-
-  document.addEventListener("__uasr_resp", (e) => {
-    if (!e.detail) return;
-    chrome.runtime.sendMessage({ type: "RESPONSE_BODY", ...e.detail });
   });
 
   // ─── Init ──────────────────────────────────────────────────────────────────

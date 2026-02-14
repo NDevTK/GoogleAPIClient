@@ -19,10 +19,10 @@ A Chrome Extension for reverse-engineering and security testing APIs across any 
 - **Recursive Key Scanning**: Decodes base64-encoded strings (up to 3 levels deep) within Protobuf messages to find hidden tokens.
 - **Passive Response Capture**: A main-world `fetch`/`XHR` interceptor captures response bodies without the Chrome debugger bar, enabling output schema learning and key extraction from responses.
 
-### 3. Advanced Security Testing
+### 3. Replay & Export
 
-- **Fuzzing Engine**: Automated field-level probing for SQLi, XSS, overflow, and type-confusion with adaptive rate limiting, cancel support, and tiered status classification (integrated into the **Send** tab).
 - **Session-Aware Replay**: The Send panel executes requests within the target page's context, automatically attaching cookies and authentication.
+- **One-Click Export**: Copy any configured request as **curl**, **fetch** (JavaScript), or **Python** (requests) directly from the Send tab.
 - **Unified Inspection Workflow**: Click any request in the log to inspect decoded Protobuf, JSON, headers, and historical response data directly in the Send tab.
 
 ### 4. Cross-Tab Request Log
@@ -44,14 +44,14 @@ A Chrome Extension for reverse-engineering and security testing APIs across any 
 2. **Inspect**: Open the popup to see discovered keys, mapped interfaces, and request traffic.
 3. **Analyze**: Click a request in the log to view decoded Protobuf, JSON, or batchexecute traffic and historical responses in the Send tab.
 4. **Map**: Click the **pencil** icon next to any field to give it a descriptive name.
-5. **Test**: Load any method into the Send tab to replay it, or expand the Fuzzing Controls section for automated vulnerability probing.
+5. **Test**: Load any method into the Send tab to replay it, or export as curl/fetch/Python for use in external tools.
 
 ## Architecture
 
 ```
 intercept.js   Main-world fetch/XHR interceptor (response body capture)
 content.js     Isolated-world content script (DOM key scanning, fetch relay, intercept relay)
-background.js  Service worker (request interception, schema learning, fuzzing, storage)
+background.js  Service worker (request interception, schema learning, export, storage)
 popup.js       Popup controller (UI rendering, cross-tab filtering, replay)
 popup.html     Popup markup
 popup.css      Popup styles
