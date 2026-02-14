@@ -499,7 +499,7 @@ function extractInterfaceName(urlObj) {
     }
   }
 
-  // Special handling for Google (keep legacy support)
+  // Special handling for Google API hosts
   if (
     hostname.endsWith(".googleapis.com") ||
     hostname.endsWith(".clients6.google.com")
@@ -508,8 +508,26 @@ function extractInterfaceName(urlObj) {
     return m ? m[1] : hostname;
   }
 
-  // API root keywords (excludes bare version segments to avoid mid-path mismatches)
-  const apiRootKeywords = ["api", "rest", "graphql", "grpc", "async"];
+  // Google-specific: /async/ is an API root on Google properties only
+  const isGoogleHost =
+    hostname.endsWith(".google.com") || hostname.includes("google");
+
+  // API root keywords — segments that mark where the API namespace begins
+  const apiRootKeywords = [
+    "api",
+    "_api",
+    "__api",
+    "rest",
+    "graphql",
+    "gql",
+    "grpc",
+    "rpc",
+    "wp-json",
+    "services",
+    "gateway",
+  ];
+  if (isGoogleHost) apiRootKeywords.push("async");
+
   const isVersionSeg = (s) => /^v\d+\w*$/i.test(s);
 
   // Find where the API "root" starts — match keyword roots first
@@ -525,21 +543,22 @@ function extractInterfaceName(urlObj) {
     }
   }
 
-  // If no keyword root, accept a version segment only at path start (e.g. /v1/users)
-  if (rootIdx === -1 && segments.length > 0 && isVersionSeg(segments[0])) {
-    rootIdx = 0;
+  // If no keyword root, find the first version segment anywhere in the path
+  if (rootIdx === -1) {
+    for (let i = 0; i < segments.length; i++) {
+      if (isVersionSeg(segments[i])) {
+        rootIdx = i;
+        break;
+      }
+    }
   }
 
   if (rootIdx !== -1) {
     return hostname + "/" + segments.slice(0, rootIdx + 1).join("/");
   }
 
-  // Fallback: If it's a known non-API hostname but we're here,
-  // it might be an internal app endpoint. Use 1 segment of path.
-  if (segments.length > 0) {
-    return hostname + "/" + segments[0];
-  }
-
+  // Fallback: group under hostname alone — most sites have one API,
+  // and the first path segment is typically a resource, not a service boundary
   return hostname;
 }
 
@@ -894,8 +913,15 @@ chrome.webRequest.onHeadersReceived.addListener(
 function looksLikeDynamicSegment(s) {
   if (/^\d+$/.test(s)) return true; // Pure numeric
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s)) return true; // UUID prefix
-  // Base64-like tokens: 20+ chars, mixed case/digits, not all lowercase letters
-  if (s.length >= 20 && /^[A-Za-z0-9_-]+$/.test(s) && !/^[a-z]+$/.test(s)) return true;
+  if (/^[0-9a-f]{24}$/i.test(s)) return true; // MongoDB ObjectId
+  // Base64-like tokens: 16+ chars, must contain a digit (avoids camelCase names)
+  if (
+    s.length >= 16 &&
+    /^[A-Za-z0-9_-]+$/.test(s) &&
+    /\d/.test(s) &&
+    !/^[a-z]+$/.test(s)
+  )
+    return true;
   return false;
 }
 
@@ -1040,6 +1066,13 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
       }
       if (changed) m.path = templateParts.join("/");
     }
+  }
+
+  // Record the observed Content-Type on the method for replay fidelity
+  if (headers["content-type"]) {
+    const ct = headers["content-type"].split(";")[0].trim();
+    if (!m.contentTypes) m.contentTypes = [];
+    if (!m.contentTypes.includes(ct)) m.contentTypes.unshift(ct);
   }
 
   // Learn request body if present
@@ -2855,6 +2888,7 @@ function resolveEndpointSchema(tabId, endpointKey, service, methodId) {
         description: match.method.description,
         scopes: match.method.scopes || [],
         resourceName: match.resourceName,
+        contentTypes: match.method.contentTypes || [],
       };
 
       // Resolve parameters
@@ -2923,8 +2957,15 @@ function resolveEndpointSchema(tabId, endpointKey, service, methodId) {
     }
   }
 
-  // 3. Content type suggestions
-  if (ep?.contentType) contentTypes.push(ep.contentType);
+  // 3. Content type suggestions — prefer method-level observed CTs
+  if (discoveryMethod?.contentTypes?.length) {
+    for (const ct of discoveryMethod.contentTypes) {
+      if (!contentTypes.includes(ct)) contentTypes.push(ct);
+    }
+  }
+  if (ep?.contentType && !contentTypes.includes(ep.contentType)) {
+    contentTypes.push(ep.contentType);
+  }
   if (probeResult?.probeDetails) {
     for (const pd of probeResult.probeDetails) {
       if (

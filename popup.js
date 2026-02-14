@@ -1890,7 +1890,7 @@ function getStatusBadge(status) {
 
 let currentReplayRequest = null;
 
-function replayRequest(reqId, sourceTabId) {
+async function replayRequest(reqId, sourceTabId) {
   // Search the correct log source
   let req;
   if (sourceTabId && allTabsData && allTabsData[sourceTabId]) {
@@ -2005,13 +2005,11 @@ function replayRequest(reqId, sourceTabId) {
         console.warn("[Replay] Failed to extract URL parameters:", e);
       }
 
-      loadVirtualSchema(svc, discoveryId, initialData);
+      await loadVirtualSchema(svc, discoveryId, initialData);
     }
   }
 
-  // Internal state already updated in replayRequest
-
-  // Auto-determine Content-Type from the original request
+  // Auto-determine Content-Type from the original request (AFTER schema load)
   if (req.requestHeaders) {
     const ctHeader = Object.keys(req.requestHeaders).find(
       (k) => k.toLowerCase() === "content-type",
