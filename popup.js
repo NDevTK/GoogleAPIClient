@@ -1191,15 +1191,17 @@ function renderResultBody(result) {
     if (gqlHtml) return gqlHtml;
   }
 
-  if (result.body.format === "json") {
-    return `<pre class="resp-body">${esc(JSON.stringify(result.body.parsed, null, 2))}</pre>`;
-  } else if (currentRequestUrl.includes("batchexecute")) {
-    // Force batch rendering for batchexecute requests
+  // batchexecute: detect by content (wrb.fr markers), not just URL
+  if (isBatchExecuteResponse(rawBody)) {
     return renderBatchExecuteResponse(
       rawBody,
       { service: result.service || svc },
       discoveryInfo?.doc,
     );
+  }
+
+  if (result.body.format === "json") {
+    return `<pre class="resp-body">${esc(JSON.stringify(result.body.parsed, null, 2))}</pre>`;
   } else if (result.body.format === "protobuf_tree") {
     return (
       `<div class="card-label">Decoded Protobuf</div>` +
@@ -2124,9 +2126,14 @@ async function replayRequest(reqId, sourceTabId) {
         } catch (e) {}
       } else if (mimeType.includes("json")) {
         try {
+          // Strip Google XSSI prefix before parsing
+          let jsonText = bodyText;
+          if (jsonText.trimStart().startsWith(")]}'")) {
+            jsonText = jsonText.trimStart().substring(4).trimStart();
+          }
           historicalResult.body = {
             format: "json",
-            parsed: JSON.parse(bodyText),
+            parsed: JSON.parse(jsonText),
             raw: bodyText,
             size: bodyText.length,
           };

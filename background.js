@@ -1214,7 +1214,7 @@ function learnFromResponse(tabId, interfaceName, entry) {
         mergeSchemaInto(doc, schemaName, newSchema);
       }
     }
-  } else if (url.pathname.includes("batchexecute")) {
+  } else if (isBatchExecuteResponse(textBody)) {
     const results = parseBatchExecuteResponse(textBody);
     if (results) {
       if (!doc.resources.learned) doc.resources.learned = { methods: {} };
