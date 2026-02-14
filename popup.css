@@ -190,6 +190,10 @@ nav {
   background: #3d1418;
   color: #f85149;
 }
+.badge-batch {
+  background: #3c2257;
+  color: #d2a8ff;
+}
 
 /* Endpoint row */
 .ep-row {

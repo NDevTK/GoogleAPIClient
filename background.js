@@ -630,6 +630,8 @@ chrome.webRequest.onBeforeRequest.addListener(
       status: "pending",
       requestBody: details.requestBody,
       rawBodyB64,
+      frameId: details.frameId,
+      documentId: details.documentId,
     };
 
     // Check if duplicate? (unlikely for new request)
@@ -1024,7 +1026,9 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
     const isBatch = url.pathname.includes("batchexecute");
 
     if (isBatch) {
+      console.log("[BG] batchexecute request detected:", { url: url.href, text });
       const calls = parseBatchExecuteRequest(text);
+      console.log("[BG] Decoded batchexecute calls:", calls);
       if (calls) {
         for (const call of calls) {
           const callMethodId = `${interfaceName.replace(/\//g, ".")}.${call.rpcId}`;
@@ -1097,7 +1101,9 @@ function learnFromResponse(tabId, interfaceName, entry) {
 
   const mimeType = entry.mimeType || "";
   if (url.pathname.includes("batchexecute")) {
+    console.log("[BG] batchexecute response detected:", { url: url.href, textBody });
     const results = parseBatchExecuteResponse(textBody);
+    console.log("[BG] Decoded batchexecute results:", results);
     if (results) {
       for (const res of results) {
         const callM = doc.resources.learned.methods[res.rpcId];
@@ -1269,15 +1275,19 @@ function generateSchemaFromJson(json, name, schemas, isIndexed = false) {
 /**
  * Send a PAGE_FETCH message to a tab's content script.
  */
-async function sendPageFetch(tabId, url, opts) {
-  return chrome.tabs.sendMessage(tabId, {
-    type: "PAGE_FETCH",
-    url,
-    method: opts.method || "GET",
-    headers: opts.headers || {},
-    body: opts.body ?? null,
-    bodyEncoding: opts.bodyEncoding || null,
-  });
+async function sendPageFetch(tabId, url, opts, frameId = 0) {
+  return chrome.tabs.sendMessage(
+    tabId,
+    {
+      type: "PAGE_FETCH",
+      url,
+      method: opts.method || "GET",
+      headers: opts.headers || {},
+      body: opts.body ?? null,
+      bodyEncoding: opts.bodyEncoding || null,
+    },
+    { frameId: frameId ?? 0 },
+  );
 }
 
 /**
@@ -1314,7 +1324,11 @@ async function acquireTempTab(origin) {
       const deadline = Date.now() + 15000;
       while (Date.now() < deadline) {
         try {
-          await chrome.tabs.sendMessage(tab.id, { type: "PING" });
+          await chrome.tabs.sendMessage(
+            tab.id,
+            { type: "PING" },
+            { frameId: 0 },
+          );
 
           return tab.id;
         } catch (_) {
@@ -1365,7 +1379,7 @@ function releaseTempTab(origin) {
 /**
  * Fetch through a content script, with temp tab fallback.
  */
-async function pageContextFetch(tabId, url, opts, initiatorOrigin) {
+async function pageContextFetch(tabId, url, opts, initiatorOrigin, frameId = 0) {
   // Validate URL is a valid API-like host
   try {
     const parsed = new URL(url);
@@ -1378,43 +1392,42 @@ async function pageContextFetch(tabId, url, opts, initiatorOrigin) {
 
   // Try the original tab first
   if (tabId != null) {
+    // 1. Try the targeted frame (or main frame if frameId=0)
     try {
-      const result = await sendPageFetch(tabId, url, opts);
+      const result = await sendPageFetch(tabId, url, opts, frameId);
       return result;
     } catch (_) {
-      // Content script not reachable.
+      // 2. If targeted frame failed and it wasn't the main frame, fall back to main frame
+      if (frameId !== 0) {
+        try {
+          console.log(`[BG] Frame ${frameId} unreachable, falling back to main frame`);
+          const result = await sendPageFetch(tabId, url, opts, 0);
+          return result;
+        } catch (__) {
+          // Main frame also failed, fall through to loading check/temp tab
+        }
+      }
+
       // Check if the tab is actually on the correct origin (just loading?)
-      // If so, we should wait for it rather than opening a temp tab.
       try {
         const tab = await chrome.tabs.get(tabId);
-        // Requires "tabs" permission or activeTab for url to be visible
         if (tab && tab.url) {
           const tabOrigin = new URL(tab.url).origin;
           if (initiatorOrigin && tabOrigin === initiatorOrigin) {
-            // It IS the correct context, just not ready. Wait for it.
-            // Poll for up to 5s
             const deadline = Date.now() + 5000;
             while (Date.now() < deadline) {
               try {
                 await new Promise((r) => setTimeout(r, 500));
-                const res = await sendPageFetch(tabId, url, opts);
-                return res; // Success!
-              } catch (_) {
+                // Target main frame during polling for stability
+                const res = await sendPageFetch(tabId, url, opts, 0);
+                return res; 
+              } catch (___) {
                 // Keep waiting
               }
             }
-            // If we timed out on the correct tab, we should NOT fall back to temp tab
-            // because that would double-open.
-            console.warn(`Relay failed on same-origin tab ${tabId} (timeout)`);
-            return {
-              error:
-                "relay_failed: content script unreachable on same-origin tab",
-            };
           }
         }
-      } catch (e) {
-        // Tab closed or no permission to see URL; fall through to temp tab
-      }
+      } catch (e) {}
     }
   }
 
@@ -2149,15 +2162,32 @@ function handlePopupMessage(msg, _sender, sendResponse) {
         } else {
           console.warn("[BG] Method not found for rename.");
         }
-      } else if (doc.schemas?.[schemaName]) {
+      } else {
+        // Handle schema properties or create virtual schema for raw fields
+        if (!doc.schemas) doc.schemas = {};
+        if (!doc.schemas[schemaName]) {
+          doc.schemas[schemaName] = { id: schemaName, type: "object", properties: {} };
+        }
+
         const schema = doc.schemas[schemaName];
-        if (schema.properties?.[fieldKey]) {
+        if (!schema.properties) schema.properties = {};
+
+        if (schema.properties[fieldKey]) {
           const prop = schema.properties[fieldKey];
           prop.name = newName;
           prop.customName = true;
-          mergeToGlobal(tab);
-          sendResponse({ ok: true });
+        } else {
+          // Create a virtual property for a raw field number
+          schema.properties[fieldKey] = {
+            id: fieldKey,
+            number: parseInt(fieldKey) || null,
+            name: newName,
+            customName: true,
+            type: "any"
+          };
         }
+        mergeToGlobal(tab);
+        sendResponse({ ok: true });
       }
       return;
     }
@@ -2467,17 +2497,20 @@ function encodeFormToJspb(fields) {
   for (const f of fields) {
     if (f.number > maxNum) maxNum = f.number;
   }
-  if (maxNum === 0) return encodeFormToJson(fields); // fallback if no field numbers
+  if (maxNum === 0) {
+    // If we have no numbered fields, but it's supposed to be an object/message,
+    // return an empty array if we are in a JSPB context.
+    return [];
+  }
 
   // JSPB uses 0-based indexing for field 1 (i.e. index 0 is field 1)
   const arr = new Array(maxNum).fill(null);
   for (const f of fields) {
     if (!f.number) continue;
-    if (f.value == null && !f.children?.length) continue;
-
+    
     const targetIdx = f.number - 1;
-    if (f.type === "message" && f.children?.length) {
-      arr[targetIdx] = encodeFormToJspb(f.children);
+    if (f.type === "message") {
+      arr[targetIdx] = encodeFormToJspb(f.children || []);
     } else if (f.label === "repeated" && Array.isArray(f.value)) {
       arr[targetIdx] = f.value.map((v) => coerceValue(v, f.type));
     } else {
@@ -2626,10 +2659,13 @@ async function executeSendRequest(tabId, msg) {
   let bodyEncoding = null;
 
   if (msg.httpMethod !== "GET" && msg.httpMethod !== "DELETE" && msg.body) {
+    console.log("[BG] Encoding request body for method:", msg.httpMethod, "URL:", url);
     if (url.includes("batchexecute") && msg.body.mode === "form") {
       // Special handling for batchexecute: wrap in f.req envelope
       const fields = msg.body.formData?.fields || [];
+      console.log("[BG] batchexecute fields:", fields);
       const argsArray = encodeFormToJspb(fields); // Convert fields back to positional array
+      console.log("[BG] batchexecute argsArray:", argsArray);
       const innerJson = JSON.stringify(argsArray);
 
       // Extract RPC ID from methodId (e.g. "Google.Photos.p1Takd" -> "p1Takd")
@@ -2640,6 +2676,7 @@ async function executeSendRequest(tabId, msg) {
       params.set("f.req", JSON.stringify(envelope));
 
       body = params.toString();
+      console.log("[BG] Final batchexecute body:", body);
       headers["Content-Type"] =
         "application/x-www-form-urlencoded;charset=UTF-8";
     } else if (msg.body.mode === "raw" && msg.body.rawBody) {
@@ -2668,22 +2705,31 @@ async function executeSendRequest(tabId, msg) {
     ep?.origin || ep?.referer || tab.authContext?.origin || null;
 
   // Send request
-  const resp = await pageContextFetch(
-    tabId,
-    url,
-    {
-      method: msg.httpMethod || "POST",
-      headers,
-      body,
-      bodyEncoding,
-    },
-    initiatorOrigin,
-  );
+  let resp;
+  try {
+    resp = await pageContextFetch(
+      tabId,
+      url,
+      {
+        method: msg.httpMethod || "POST",
+        headers,
+        body,
+        bodyEncoding,
+      },
+      initiatorOrigin,
+      msg.body?.frameId,
+    );
+    console.log("[BG] pageContextFetch response:", resp);
+  } catch (err) {
+    console.error("[BG] pageContextFetch exception:", err);
+    return { error: `fetch_exception: ${err.message}`, timing: Date.now() - startTime };
+  }
 
   const timing = Date.now() - startTime;
 
-  if (resp.error) {
-    return { error: resp.error, timing };
+  if (!resp || resp.error) {
+    console.warn("[BG] Fetch failed or returned error:", resp?.error);
+    return { error: resp?.error || "fetch_failed: no response", timing };
   }
 
   // Decode response

@@ -406,6 +406,7 @@ async function loadVirtualSchema(service, methodId, initialData = null) {
 
 function pbTreeToMap(nodes) {
   if (!nodes) return null;
+  console.log("[Popup] pbTreeToMap processing nodes:", nodes);
   const map = {};
   for (const node of nodes) {
     if (node.message) {
@@ -679,7 +680,12 @@ function createSingleInput(fieldDef, initialValue = null) {
       inp.type = "text";
       inp.className = "form-input form-input-string";
       inp.placeholder = type || "value";
-      if (initialValue !== null) inp.value = initialValue;
+      if (initialValue !== null) {
+        inp.value =
+          typeof initialValue === "object"
+            ? JSON.stringify(initialValue)
+            : initialValue;
+      }
       return inp;
     }
   }
@@ -728,7 +734,6 @@ function collectSingleField(wrapper) {
       const cv = collectSingleField(child);
       if (cv) children.push(cv);
     }
-    if (!children.length) return null;
     return { name, type, number, label, value: null, children };
   }
 
@@ -799,9 +804,10 @@ async function sendRequest() {
 
   let body;
   if (httpMethod === "GET" || httpMethod === "DELETE") {
-    body = { mode: "raw", formData: null, rawBody: null };
+    body = { mode: "raw", formData: null, rawBody: null, frameId: currentReplayRequest?.frameId };
   } else if (isFormMode) {
     const formValues = collectFormValues();
+    console.log("[Popup] Collected form values:", formValues);
     if (Object.keys(formValues.params).length > 0) {
       try {
         const urlObj = new URL(url);
@@ -818,31 +824,36 @@ async function sendRequest() {
       mode: "form",
       formData: { fields: formValues.fields },
       rawBody: null,
+      frameId: currentReplayRequest?.frameId,
     };
   } else {
     body = {
       mode: "raw",
       formData: null,
       rawBody: document.getElementById("send-raw-body").value,
+      frameId: currentReplayRequest?.frameId,
     };
   }
 
   const sel = document.getElementById("send-ep-select");
   const selectedOpt = sel.options[sel.selectedIndex];
 
+  const msg = {
+    type: "SEND_REQUEST",
+    tabId: currentTabId,
+    endpointKey: epKey,
+    service: selectedOpt?.dataset?.svc,
+    methodId: selectedOpt?.dataset?.discoveryId,
+    url,
+    httpMethod,
+    contentType,
+    headers,
+    body,
+  };
+  console.log("[Popup] Sending request message:", msg);
+
   try {
-    const result = await chrome.runtime.sendMessage({
-      type: "SEND_REQUEST",
-      tabId: currentTabId,
-      endpointKey: epKey,
-      service: selectedOpt?.dataset?.svc,
-      methodId: selectedOpt?.dataset?.discoveryId,
-      url,
-      httpMethod,
-      contentType,
-      headers,
-      body,
-    });
+    const result = await chrome.runtime.sendMessage(msg);
     renderResponse(result);
 
     // Scroll result into view
@@ -1066,12 +1077,9 @@ function renderPbTree(nodes, schema = null) {
       ? `<span class="pb-type-badge">${fieldDef.type}</span>`
       : `<span class="pb-wire-badge">${node.wire === 0 ? "varint" : node.wire === 1 ? "64bit" : node.wire === 2 ? "len" : "32bit"}</span>`;
 
-    const renameAttr = fieldDef
-      ? `data-schema="${esc(schema.id || "")}" data-key="${esc(fieldName)}"`
-      : "";
-    const renameBtn = renameAttr
-      ? ` <span class="btn-rename" title="Rename field" ${renameAttr}>✎</span>`
-      : "";
+    const currentSchemaId = schema?.id || (schema?.$ref) || "";
+    const renameAttr = `data-schema="${esc(currentSchemaId)}" data-key="${esc(fieldDef ? (fieldDef.id || fieldDef.number || fieldName) : node.field)}" data-is-raw="${!fieldDef}"`;
+    const renameBtn = ` <span class="btn-rename" title="Rename field" ${renameAttr}>✎</span>`;
 
     html += `<div class="pb-node">
       <span class="pb-field">${esc(fieldName)}</span>${renameBtn}
@@ -1184,6 +1192,7 @@ function renderResponsePanel() {
       <div class="card-meta">
         ${req.service ? `Service: <strong>${esc(req.service)}</strong>` : ""}
         ${hasProto ? ' <span class="badge badge-found">PROTOBUF BODY</span>' : ""}
+        ${req.url.includes("batchexecute") ? ' <span class="badge badge-batch">BATCHEXECUTE</span>' : ""}
       </div>
     </div>`;
   }
@@ -1250,6 +1259,8 @@ function getStatusBadge(status) {
   return `<span class="badge">${code}</span>`;
 }
 
+let currentReplayRequest = null;
+
 function replayRequest(reqId) {
   // Use string comparison for IDs
   const req = tabData.requestLog.find((r) => String(r.id) === String(reqId));
@@ -1257,6 +1268,7 @@ function replayRequest(reqId) {
     console.error(`[Replay] Request ${reqId} not found in log`);
     return;
   }
+  currentReplayRequest = req;
 
   // Try to find and select the matching endpoint in the dropdown to load the schema
   const epSelect = document.getElementById("send-ep-select");
@@ -1271,8 +1283,10 @@ function replayRequest(reqId) {
       const bytes = base64ToUint8(req.rawBodyB64);
       const text = new TextDecoder().decode(bytes);
       const calls = parseBatchExecuteRequest(text);
+      console.log("[Popup] Replay batchexecute calls:", calls);
       if (calls && calls.length > 0) {
         targetRpcId = calls[0].rpcId; // Primary RPC ID
+        console.log("[Popup] targetRpcId:", targetRpcId);
       }
     }
 
@@ -1336,10 +1350,13 @@ function replayRequest(reqId) {
         const text = new TextDecoder().decode(bytes);
         const calls = parseBatchExecuteRequest(text);
         if (calls && calls.length > 0) {
+          console.log("[Popup] Processing call[0].data:", calls[0].data);
           initialData = jspbToTree(
             Array.isArray(calls[0].data) ? calls[0].data : [calls[0].data],
           );
+          console.log("[Popup] jspbToTree result:", initialData);
           initialData = pbTreeToMap(initialData);
+          console.log("[Popup] pbTreeToMap result:", initialData);
         }
       } else {
         initialData = pbTreeToMap(req.decodedBody) || {};
