@@ -9,118 +9,15 @@ importScripts("lib/protobuf.js", "lib/discovery.js", "lib/req2proto.js");
 const state = {
   // Map<tabId, TabData>
   tabs: new Map(),
-  // Map<tabId, boolean>
-  attachedTabs: new Map(),
-  // Map<requestId, url> for transient key scanning (scripts etc)
-  tempRequestMap: new Map(),
 };
 
-// ─── Debugger Management ─────────────────────────────────────────────────────
+// Fuzzing campaign state — keyed by tabId
+// { abort: boolean, running: boolean, results: Array<{field, payload, status, error, bodySnippet, statusTier}> }
+const activeFuzz = new Map();
 
-const DebuggerManager = {
-  async attach(tabId) {
-    const status = state.attachedTabs.get(tabId);
-    if (status === true || status === "pending") return;
-
-    state.attachedTabs.set(tabId, "pending");
-    try {
-      await chrome.debugger.attach({ tabId }, "1.3");
-      state.attachedTabs.set(tabId, true);
-      await chrome.debugger.sendCommand({ tabId }, "Network.enable");
-    } catch (err) {
-      state.attachedTabs.delete(tabId);
-      // Silence expected browser restricted errors
-      const isExpectedError =
-        err.message.includes("Another debugger is already attached") ||
-        err.message.includes("Cannot access a chrome:// URL");
-
-      if (!isExpectedError) {
-        console.error(`[Debugger] Attach failed for ${tabId}:`, err);
-      }
-    }
-  },
-
-  async getResponseBody(tabId, requestId) {
-    try {
-      const result = await chrome.debugger.sendCommand(
-        { tabId },
-        "Network.getResponseBody",
-        { requestId },
-      );
-      return result; // { body, base64Encoded }
-    } catch (err) {
-      console.warn("[Debugger] Get response body failed:", err);
-      return null;
-    }
-  },
-};
-
-chrome.debugger.onEvent.addListener(async (source, method, params) => {
-  const tabId = source.tabId;
-  if (method === "Network.requestWillBeSent") {
-    state.tempRequestMap.set(params.requestId, params.request.url);
-  }
-
-  if (method === "Network.responseReceived") {
-    const { requestId, response } = params;
-    const url = new URL(response.url);
-    if (!isApiRequest(url, { method: response.method })) return;
-
-    // Store response metadata
-    const tab = getTab(tabId);
-    const entry = tab.requestLog.find((r) => r.id === requestId);
-    if (entry) {
-      entry.responseHeaders = response.headers;
-      entry.status = response.status;
-      entry.mimeType = response.mimeType;
-    }
-  }
-
-  if (method === "Network.loadingFinished") {
-    const { requestId } = params;
-    const tab = getTab(tabId);
-
-    const bodyData = await DebuggerManager.getResponseBody(tabId, requestId);
-    if (bodyData) {
-      let textBody = bodyData.body;
-      if (bodyData.base64Encoded) {
-        try {
-          const bytes = base64ToUint8(bodyData.body);
-          textBody = new TextDecoder().decode(bytes);
-        } catch (e) {
-          textBody = null; // Truly binary
-        }
-      }
-
-      const entry = tab.requestLog.find((r) => r.id === requestId);
-
-      // Always scan for keys in captured bodies (scripts, JSON, etc)
-      if (textBody) {
-        let url = state.tempRequestMap.get(requestId);
-        if (!url && entry) {
-          url = entry.url;
-        }
-        extractKeysFromText(tabId, textBody, url, "response_body");
-      }
-      state.tempRequestMap.delete(requestId);
-
-      if (entry) {
-        entry.responseBody = bodyData.body;
-        entry.responseBase64 = bodyData.base64Encoded;
-
-        // Learn schema from the response!
-        const service =
-          entry.service || extractInterfaceName(new URL(entry.url));
-        learnFromResponse(tabId, service, entry);
-        notifyPopup(tabId);
-      }
-    }
-  }
-});
-
-chrome.debugger.onDetach.addListener((source) => {
-  state.attachedTabs.delete(source.tabId);
-});
+// Session storage for request logs — survives SW restarts, clears on browser close
+const _sessionSaveTimers = new Map(); // tabId → timeoutId
+const _tabMeta = new Map(); // tabId → { title, url, closed? }
 
 // Global persistent store — survives tab closes and SW restarts
 const globalStore = {
@@ -189,10 +86,14 @@ function extractKeysFromText(tabId, text, sourceUrl, sourceContext, depth = 0) {
   }
 
   // 2. Scan for base64 blobs that might contain hidden keys
-  // Heuristic: looking for strings > 20 chars that look like base64
-  const B64_RE = /[a-zA-Z0-9+/]{20,}=*/g;
+  // Heuristic: looking for strings 20-2000 chars that look like base64.
+  // Cap at 2000 to avoid decoding huge binary blobs (images, protobuf payloads).
+  // Also limit to first 50 matches per text to bound CPU time.
+  const B64_RE = /[a-zA-Z0-9+/]{20,2000}=*/g;
   let b64m;
-  while ((b64m = B64_RE.exec(text)) !== null) {
+  let b64Count = 0;
+  while ((b64m = B64_RE.exec(text)) !== null && b64Count < 50) {
+    b64Count++;
     const candidate = b64m[0];
     try {
       // Don't try to decode if it's already a known key to avoid loops
@@ -234,8 +135,21 @@ function getTab(tabId) {
       scopes: new Map(), // service → string[] of required scopes
       requestLog: [], // Array of { id, url, method, service, timestamp, status, headers, responseHeaders, ... }
     });
+    captureTabMeta(tabId);
   }
   return state.tabs.get(tabId);
+}
+
+async function captureTabMeta(tabId) {
+  if (_tabMeta.has(tabId)) return;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab) {
+      _tabMeta.set(tabId, { title: tab.title || `Tab ${tabId}`, url: tab.url || "" });
+    }
+  } catch (_) {
+    _tabMeta.set(tabId, { title: `Tab ${tabId}`, url: "" });
+  }
 }
 
 // ─── Persistent Storage ─────────────────────────────────────────────────────
@@ -383,7 +297,7 @@ function mergeToGlobal(tab) {
         apiKey: v.apiKey,
         fetchedAt: v.fetchedAt,
         summary: v.doc ? summarizeDiscovery(v.doc) : v.summary || null,
-        doc: v.doc, // keep in memory for schema resolution, won't be serialized
+        doc: v.doc, // kept in memory + persisted (needed for virtual doc schemas)
       });
     } else if (!globalStore.discoveryDocs.has(k)) {
       globalStore.discoveryDocs.set(k, { status: v.status });
@@ -413,6 +327,93 @@ async function clearGlobalStore() {
 
 // Load persisted data on startup
 loadGlobalStore();
+
+// ─── Session Storage (Request Logs) ─────────────────────────────────────────
+
+const MAX_SESSION_BODY = 4096;
+
+function serializeLogEntry(entry) {
+  const clone = { ...entry };
+  delete clone.requestBody; // Chrome requestBody object, redundant with rawBodyB64
+  delete clone.decodedBody; // Parsed protobuf tree, regenerable
+  if (clone.rawBodyB64 && clone.rawBodyB64.length > MAX_SESSION_BODY) {
+    clone.rawBodyB64 = clone.rawBodyB64.slice(0, MAX_SESSION_BODY);
+    clone._rawTruncated = true;
+  }
+  if (clone.responseBody && clone.responseBody.length > MAX_SESSION_BODY) {
+    clone.responseBody = clone.responseBody.slice(0, MAX_SESSION_BODY);
+    clone._responseTruncated = true;
+  }
+  return clone;
+}
+
+function scheduleSessionSave(tabId) {
+  if (_sessionSaveTimers.has(tabId)) {
+    clearTimeout(_sessionSaveTimers.get(tabId));
+  }
+  _sessionSaveTimers.set(
+    tabId,
+    setTimeout(() => {
+      _sessionSaveTimers.delete(tabId);
+      saveTabSessionLog(tabId);
+    }, 1000),
+  );
+}
+
+async function saveTabSessionLog(tabId) {
+  const tab = state.tabs.get(tabId);
+  if (!tab) return;
+  try {
+    const serialized = tab.requestLog.map(serializeLogEntry);
+    await chrome.storage.session.set({ [`reqLog_${tabId}`]: serialized });
+    await saveSessionIndex();
+  } catch (e) {
+    console.error("[Session] Save failed for tab", tabId, e);
+  }
+}
+
+async function saveSessionIndex() {
+  const index = {};
+  for (const [tabId, meta] of _tabMeta) {
+    const tab = state.tabs.get(tabId);
+    const count = tab ? tab.requestLog.length : 0;
+    if (count > 0 || meta.closed) {
+      index[tabId] = { ...meta, count };
+    }
+  }
+  try {
+    await chrome.storage.session.set({ reqLog_index: index });
+  } catch (e) {
+    console.error("[Session] Index save failed:", e);
+  }
+}
+
+async function loadSessionLogs() {
+  try {
+    const data = await chrome.storage.session.get(null);
+    for (const [key, value] of Object.entries(data)) {
+      if (key === "reqLog_index") {
+        for (const [tidStr, meta] of Object.entries(value)) {
+          const tid = parseInt(tidStr, 10);
+          if (!isNaN(tid)) _tabMeta.set(tid, meta);
+        }
+        continue;
+      }
+      if (key.startsWith("reqLog_")) {
+        const tabId = parseInt(key.slice(7), 10);
+        if (isNaN(tabId) || !Array.isArray(value)) continue;
+        const tab = getTab(tabId);
+        if (tab.requestLog.length === 0) {
+          tab.requestLog = value;
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[Session] Load failed:", e);
+  }
+}
+
+loadSessionLogs();
 
 // ─── Patterns ────────────────────────────────────────────────────────────────
 
@@ -511,29 +512,29 @@ function extractInterfaceName(urlObj) {
     return m ? m[1] : hostname;
   }
 
-  // Common API root patterns
-  const apiRoots = [
-    "api",
-    "v1",
-    "v2",
-    "v3",
-    "rest",
-    "graphql",
-    "grpc",
-    "async",
-  ];
+  // API root keywords (excludes bare version segments to avoid mid-path mismatches)
+  const apiRootKeywords = ["api", "rest", "graphql", "grpc", "async"];
+  const isVersionSeg = (s) => /^v\d+\w*$/i.test(s);
 
-  // Find where the API "root" starts
+  // Find where the API "root" starts — match keyword roots first
   let rootIdx = -1;
   for (let i = 0; i < segments.length; i++) {
-    if (apiRoots.includes(segments[i].toLowerCase())) {
+    if (apiRootKeywords.includes(segments[i].toLowerCase())) {
       rootIdx = i;
+      // Also include a following version segment (e.g. api/v2 → rootIdx covers both)
+      if (i + 1 < segments.length && isVersionSeg(segments[i + 1])) {
+        rootIdx = i + 1;
+      }
       break;
     }
   }
 
+  // If no keyword root, accept a version segment only at path start (e.g. /v1/users)
+  if (rootIdx === -1 && segments.length > 0 && isVersionSeg(segments[0])) {
+    rootIdx = 0;
+  }
+
   if (rootIdx !== -1) {
-    // Interface is hostname + path up to the root (e.g. example.com/api/v1)
     return hostname + "/" + segments.slice(0, rootIdx + 1).join("/");
   }
 
@@ -575,21 +576,7 @@ chrome.webRequest.onBeforeRequest.addListener(
     // Skip internal probe requests immediately
     if (url.hash.includes("_internal_probe")) return;
 
-    // Auto-attach debugger for response capture on APIs and relevant scripts.
-    const isScript =
-      url.pathname.endsWith(".js") || url.pathname.includes("/xjs/");
-    const isApi = isApiRequest(url, details);
-
-    if (isApi || isScript) {
-      DebuggerManager.attach(details.tabId);
-      state.tempRequestMap.set(details.requestId, details.url);
-      if (state.tempRequestMap.size > 500) {
-        const firstKey = state.tempRequestMap.keys().next().value;
-        state.tempRequestMap.delete(firstKey);
-      }
-    }
-
-    if (!isApi) return;
+    if (!isApiRequest(url, details)) return;
 
     const tab = getTab(details.tabId);
 
@@ -598,7 +585,6 @@ chrome.webRequest.onBeforeRequest.addListener(
       tab.authContext = tab.authContext || {};
       if (!tab.authContext.origin) {
         tab.authContext.origin = details.initiator;
-        scheduleSave();
       }
     }
 
@@ -637,6 +623,7 @@ chrome.webRequest.onBeforeRequest.addListener(
     // Check if duplicate? (unlikely for new request)
     tab.requestLog.unshift(entry);
     if (tab.requestLog.length > 50) tab.requestLog.pop();
+    scheduleSessionSave(details.tabId);
   },
   {
     urls: ["<all_urls>"],
@@ -654,7 +641,6 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 
     // ─── CRITICAL: Universal Key Scanning ───
     // Scan EVERY request (scripts, assets, etc) for keys in URL and Headers
-    // before any early exits.
     // before any early exits.
     extractKeysFromText(details.tabId, details.url, details.url, "url");
     for (const h of details.requestHeaders || []) {
@@ -683,7 +669,6 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       tab.authContext = tab.authContext || {};
       if (!tab.authContext.origin) {
         tab.authContext.origin = details.initiator;
-        scheduleSave();
       }
     }
 
@@ -741,6 +726,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       };
       tab.requestLog.unshift(entry);
       if (tab.requestLog.length > 50) tab.requestLog.pop();
+      scheduleSessionSave(details.tabId);
     }
 
     learnFromRequest(details.tabId, service, entry, headerMap);
@@ -783,7 +769,10 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 
     // 3. Automatic Background Discovery
     // If we haven't tried to find an official discovery doc for this service yet, do it now.
-    if (!discoveryStatus || discoveryStatus.status === "not_found") {
+    // Cooldown: don't retry not_found within 5 minutes to avoid flooding.
+    const notFoundCooldown = discoveryStatus?.status === "not_found" &&
+      discoveryStatus._failedAt && (Date.now() - discoveryStatus._failedAt < 300000);
+    if (!notFoundCooldown && (!discoveryStatus || discoveryStatus.status === "not_found")) {
       if (!discoveryStatus) {
         tab.discoveryDocs.set(service, {
           status: "pending",
@@ -808,21 +797,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 
     mergeToGlobal(tab);
 
-    // Log request for Response tab
     const logContentType = headerMap["content-type"] || "";
-
-    if (!entry) {
-      entry = {
-        id: details.requestId,
-        url: details.url,
-        method: details.method,
-        service: service,
-        timestamp: Date.now(),
-        status: "pending",
-      };
-      tab.requestLog.unshift(entry);
-      if (tab.requestLog.length > 50) tab.requestLog.pop();
-    }
 
     entry.requestHeaders = headerMap;
     entry.contentType = logContentType;
@@ -862,6 +837,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       } catch (err) {}
     }
 
+    scheduleSessionSave(details.tabId);
     notifyPopup(details.tabId);
   },
   {
@@ -909,9 +885,8 @@ chrome.webRequest.onHeadersReceived.addListener(
       }
     }
 
-    // Potential to learn from response body too, but we need to use debugger or another way
-    // to get response body in MV3 reliably if we want it for all requests.
-    // For now, we learn from the request side which is easier.
+    // Response body learning is handled by the RESPONSE_BODY message from
+    // the main-world intercept script (intercept.js → content.js relay).
   },
   {
     urls: ["<all_urls>"],
@@ -919,13 +894,23 @@ chrome.webRequest.onHeadersReceived.addListener(
   ["responseHeaders"],
 );
 
+/** Detect path segments that look like dynamic IDs rather than resource names. */
+function looksLikeDynamicSegment(s) {
+  if (/^\d+$/.test(s)) return true; // Pure numeric
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s)) return true; // UUID prefix
+  // Base64-like tokens: 20+ chars, mixed case/digits, not all lowercase letters
+  if (s.length >= 20 && /^[A-Za-z0-9_-]+$/.test(s) && !/^[a-z]+$/.test(s)) return true;
+  return false;
+}
+
 function calculateMethodMetadata(urlObj, interfaceName) {
-  // batchexecute: use rpcids param
+  // batchexecute: use first rpcid from URL param (individual calls registered by learnFromRequest)
   if (urlObj.pathname.includes("batchexecute")) {
     const rpcids = urlObj.searchParams.get("rpcids") || "batch";
+    const primaryRpcId = rpcids.split(",")[0].trim();
     return {
-      methodName: rpcids,
-      methodId: `${interfaceName.replace(/\//g, ".")}.${rpcids}`,
+      methodName: primaryRpcId,
+      methodId: `${interfaceName.replace(/\//g, ".")}.${primaryRpcId}`,
     };
   }
 
@@ -950,6 +935,11 @@ function calculateMethodMetadata(urlObj, interfaceName) {
     if (s.includes("=") && s.includes(",")) return false;
     return true;
   });
+
+  // Normalize dynamic segments (IDs, UUIDs, tokens) to prevent method proliferation
+  methodSegments = methodSegments.map((s) =>
+    looksLikeDynamicSegment(s) ? "_id" : s,
+  );
 
   let methodName = methodSegments.join("_") || "root";
 
@@ -1005,7 +995,7 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
 
   const m = doc.resources.learned.methods[methodName];
 
-  // Learn parameters from URL
+  // Learn query parameters from URL
   if (!url.pathname.includes("batchexecute")) {
     url.searchParams.forEach((value, name) => {
       if (name === "key" || name === "api_key") return;
@@ -1013,10 +1003,47 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
         m.parameters[name] = {
           type: isNaN(value) ? "string" : "number",
           location: "query",
-          description: `Learned from request`,
+          description: "Learned from request",
         };
       }
     });
+
+    // Learn path parameters by comparing URL to stored template AND
+    // by detecting ID-like segments on first observation.
+    const segments = url.pathname.split("/").filter(Boolean);
+    const templateParts = (m.path || "").split("/").filter(Boolean);
+    if (templateParts.length === segments.length) {
+      let changed = false;
+      for (let i = 0; i < segments.length; i++) {
+        if (templateParts[i].startsWith("{")) continue; // Already templated
+        if (templateParts[i] !== segments[i]) {
+          // Segment differs from template — definitely a parameter
+          const paramName = `path_${templateParts[i] || "param" + i}`;
+          templateParts[i] = `{${paramName}}`;
+          if (!m.parameters[paramName]) {
+            m.parameters[paramName] = {
+              type: "string",
+              location: "path",
+              description: "Inferred path parameter",
+            };
+          }
+          changed = true;
+        } else if (looksLikeDynamicSegment(segments[i])) {
+          // First observation but segment looks like an ID/UUID/token
+          const paramName = `path_param${i}`;
+          templateParts[i] = `{${paramName}}`;
+          if (!m.parameters[paramName]) {
+            m.parameters[paramName] = {
+              type: "string",
+              location: "path",
+              description: "Inferred path parameter (pattern-detected)",
+            };
+          }
+          changed = true;
+        }
+      }
+      if (changed) m.path = templateParts.join("/");
+    }
   }
 
   // Learn request body if present
@@ -1026,9 +1053,7 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
     const isBatch = url.pathname.includes("batchexecute");
 
     if (isBatch) {
-      console.log("[BG] batchexecute request detected:", { url: url.href, text });
       const calls = parseBatchExecuteRequest(text);
-      console.log("[BG] Decoded batchexecute calls:", calls);
       if (calls) {
         for (const call of calls) {
           const callMethodId = `${interfaceName.replace(/\//g, ".")}.${call.rpcId}`;
@@ -1044,24 +1069,47 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
           const callM = doc.resources.learned.methods[call.rpcId];
           const schemaName = `${call.rpcId}Request`;
           callM.request = { $ref: schemaName };
-          doc.schemas[schemaName] = generateSchemaFromJson(
+          const newSchema = generateSchemaFromJson(
             call.data,
             schemaName,
             doc.schemas,
             true,
           );
+          mergeSchemaInto(doc, schemaName, newSchema);
         }
       }
+    } else if (headers["content-type"]?.includes("json+protobuf")) {
+      // JSPB body — positional array encoding
+      try {
+        const json = JSON.parse(text);
+        if (Array.isArray(json)) {
+          const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Request`;
+          m.request = { $ref: schemaName };
+          const newSchema = generateSchemaFromJson(json, schemaName, doc.schemas, true);
+          mergeSchemaInto(doc, schemaName, newSchema);
+        }
+      } catch (e) {}
+    } else if (
+      headers["content-type"]?.includes("x-protobuf") ||
+      headers["content-type"]?.includes("application/protobuf")
+    ) {
+      // Binary protobuf body
+      try {
+        const tree = pbDecodeTree(bytes, 8);
+        if (tree && tree.length > 0) {
+          const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Request`;
+          m.request = { $ref: schemaName };
+          const newSchema = generateSchemaFromPbTree(tree, schemaName, doc.schemas);
+          mergeSchemaInto(doc, schemaName, newSchema);
+        }
+      } catch (e) {}
     } else if (headers["content-type"]?.includes("json")) {
       try {
         const json = JSON.parse(text);
         const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Request`;
         m.request = { $ref: schemaName };
-        doc.schemas[schemaName] = generateSchemaFromJson(
-          json,
-          schemaName,
-          doc.schemas,
-        );
+        const newSchema = generateSchemaFromJson(json, schemaName, doc.schemas);
+        mergeSchemaInto(doc, schemaName, newSchema);
       } catch (e) {}
     }
   }
@@ -1101,22 +1149,35 @@ function learnFromResponse(tabId, interfaceName, entry) {
 
   const mimeType = entry.mimeType || "";
   if (url.pathname.includes("batchexecute")) {
-    console.log("[BG] batchexecute response detected:", { url: url.href, textBody });
     const results = parseBatchExecuteResponse(textBody);
-    console.log("[BG] Decoded batchexecute results:", results);
     if (results) {
+      if (!doc.resources.learned) doc.resources.learned = { methods: {} };
       for (const res of results) {
-        const callM = doc.resources.learned.methods[res.rpcId];
-        if (callM) {
-          const schemaName = `${res.rpcId}Response`;
-          callM.response = { $ref: schemaName };
-          doc.schemas[schemaName] = generateSchemaFromJson(
-            res.data,
-            schemaName,
-            doc.schemas,
-            true,
-          );
+        let callM =
+          doc.resources.learned.methods[res.rpcId] ||
+          doc.resources.probed?.methods[res.rpcId];
+        // Create method entry if response arrived before request was learned
+        if (!callM) {
+          doc.resources.learned.methods[res.rpcId] = {
+            id: `${interfaceName.replace(/\//g, ".")}.${res.rpcId}`,
+            path: url.pathname.substring(1),
+            httpMethod: "POST",
+            parameters: {},
+            request: null,
+            response: null,
+          };
+          callM = doc.resources.learned.methods[res.rpcId];
         }
+
+        const schemaName = `${res.rpcId}Response`;
+        callM.response = { $ref: schemaName };
+        const newSchema = generateSchemaFromJson(
+          res.data,
+          schemaName,
+          doc.schemas,
+          true,
+        );
+        mergeSchemaInto(doc, schemaName, newSchema);
       }
     }
   } else if (mimeType.includes("json")) {
@@ -1124,11 +1185,8 @@ function learnFromResponse(tabId, interfaceName, entry) {
       const json = JSON.parse(textBody);
       const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Response`;
       targetM.response = { $ref: schemaName };
-      doc.schemas[schemaName] = generateSchemaFromJson(
-        json,
-        schemaName,
-        doc.schemas,
-      );
+      const newSchema = generateSchemaFromJson(json, schemaName, doc.schemas);
+      mergeSchemaInto(doc, schemaName, newSchema);
     } catch (e) {}
   } else if (
     mimeType.includes("protobuf") ||
@@ -1145,45 +1203,100 @@ function learnFromResponse(tabId, interfaceName, entry) {
         }
       });
       const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Response`;
-      m.response = { $ref: schemaName };
-      doc.schemas[schemaName] = generateSchemaFromPbTree(
-        tree,
-        schemaName,
-        doc.schemas,
-      );
+      targetM.response = { $ref: schemaName };
+      const newSchema = generateSchemaFromPbTree(tree, schemaName, doc.schemas);
+      mergeSchemaInto(doc, schemaName, newSchema);
     } catch (e) {}
   }
 }
 
 function generateSchemaFromPbTree(tree, name, schemas) {
+  // First pass: count field occurrences to detect repeated fields
+  const fieldCounts = {};
+  for (const node of tree) {
+    fieldCounts[node.field] = (fieldCounts[node.field] || 0) + 1;
+  }
+
   const properties = {};
+  const seen = new Set();
   for (const node of tree) {
     const fieldKey = `field${node.field}`;
+    if (seen.has(node.field)) {
+      // Merge nested schemas from additional occurrences of repeated message fields
+      if (node.message) {
+        const nestedName = `${name}Field${node.field}`;
+        if (schemas[nestedName]) {
+          const additionalSchema = generateSchemaFromPbTree(node.message, nestedName, schemas);
+          const existing = schemas[nestedName];
+          if (!existing.properties) existing.properties = {};
+          for (const [k, v] of Object.entries(additionalSchema.properties || {})) {
+            if (!existing.properties[k]) {
+              existing.properties[k] = v;
+            }
+          }
+        }
+      }
+      continue;
+    }
+    seen.add(node.field);
+
+    const isRepeated = fieldCounts[node.field] > 1 || !!node.isRepeatedScalar || !!node.packed;
+    let wireType;
+
+    // For JSPB-sourced nodes, infer type from the actual JS value
+    // since wire codes are synthetic and less reliable
+    if (node.isJspb) {
+      const val = node.value;
+      if (typeof val === "boolean") wireType = "bool";
+      else if (typeof val === "number") wireType = Number.isInteger(val) ? "int64" : "double";
+      else if (typeof val === "string") wireType = "string";
+      else if (node.isRepeatedScalar && Array.isArray(val) && val.length > 0) {
+        // Infer from first non-null element of repeated scalar
+        const sample = val.find((v) => v != null);
+        if (typeof sample === "boolean") wireType = "bool";
+        else if (typeof sample === "number") wireType = Number.isInteger(sample) ? "int64" : "double";
+        else wireType = "string";
+      } else wireType = "string";
+    } else if (node.packed) {
+      // Packed repeated: values are varint-decoded numbers
+      wireType = "int64";
+    } else {
+      // Binary protobuf wire type inference
+      if (node.wire === 0) wireType = "int64";
+      else if (node.wire === 5) wireType = "float";
+      else if (node.wire === 1) wireType = "double";
+      else if (node.string !== undefined) wireType = "string";
+      else if (node.hex) wireType = "bytes";
+      else wireType = "string";
+    }
+
     const prop = {
       id: node.field,
       number: node.field,
-      type:
-        node.wire === 0
-          ? "int64"
-          : node.wire === 5
-            ? "float"
-            : node.wire === 1
-              ? "double"
-              : "string",
-      description: `Discovered via response capture`,
+      type: wireType,
+      description: "Discovered via response capture",
     };
+
+    if (isRepeated) {
+      prop.type = "array";
+      prop.items = { type: wireType };
+    }
 
     if (node.message) {
       const nestedName = `${name}Field${node.field}`;
-      prop.type = "message";
-      prop.$ref = nestedName;
+      if (isRepeated) {
+        prop.items = { $ref: nestedName };
+      } else {
+        prop.type = "message";
+        prop.$ref = nestedName;
+      }
       schemas[nestedName] = generateSchemaFromPbTree(
         node.message,
         nestedName,
         schemas,
       );
-    } else if (node.string) {
-      prop.type = "string";
+    } else if (node.string !== undefined) {
+      if (!isRepeated) prop.type = "string";
     }
 
     properties[fieldKey] = prop;
@@ -1219,11 +1332,24 @@ function generateSchemaFromJson(json, name, schemas, isIndexed = false) {
             schemas,
             true,
           );
+        } else if (typeof val === "object") {
+          // Object within indexed array → nested named-key message
+          properties[fieldKey] = {
+            id: fieldNum,
+            number: fieldNum,
+            $ref: nestedName,
+          };
+          schemas[nestedName] = generateSchemaFromJson(
+            val,
+            nestedName,
+            schemas,
+            false,
+          );
         } else {
           properties[fieldKey] = {
             id: fieldNum,
             number: fieldNum,
-            type: typeof val,
+            type: inferJsonType(val),
           };
         }
       });
@@ -1254,12 +1380,93 @@ function generateSchemaFromJson(json, name, schemas, isIndexed = false) {
         properties[key] = { $ref: nestedName };
         schemas[nestedName] = generateSchemaFromJson(val, nestedName, schemas);
       } else {
-        properties[key] = { type: typeof val };
+        properties[key] = { type: inferJsonType(val) };
       }
     }
     return { id: name, type: "object", properties };
   } else {
-    return { type: typeof json };
+    return { type: inferJsonType(json) };
+  }
+}
+
+/**
+ * Infer a protobuf-style type from a JS value.
+ * More precise than raw `typeof` — distinguishes int vs float, bool, etc.
+ */
+function inferJsonType(val) {
+  if (val === null || val === undefined) return "string";
+  if (typeof val === "boolean") return "bool";
+  if (typeof val === "number") {
+    return Number.isInteger(val) ? "int64" : "double";
+  }
+  if (typeof val === "string") return "string";
+  return "string";
+}
+
+/**
+ * Merge new schema properties into an existing schema, preserving custom renames
+ * and enriching with new fields. Existing fields keep customName/name if set;
+ * new fields or missing type info gets filled in from the new observation.
+ */
+function mergeSchemaInto(doc, schemaName, newSchema) {
+  if (!doc.schemas[schemaName]) {
+    doc.schemas[schemaName] = newSchema;
+    return;
+  }
+  const existing = doc.schemas[schemaName];
+  if (!existing.properties) existing.properties = {};
+  const newProps = newSchema.properties || {};
+
+  for (const [key, newProp] of Object.entries(newProps)) {
+    const old = existing.properties[key];
+    if (!old) {
+      // Brand new field — add it
+      existing.properties[key] = newProp;
+    } else {
+      // Merge: preserve custom names, upgrade types
+      if (old.customName) {
+        // Keep the user's rename
+      } else if (newProp.name && !old.name) {
+        old.name = newProp.name;
+      }
+      // Upgrade generic types with more specific ones
+      if (newProp.type && newProp.type !== old.type) {
+        if (old.type === "string" && newProp.type !== "string") {
+          old.type = newProp.type;
+        }
+        // int → double/float (observed fractional value refines integer assumption)
+        else if (
+          (old.type === "int64" || old.type === "int32") &&
+          (newProp.type === "double" || newProp.type === "float")
+        ) {
+          old.type = newProp.type;
+        }
+      }
+      // Upgrade array item types
+      if (old.type === "array" && newProp.items) {
+        if (!old.items) {
+          old.items = newProp.items;
+        } else {
+          if (old.items.type === "string" && newProp.items.type && newProp.items.type !== "string") {
+            old.items.type = newProp.items.type;
+          }
+          if (newProp.items.$ref && !old.items.$ref) {
+            old.items.$ref = newProp.items.$ref;
+          }
+        }
+      }
+      if (newProp.id != null && old.id == null) old.id = newProp.id;
+      if (newProp.number != null && old.number == null)
+        old.number = newProp.number;
+      if (newProp.$ref && !old.$ref) {
+        old.$ref = newProp.$ref;
+        old.type = "message";
+      }
+      // Merge nested schema recursively
+      if (newProp.$ref && doc.schemas[newProp.$ref]) {
+        mergeSchemaInto(doc, newProp.$ref, doc.schemas[newProp.$ref]);
+      }
+    }
   }
 }
 
@@ -1400,7 +1607,7 @@ async function pageContextFetch(tabId, url, opts, initiatorOrigin, frameId = 0) 
       // 2. If targeted frame failed and it wasn't the main frame, fall back to main frame
       if (frameId !== 0) {
         try {
-          console.log(`[BG] Frame ${frameId} unreachable, falling back to main frame`);
+          // Frame unreachable, fall back to main frame
           const result = await sendPageFetch(tabId, url, opts, 0);
           return result;
         } catch (__) {
@@ -1503,8 +1710,8 @@ async function fetchDiscoveryForService(
   // Try each key separately to track which one works
   const keysToTry = [...new Set(apiKeys || [])];
 
-  // Also try without key if keys are empty/exhausted
-  if (keysToTry.length === 0) keysToTry.push(null);
+  // Always try without key as a fallback (some public APIs don't need one)
+  if (!keysToTry.includes(null)) keysToTry.push(null);
 
   for (const apiKey of keysToTry) {
     if (apiKey) triedKeys.add(apiKey);
@@ -1531,7 +1738,6 @@ async function fetchDiscoveryForService(
             doc.swagger)
         ) {
           let unifiedDoc = doc;
-          // If it's OpenAPI/Swagger, convert it to our internal Discovery-like format
           if (doc.openapi || doc.swagger) {
             unifiedDoc = convertOpenApiToDiscovery(doc, url);
           }
@@ -1553,15 +1759,9 @@ async function fetchDiscoveryForService(
           // If not, trigger immediate hybrid probe to patch it.
           if (seedUrl) {
             const seedUrlObj = new URL(seedUrl);
-            // We can assume POST for gRPC-Web usually, or just check path coverage
             const match = findDiscoveryMethod(doc, seedUrlObj.pathname, "POST");
             if (!match) {
-              // We need to wait for this probe to finish before notifying popup?
-              // Or notify now (partial) and then notify again after patch?
-              // Better to patch first if fast, but probing takes time.
-              // Let's notify partial first so user sees *something* (service name), then patch.
               notifyPopup(tabId);
-
               await performProbeAndPatch(tabId, service, seedUrl, apiKey);
               return;
             }
@@ -1569,7 +1769,6 @@ async function fetchDiscoveryForService(
 
           notifyPopup(tabId);
           return;
-        } else {
         }
       } catch (err) {
         // continue to next candidate
@@ -1577,56 +1776,7 @@ async function fetchDiscoveryForService(
     }
   }
 
-  // Also try without any API key (some public APIs don't need one)
-  // ... (Removed explicit null check here since we added it to keysToTry list above if empty,
-  //      but strictly speaking we should try it if it wasn't in keysToTry)
-  // [Code simplifies to just letting execution flows below if nothing returning]
-
-  // Also try without any API key (some public APIs don't need one)
-  const candidates = buildDiscoveryUrls(hostname, null);
-  for (const { url, headers, method } of candidates) {
-    try {
-      const resp = await fetchFn(url, { method: method || "GET", headers });
-      if (resp.error || !resp.ok) continue;
-
-      let doc;
-      try {
-        doc = JSON.parse(resp.body);
-      } catch (_) {
-        continue;
-      }
-
-      if (
-        doc &&
-        (doc.discoveryVersion ||
-          doc.kind === "discovery#restDescription" ||
-          doc.openapi ||
-          doc.swagger)
-      ) {
-        let unifiedDoc = doc;
-        if (doc.openapi || doc.swagger) {
-          unifiedDoc = convertOpenApiToDiscovery(doc, url);
-        }
-
-        const existingEntry = tab.discoveryDocs.get(service);
-        const mergedDoc = mergeVirtualParts(unifiedDoc, existingEntry?.doc);
-
-        tab.discoveryDocs.set(service, {
-          status: "found",
-          doc: mergedDoc,
-          url,
-          method: method || "GET",
-          apiKey: null,
-          fetchedAt: Date.now(),
-        });
-        mergeToGlobal(tab);
-        notifyPopup(tabId);
-        return;
-      }
-    } catch (_) {}
-  }
-
-  // All keys failed (or no keys).
+  // All keys (including null) failed.
   // FALLBACK: Try req2proto probing if we have a seed URL.
   const currentStatus = tab.discoveryDocs.get(service);
   const finalSeedUrl = seedUrl || currentStatus?.seedUrl;
@@ -1636,24 +1786,34 @@ async function fetchDiscoveryForService(
     const probeKey = keysToTry[0] || null;
     await performProbeAndPatch(tabId, service, finalSeedUrl, probeKey);
   } else {
-    // If we get here, truly not found
+    // If we get here, truly not found — record timestamp for cooldown
     tab.discoveryDocs.set(service, {
       status: "not_found",
       _triedKeys: triedKeys,
+      _failedAt: Date.now(),
     });
     mergeToGlobal(tab);
     notifyPopup(tabId);
   }
 }
 
+// Track in-flight probes to prevent concurrent duplicates
+const _inflight = new Set();
+
 /**
  * Perform req2proto probing and patch the discovery document.
  */
 async function performProbeAndPatch(tabId, service, targetUrl, apiKey) {
+  // Deduplicate: skip if already probing this service+url combo
+  const probeKey = `${service}::${targetUrl}`;
+  if (_inflight.has(probeKey)) return;
+  _inflight.add(probeKey);
+
   const tab = getTab(tabId);
 
   if (typeof probeApiEndpoint === "undefined") {
     console.error("[Debug] CRITICAL: probeApiEndpoint is not defined!");
+    _inflight.delete(probeKey);
     return;
   }
 
@@ -1684,11 +1844,6 @@ async function performProbeAndPatch(tabId, service, targetUrl, apiKey) {
         existingDoc,
       );
 
-      if (virtualDoc.schemas) {
-        for (const sName of Object.keys(virtualDoc.schemas)) {
-        }
-      }
-
       tab.discoveryDocs.set(service, {
         status: "found", // Treat as found so it shows up in UI
         doc: virtualDoc,
@@ -1705,6 +1860,8 @@ async function performProbeAndPatch(tabId, service, targetUrl, apiKey) {
     }
   } catch (probeErr) {
     console.error("Probe fallback failed:", probeErr);
+  } finally {
+    _inflight.delete(probeKey);
   }
 }
 
@@ -1779,6 +1936,33 @@ function updateOrCreateVirtualDoc(service, seedUrl, probeResult, existingDoc) {
     schemaName,
   );
 
+  // Merge probe properties into request and response schemas.
+  // Probe data has verified field numbers/types — prefer it over learned data,
+  // but always preserve user's customName renames.
+  function mergeProbeInto(target, probeProps) {
+    if (!target.properties) target.properties = {};
+    for (const [key, probeProp] of Object.entries(probeProps)) {
+      const existing = target.properties[key];
+      if (!existing) {
+        target.properties[key] = probeProp;
+      } else {
+        // Probe has authoritative field numbers and types
+        if (probeProp.id != null) existing.id = probeProp.id;
+        if (probeProp.number != null) existing.number = probeProp.number;
+        if (probeProp.type && existing.type === "string" && probeProp.type !== "string") {
+          existing.type = probeProp.type;
+        }
+        if (probeProp.$ref && !existing.$ref) existing.$ref = probeProp.$ref;
+        // Preserve user renames
+        if (existing.customName) {
+          // keep existing.name
+        } else if (probeProp.name) {
+          existing.name = probeProp.name;
+        }
+      }
+    }
+  }
+
   if (!doc.schemas[schemaName]) {
     doc.schemas[schemaName] = {
       id: schemaName,
@@ -1786,11 +1970,7 @@ function updateOrCreateVirtualDoc(service, seedUrl, probeResult, existingDoc) {
       properties: newProperties,
     };
   } else {
-    // Merge: only add missing properties
-    doc.schemas[schemaName].properties = {
-      ...newProperties,
-      ...doc.schemas[schemaName].properties,
-    };
+    mergeProbeInto(doc.schemas[schemaName], newProperties);
   }
 
   if (!doc.schemas[actualResponseRef]) {
@@ -1800,31 +1980,7 @@ function updateOrCreateVirtualDoc(service, seedUrl, probeResult, existingDoc) {
       properties: newProperties,
     };
   } else {
-    // Merge: only add missing properties
-    doc.schemas[actualResponseRef].properties = {
-      ...newProperties,
-      ...doc.schemas[actualResponseRef].properties,
-    };
-  }
-
-  // Preserve IDs in request AND response schemas
-  for (const [key, prop] of Object.entries(newProperties)) {
-    // Request side
-    if (
-      doc.schemas[schemaName].properties[key] &&
-      doc.schemas[schemaName].properties[key].id == null
-    ) {
-      doc.schemas[schemaName].properties[key].id = prop.id;
-      doc.schemas[schemaName].properties[key].number = prop.id;
-    }
-    // Response side (Crucial for manual send results!)
-    if (
-      doc.schemas[actualResponseRef].properties[key] &&
-      doc.schemas[actualResponseRef].properties[key].id == null
-    ) {
-      doc.schemas[actualResponseRef].properties[key].id = prop.id;
-      doc.schemas[actualResponseRef].properties[key].number = prop.id;
-    }
+    mergeProbeInto(doc.schemas[actualResponseRef], newProperties);
   }
 
   return doc;
@@ -1940,13 +2096,62 @@ async function probeEndpoint(tabId, endpointKey) {
   return result;
 }
 
+// ─── Response Body Handling (from intercept.js via content.js relay) ─────────
+
+function handleResponseBody(tabId, msg) {
+  if (!msg.url || !msg.body) return;
+
+  const tab = getTab(tabId);
+
+  // Decode body to text for key scanning
+  let textBody = msg.body;
+  if (msg.base64Encoded) {
+    try {
+      const bytes = base64ToUint8(msg.body);
+      textBody = new TextDecoder().decode(bytes);
+    } catch (e) {
+      textBody = null;
+    }
+  }
+
+  // Scan for keys in every captured response body
+  if (textBody) {
+    extractKeysFromText(tabId, textBody, msg.url, "response_body");
+  }
+
+  // Match to request log entry — most recent entry for this URL without a body
+  const entry = tab.requestLog.find(
+    (r) => r.url === msg.url && !r.responseBody,
+  );
+  if (entry) {
+    entry.responseBody = msg.body;
+    entry.responseBase64 = msg.base64Encoded || false;
+    entry.mimeType = msg.contentType || "";
+    entry.responseHeaders = msg.responseHeaders || {};
+
+    const service =
+      entry.service || extractInterfaceName(new URL(entry.url));
+    learnFromResponse(tabId, service, entry);
+    scheduleSessionSave(tabId);
+    notifyPopup(tabId);
+  }
+}
+
 // ─── Message Handling ────────────────────────────────────────────────────────
 
-// Content scripts only handle CONTENT_KEYS and CONTENT_ENDPOINTS.
+// Content scripts handle CONTENT_KEYS, CONTENT_ENDPOINTS, and RESPONSE_BODY.
 // Manifest "matches" already restricts which pages they run on.
 function handleContentMessage(msg, sender) {
-  if (!sender.tab || !Array.isArray(msg.keys || msg.endpoints)) return;
+  if (!sender.tab) return;
   const tabId = sender.tab.id;
+
+  // RESPONSE_BODY comes from intercept.js via content.js relay
+  if (msg.type === "RESPONSE_BODY") {
+    handleResponseBody(tabId, msg);
+    return;
+  }
+
+  if (!Array.isArray(msg.keys || msg.endpoints)) return;
   const tab = getTab(tabId);
 
   if (msg.type === "CONTENT_KEYS") {
@@ -2075,6 +2280,54 @@ function handlePopupMessage(msg, _sender, sendResponse) {
       return;
     }
 
+    case "CLEAR_LOG": {
+      if (msg.clearAll) {
+        for (const [tid, t] of state.tabs) {
+          t.requestLog = [];
+          chrome.storage.session.remove(`reqLog_${tid}`).catch(() => {});
+        }
+        saveSessionIndex();
+      } else {
+        if (tabId == null) return;
+        const tab = getTab(tabId);
+        tab.requestLog = [];
+        chrome.storage.session.remove(`reqLog_${tabId}`).catch(() => {});
+        saveSessionIndex();
+      }
+      sendResponse({ ok: true });
+      return;
+    }
+
+    case "GET_TAB_LIST": {
+      const tabs = [];
+      for (const [tid, t] of state.tabs) {
+        if (t.requestLog.length === 0) continue;
+        const meta = _tabMeta.get(tid) || { title: `Tab ${tid}`, url: "" };
+        tabs.push({ tabId: tid, title: meta.title, url: meta.url, count: t.requestLog.length, closed: !!meta.closed });
+      }
+      // Also include closed tabs from metadata that still have session storage
+      for (const [tid, meta] of _tabMeta) {
+        if (meta.closed && !state.tabs.has(tid)) {
+          tabs.push({ tabId: tid, title: meta.title, url: meta.url, count: meta.count || 0, closed: true });
+        }
+      }
+      sendResponse(tabs);
+      return;
+    }
+
+    case "GET_ALL_LOGS": {
+      const result = {};
+      const filter = msg.filter; // "all" | tabId (number)
+      for (const [tid, t] of state.tabs) {
+        if (t.requestLog.length === 0) continue;
+        if (filter !== "all" && filter !== tid) continue;
+        const meta = _tabMeta.get(tid) || { title: `Tab ${tid}`, url: "" };
+        result[tid] = { meta, requestLog: t.requestLog };
+      }
+      sendResponse(result);
+      return;
+    }
+
     case "GET_ENDPOINT_SCHEMA": {
       if (tabId == null) return;
       // Pass service/methodId if available (for virtual endpoints)
@@ -2103,6 +2356,23 @@ function handlePopupMessage(msg, _sender, sendResponse) {
       return;
     }
 
+    case "CANCEL_FUZZ": {
+      if (tabId == null) return;
+      const fuzzState = activeFuzz.get(tabId);
+      if (fuzzState) fuzzState.abort = true;
+      sendResponse({ ok: true });
+      return;
+    }
+
+    case "GET_FUZZ_STATE": {
+      const fuzzState = activeFuzz.get(tabId);
+      sendResponse({
+        running: !!fuzzState?.running,
+        results: fuzzState?.results || [],
+      });
+      return;
+    }
+
     case "RENAME_FIELD": {
       if (tabId == null) return;
       const tab = getTab(tabId);
@@ -2117,24 +2387,9 @@ function handlePopupMessage(msg, _sender, sendResponse) {
       if (schemaName === "params") {
         // Find method and rename its parameter
         let m = null;
-        console.log("[BG] RENAME_FIELD: Starting for params", {
-          service,
-          methodId: msg.methodId,
-          fieldKey,
-          newName,
-        });
         if (msg.methodId) {
-          // Direct lookup by ID (reliable)
           const match = findMethodById(doc, msg.methodId);
-          if (match) {
-            m = match.method;
-            console.log("[BG] Found method by ID:", m.id);
-          } else {
-            console.warn(
-              "[BG] Method ID provided but not found:",
-              msg.methodId,
-            );
-          }
+          if (match) m = match.method;
         }
 
         if (!m) {
@@ -2143,24 +2398,16 @@ function handlePopupMessage(msg, _sender, sendResponse) {
             new URL(msg.url || ""),
             service,
           );
-          console.log("[BG] Fallback to URL method name:", methodName);
           m =
             doc.resources.learned?.methods[methodName] ||
             doc.resources.probed?.methods[methodName];
         }
 
-        if (m) {
-          if (m.parameters?.[fieldKey]) {
-            console.log("[BG] Renaming param:", fieldKey, "to", newName);
-            m.parameters[fieldKey].name = newName;
-            m.parameters[fieldKey].customName = true;
-            mergeToGlobal(tab);
-            sendResponse({ ok: true });
-          } else {
-            console.warn("[BG] Param not found in method:", fieldKey);
-          }
-        } else {
-          console.warn("[BG] Method not found for rename.");
+        if (m && m.parameters?.[fieldKey]) {
+          m.parameters[fieldKey].name = newName;
+          m.parameters[fieldKey].customName = true;
+          mergeToGlobal(tab);
+          sendResponse({ ok: true });
         }
       } else {
         // Handle schema properties or create virtual schema for raw fields
@@ -2196,9 +2443,68 @@ function handlePopupMessage(msg, _sender, sendResponse) {
 
 // ─── Fuzzing Engine ──────────────────────────────────────────────────────────
 
+/**
+ * Pick a plausible default for a field that isn't being fuzzed.
+ * Prefers the field's own enum/format constraints over naive fallbacks.
+ */
+function fuzzDefaultValue(f) {
+  if (f.enum && f.enum.length > 0) return f.enum[0];
+  if (f.value !== undefined && f.value !== null && f.value !== "") return f.value;
+  switch (f.type) {
+    case "boolean":
+    case "bool":
+      return false;
+    case "integer":
+    case "int32":
+    case "uint32":
+    case "sint32":
+    case "fixed32":
+    case "sfixed32":
+      return 1;
+    case "number":
+    case "float":
+    case "double":
+    case "int64":
+    case "uint64":
+    case "sint64":
+    case "fixed64":
+    case "sfixed64":
+      return 1;
+    default:
+      // For strings, use format-aware defaults
+      if (f.format === "date" || f.format === "date-time") return "2024-01-01T00:00:00Z";
+      if (f.format === "email") return "test@example.com";
+      if (f.format === "uri" || f.format === "url") return "https://example.com";
+      if (f.format === "uuid") return "00000000-0000-0000-0000-000000000001";
+      return "test";
+  }
+}
+
+/**
+ * Classify an HTTP status code into a tier for UI rendering.
+ */
+function classifyStatus(status) {
+  if (status == null) return "network";
+  if (status >= 500) return "interesting"; // Server errors — most valuable
+  if (status >= 400) return "expected"; // Client errors — validation rejections
+  if (status >= 300) return "redirect";
+  return "success";
+}
+
+const MAX_FUZZ_RESULTS = 200;
+
 async function executeFuzzing(tabId, msg) {
   const schema = resolveEndpointSchema(tabId, null, msg.service, msg.methodId);
-  if (!schema || !schema.requestBody) return;
+  if (!schema || !schema.requestBody) {
+    chrome.runtime.sendMessage({
+      type: "FUZZ_ERROR",
+      tabId,
+      error: !schema
+        ? "Could not resolve endpoint schema"
+        : "Endpoint has no request body fields to fuzz",
+    }).catch(() => {});
+    return;
+  }
 
   const fields = schema.requestBody.fields;
   const url =
@@ -2209,7 +2515,18 @@ async function executeFuzzing(tabId, msg) {
           "https://" + msg.service + ".googleapis.com",
         ).toString()
       : null);
-  if (!url) return;
+  if (!url) {
+    chrome.runtime.sendMessage({
+      type: "FUZZ_ERROR",
+      tabId,
+      error: "Could not determine endpoint URL",
+    }).catch(() => {});
+    return;
+  }
+
+  // Initialize campaign state
+  const campaign = { abort: false, running: true, results: [] };
+  activeFuzz.set(tabId, campaign);
 
   const payloads = [];
   if (msg.config.strings) {
@@ -2230,18 +2547,20 @@ async function executeFuzzing(tabId, msg) {
     payloads.push(null, [], {});
   }
 
+  let delay = 200;
+  let completed = 0;
+  const total = fields.length * payloads.length;
+
   for (const field of fields) {
+    if (campaign.abort) break;
     for (const payload of payloads) {
-      // Create a copy of default fields with one fuzzed field
+      if (campaign.abort) break;
+
       const fuzzedFields = fields.map((f) => {
         if (f.name === field.name) {
           return { ...f, value: payload };
         }
-        // Use a safe default value for other fields
-        return {
-          ...f,
-          value: f.type === "string" ? "test" : f.type === "bool" ? false : 1,
-        };
+        return { ...f, value: fuzzDefaultValue(f) };
       });
 
       const result = await executeSendRequest(tabId, {
@@ -2256,25 +2575,66 @@ async function executeFuzzing(tabId, msg) {
         },
       });
 
+      // Extract a short body snippet for context
+      let bodySnippet = null;
+      if (result.body) {
+        const raw =
+          typeof result.body === "string"
+            ? result.body
+            : JSON.stringify(result.body.parsed || result.body);
+        bodySnippet = raw.length > 200 ? raw.slice(0, 200) + "…" : raw;
+      }
+
+      completed++;
+      const statusTier = classifyStatus(result.status);
+
+      const update = {
+        field: field.name,
+        payload,
+        status: result.status,
+        error: result.error,
+        bodySnippet,
+        statusTier,
+        progress: { done: completed, total },
+      };
+
+      if (campaign.results.length < MAX_FUZZ_RESULTS) {
+        campaign.results.push(update);
+      }
+
       chrome.runtime.sendMessage({
         type: "FUZZ_UPDATE",
         tabId,
-        update: {
-          field: field.name,
-          payload: payload,
-          status: result.status,
-          error: result.error,
-        },
-      });
+        update,
+      }).catch(() => {}); // Popup may be closed
 
-      // Small delay to avoid rate limiting
-      await new Promise((r) => setTimeout(r, 200));
+      // Adaptive delay: back off on 429/5xx, speed up on clean responses
+      if (result.status === 429) {
+        delay = Math.min(delay * 2, 5000);
+      } else if (result.status >= 500) {
+        delay = Math.min(delay + 100, 2000);
+      } else if (delay > 200) {
+        delay = Math.max(delay - 50, 200);
+      }
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
+
+  campaign.running = false;
+  chrome.runtime.sendMessage({
+    type: "FUZZ_COMPLETE",
+    tabId,
+    cancelled: campaign.abort,
+    total: completed,
+  }).catch(() => {});
 }
 
 const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;
-const CONTENT_TYPES = new Set(["CONTENT_KEYS", "CONTENT_ENDPOINTS"]);
+const CONTENT_TYPES = new Set([
+  "CONTENT_KEYS",
+  "CONTENT_ENDPOINTS",
+  "RESPONSE_BODY",
+]);
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id) return;
@@ -2294,7 +2654,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  // Keep session storage logs so closed tab requests remain viewable
+  const meta = _tabMeta.get(tabId);
+  if (meta) {
+    const tab = state.tabs.get(tabId);
+    meta.closed = true;
+    meta.closedAt = Date.now();
+    meta.count = tab ? tab.requestLog.length : meta.count || 0;
+  }
   state.tabs.delete(tabId);
+  saveSessionIndex();
 });
 
 // ─── Send Request: Schema Resolution ─────────────────────────────────────────
@@ -2509,8 +2878,15 @@ function encodeFormToJspb(fields) {
     if (!f.number) continue;
     
     const targetIdx = f.number - 1;
-    if (f.type === "message") {
+    if (f.type === "message" && f.label !== "repeated") {
       arr[targetIdx] = encodeFormToJspb(f.children || []);
+    } else if (f.label === "repeated" && f.type === "message" && Array.isArray(f.value)) {
+      // Repeated message: each item's children must be recursively encoded
+      arr[targetIdx] = f.value.map((item) => {
+        if (item && item.children) return encodeFormToJspb(item.children);
+        if (Array.isArray(item)) return item;
+        return item;
+      });
     } else if (f.label === "repeated" && Array.isArray(f.value)) {
       arr[targetIdx] = f.value.map((v) => coerceValue(v, f.type));
     } else {
@@ -2529,8 +2905,24 @@ function encodeFormToProtobuf(fields) {
     if (!f.number) continue;
     if (f.value == null && !f.children?.length) continue;
     if (f.label === "repeated" && Array.isArray(f.value)) {
-      for (const v of f.value) {
-        parts.push(encodeSinglePbField(f.number, f.type, v, null));
+      // Packed encoding for repeated scalar numeric types (proto3 default)
+      const packableTypes = [
+        "int32", "int64", "uint32", "uint64", "sint32", "sint64",
+        "bool", "enum", "fixed32", "fixed64", "sfixed32", "sfixed64",
+        "float", "double",
+      ];
+      if (packableTypes.includes(f.type)) {
+        const innerParts = [];
+        for (const v of f.value) {
+          innerParts.push(encodeSinglePbFieldRaw(f.type, v));
+        }
+        const packed = concatBytes.apply(null, innerParts.length ? innerParts : [new Uint8Array(0)]);
+        parts.push(pbEncodeLenField(f.number, packed));
+      } else {
+        // Non-packable types (string, bytes, message): individual tag+value pairs
+        for (const v of f.value) {
+          parts.push(encodeSinglePbField(f.number, f.type, v, null));
+        }
       }
     } else {
       parts.push(encodeSinglePbField(f.number, f.type, f.value, f.children));
@@ -2559,8 +2951,10 @@ function encodeSinglePbField(num, type, value, children) {
       return pbEncodeVarintField(num, Number(value) || 0);
     case "sint32":
     case "sint64": {
+      // Arithmetic ZigZag to avoid 32-bit truncation from bitwise ops
       const n = Number(value) || 0;
-      return pbEncodeVarintField(num, (n << 1) ^ (n >> 31));
+      const zigzag = n >= 0 ? n * 2 : (-n) * 2 - 1;
+      return pbEncodeVarintField(num, zigzag);
     }
     case "float":
     case "fixed32":
@@ -2571,15 +2965,71 @@ function encodeSinglePbField(num, type, value, children) {
       else new DataView(buf.buffer).setUint32(0, Number(value) || 0, true);
       return concatBytes(pbTag(num, PB_32BIT), buf);
     }
-    case "double":
-    case "fixed64":
-    case "sfixed64": {
+    case "double": {
       const buf = new Uint8Array(8);
       new DataView(buf.buffer).setFloat64(0, Number(value) || 0, true);
       return concatBytes(pbTag(num, PB_64BIT), buf);
     }
+    case "fixed64":
+    case "sfixed64": {
+      // 64-bit integer encoding (not float64)
+      const buf = new Uint8Array(8);
+      const n = Number(value) || 0;
+      const dv = new DataView(buf.buffer);
+      dv.setUint32(0, n >>> 0, true);
+      dv.setUint32(4, Math.floor(n / 0x100000000) >>> 0, true);
+      return concatBytes(pbTag(num, PB_64BIT), buf);
+    }
     default:
       return pbEncodeLenField(num, String(value));
+  }
+}
+
+/**
+ * Encode a single protobuf scalar value WITHOUT the field tag.
+ * Used for packed repeated encoding where values are concatenated inside
+ * a single length-delimited field.
+ */
+function encodeSinglePbFieldRaw(type, value) {
+  switch (type) {
+    case "bool":
+      return pbWriteVarint(value ? 1 : 0);
+    case "enum":
+    case "int32":
+    case "int64":
+    case "uint32":
+    case "uint64":
+      return pbWriteVarint(Number(value) || 0);
+    case "sint32":
+    case "sint64": {
+      const n = Number(value) || 0;
+      return pbWriteVarint(n >= 0 ? n * 2 : (-n) * 2 - 1);
+    }
+    case "float":
+    case "fixed32":
+    case "sfixed32": {
+      const buf = new Uint8Array(4);
+      if (type === "float")
+        new DataView(buf.buffer).setFloat32(0, Number(value) || 0, true);
+      else new DataView(buf.buffer).setUint32(0, Number(value) || 0, true);
+      return buf;
+    }
+    case "double": {
+      const buf = new Uint8Array(8);
+      new DataView(buf.buffer).setFloat64(0, Number(value) || 0, true);
+      return buf;
+    }
+    case "fixed64":
+    case "sfixed64": {
+      const buf = new Uint8Array(8);
+      const n = Number(value) || 0;
+      const dv = new DataView(buf.buffer);
+      dv.setUint32(0, n >>> 0, true);
+      dv.setUint32(4, Math.floor(n / 0x100000000) >>> 0, true);
+      return buf;
+    }
+    default:
+      return pbWriteVarint(Number(value) || 0);
   }
 }
 
@@ -2659,13 +3109,10 @@ async function executeSendRequest(tabId, msg) {
   let bodyEncoding = null;
 
   if (msg.httpMethod !== "GET" && msg.httpMethod !== "DELETE" && msg.body) {
-    console.log("[BG] Encoding request body for method:", msg.httpMethod, "URL:", url);
     if (url.includes("batchexecute") && msg.body.mode === "form") {
       // Special handling for batchexecute: wrap in f.req envelope
       const fields = msg.body.formData?.fields || [];
-      console.log("[BG] batchexecute fields:", fields);
-      const argsArray = encodeFormToJspb(fields); // Convert fields back to positional array
-      console.log("[BG] batchexecute argsArray:", argsArray);
+      const argsArray = encodeFormToJspb(fields);
       const innerJson = JSON.stringify(argsArray);
 
       // Extract RPC ID from methodId (e.g. "Google.Photos.p1Takd" -> "p1Takd")
@@ -2676,7 +3123,6 @@ async function executeSendRequest(tabId, msg) {
       params.set("f.req", JSON.stringify(envelope));
 
       body = params.toString();
-      console.log("[BG] Final batchexecute body:", body);
       headers["Content-Type"] =
         "application/x-www-form-urlencoded;charset=UTF-8";
     } else if (msg.body.mode === "raw" && msg.body.rawBody) {
@@ -2719,16 +3165,13 @@ async function executeSendRequest(tabId, msg) {
       initiatorOrigin,
       msg.body?.frameId,
     );
-    console.log("[BG] pageContextFetch response:", resp);
   } catch (err) {
-    console.error("[BG] pageContextFetch exception:", err);
     return { error: `fetch_exception: ${err.message}`, timing: Date.now() - startTime };
   }
 
   const timing = Date.now() - startTime;
 
   if (!resp || resp.error) {
-    console.warn("[BG] Fetch failed or returned error:", resp?.error);
     return { error: resp?.error || "fetch_failed: no response", timing };
   }
 
@@ -2768,9 +3211,13 @@ async function executeSendRequest(tabId, msg) {
       const parsed = JSON.parse(resp.body);
       if (
         Array.isArray(parsed) &&
-        (respCt.includes("json+protobuf") || respCt.includes("text/"))
+        (respCt.includes("json+protobuf") ||
+          (respCt.includes("text/plain") &&
+            parsed.length > 0 &&
+            parsed.some((item) => item === null || Array.isArray(item) || typeof item !== "object")))
       ) {
-        // JSPB format found in manual send
+        // JSPB format: json+protobuf content-type, or text/plain with array structure
+        // (plain arrays of primitives/nulls/sub-arrays, not HTML or other text formats)
         bodyResult = {
           format: "protobuf_tree",
           parsed: jspbToTree(parsed),
@@ -2822,25 +3269,56 @@ function notifyPopup(tabId) {
 function mergeVirtualParts(newDoc, oldDoc) {
   if (!oldDoc || !newDoc) return newDoc;
 
-  // Preserve "learned" methods
+  // Preserve "learned" methods (deep copy to avoid aliasing)
   if (oldDoc.resources?.learned) {
     if (!newDoc.resources) newDoc.resources = {};
-    newDoc.resources.learned = oldDoc.resources.learned;
+    newDoc.resources.learned = JSON.parse(JSON.stringify(oldDoc.resources.learned));
   }
 
-  // Preserve "probed" methods
+  // Preserve "probed" methods (deep copy to avoid aliasing)
   if (oldDoc.resources?.probed) {
     if (!newDoc.resources) newDoc.resources = {};
-    newDoc.resources.probed = oldDoc.resources.probed;
+    newDoc.resources.probed = JSON.parse(JSON.stringify(oldDoc.resources.probed));
   }
 
-  // Preserve learned schemas
+  // Preserve learned schemas + carry over custom renames into new schemas
   if (oldDoc.schemas) {
     for (const [name, schema] of Object.entries(oldDoc.schemas)) {
       if (!newDoc.schemas[name]) {
         newDoc.schemas[name] = schema;
+      } else {
+        // Schema exists in both — preserve customName fields from old
+        const oldProps = schema.properties || {};
+        const newProps = newDoc.schemas[name].properties || {};
+        for (const [pKey, pVal] of Object.entries(oldProps)) {
+          if (pVal.customName && newProps[pKey]) {
+            newProps[pKey].name = pVal.name;
+            newProps[pKey].customName = true;
+          }
+        }
       }
     }
+  }
+
+  // Carry over custom parameter renames from old methods
+  if (oldDoc.resources) {
+    function carryRenames(oldRes, newRes) {
+      if (!oldRes || !newRes) return;
+      for (const [rName, r] of Object.entries(oldRes)) {
+        if (!newRes[rName]) continue;
+        for (const [mName, oldM] of Object.entries(r.methods || {})) {
+          const newM = newRes[rName]?.methods?.[mName];
+          if (!newM || !oldM.parameters) continue;
+          for (const [pName, pVal] of Object.entries(oldM.parameters)) {
+            if (pVal.customName && newM.parameters?.[pName]) {
+              newM.parameters[pName].name = pVal.name;
+              newM.parameters[pName].customName = true;
+            }
+          }
+        }
+      }
+    }
+    carryRenames(oldDoc.resources, newDoc.resources);
   }
 
   return newDoc;
@@ -2958,6 +3436,7 @@ chrome.webRequest.onCompleted.addListener(
     if (entry) {
       entry.status = details.statusCode;
       entry.completedAt = Date.now();
+      scheduleSessionSave(details.tabId);
       notifyPopup(details.tabId);
     }
   },
@@ -2975,6 +3454,7 @@ chrome.webRequest.onErrorOccurred.addListener(
       entry.status = "error";
       entry.error = details.error;
       entry.completedAt = Date.now();
+      scheduleSessionSave(details.tabId);
       notifyPopup(details.tabId);
     }
   },

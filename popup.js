@@ -5,6 +5,9 @@ let tabData = null;
 let currentSchema = null;
 let currentRequestUrl = "";
 let currentRequestMethod = "POST";
+let fuzzRunning = false;
+let logFilter = "active"; // "active" | "all" | tabId (number)
+let allTabsData = null; // { tabId: { meta, requestLog } }
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
@@ -51,7 +54,33 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Fuzz panel
   document
     .getElementById("btn-start-fuzz")
-    .addEventListener("click", startFuzzing);
+    .addEventListener("click", () => {
+      if (fuzzRunning) {
+        cancelFuzzing();
+      } else {
+        startFuzzing();
+      }
+    });
+
+  // Restore fuzz state if a campaign is in progress or has results
+  chrome.runtime.sendMessage({ type: "GET_FUZZ_STATE", tabId: currentTabId }).then((fs) => {
+    if (!fs) return;
+    if (fs.running) setFuzzUIState(true);
+    if (fs.results?.length) {
+      for (let i = 0; i < fs.results.length; i++) {
+        renderFuzzUpdate(fs.results[i]);
+      }
+    }
+  }).catch(() => {});
+
+  // Request log tab filter
+  document.getElementById("log-tab-filter").addEventListener("change", async (e) => {
+    const val = e.target.value;
+    logFilter = val === "active" ? "active" : val === "all" ? "all" : parseInt(val, 10);
+    await loadRequestLog();
+    renderResponsePanel();
+  });
+  populateTabFilter();
 
   // Global rename handler
   document.addEventListener("click", async (e) => {
@@ -117,9 +146,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       objects: document.getElementById("fuzz-objects").checked,
     };
 
-    const btn = document.getElementById("btn-start-fuzz");
-    btn.disabled = true;
-    btn.textContent = "Fuzzing...";
+    if (!config.strings && !config.numbers && !config.objects) {
+      alert("Select at least one payload category.");
+      return;
+    }
+
+    setFuzzUIState(true);
     document.getElementById("fuzz-log").innerHTML = "";
 
     try {
@@ -132,29 +164,81 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
     } catch (err) {
       console.error("Fuzzing failed:", err);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Start Fuzzing";
+      setFuzzUIState(false);
     }
   }
 
+  async function cancelFuzzing() {
+    try {
+      await chrome.runtime.sendMessage({
+        type: "CANCEL_FUZZ",
+        tabId: currentTabId,
+      });
+    } catch (_) {}
+  }
+
+  function setFuzzUIState(running) {
+    fuzzRunning = running;
+    const btn = document.getElementById("btn-start-fuzz");
+    if (running) {
+      btn.textContent = "Cancel";
+      btn.classList.add("btn-fuzz-cancel");
+      btn.disabled = false;
+    } else {
+      btn.textContent = "Start Fuzzing";
+      btn.classList.remove("btn-fuzz-cancel");
+      btn.disabled = false;
+    }
+  }
+
+  const MAX_FUZZ_LOG_ENTRIES = 200;
+
   function renderFuzzUpdate(update) {
     const log = document.getElementById("fuzz-log");
+
+    // Cap DOM entries
+    while (log.children.length >= MAX_FUZZ_LOG_ENTRIES) {
+      log.removeChild(log.lastChild);
+    }
+
     const card = el("div", "card fuzz-card");
+    const tier = update.statusTier || classifyStatusLocal(update.status);
     const statusClass =
-      update.status >= 200 && update.status < 300
-        ? "badge-found"
-        : "badge-error";
+      tier === "interesting"
+        ? "badge-interesting"
+        : tier === "success"
+          ? "badge-found"
+          : tier === "network"
+            ? "badge-notfound"
+            : "badge-error";
+
+    const statusText =
+      update.status != null ? String(update.status) : "ERR";
+
+    let progressHtml = "";
+    if (update.progress) {
+      progressHtml = `<span class="fuzz-progress">${update.progress.done}/${update.progress.total}</span>`;
+    }
 
     card.innerHTML = `
       <div class="card-label">
-        Field: <strong>${esc(update.field)}</strong> &middot; 
-        <span class="badge ${statusClass}">${update.status}</span>
+        Field: <strong>${esc(update.field)}</strong> &middot;
+        <span class="badge ${statusClass}">${esc(statusText)}</span>
+        ${progressHtml}
       </div>
       <div class="card-meta">Payload: <code>${esc(JSON.stringify(update.payload))}</code></div>
-      ${update.error ? `<div class="card-meta error">${esc(update.error)}</div>` : ""}
+      ${update.error ? `<div class="card-meta fuzz-error">${esc(update.error)}</div>` : ""}
+      ${update.bodySnippet ? `<div class="card-meta fuzz-body"><code>${esc(update.bodySnippet)}</code></div>` : ""}
     `;
     log.prepend(card);
+  }
+
+  function classifyStatusLocal(status) {
+    if (status == null) return "network";
+    if (status >= 500) return "interesting";
+    if (status >= 400) return "expected";
+    if (status >= 300) return "redirect";
+    return "success";
   }
 
   const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;
@@ -168,10 +252,27 @@ document.addEventListener("DOMContentLoaded", async () => {
       sender.url && sender.url.startsWith(EXTENSION_ORIGIN + "/");
     if (!isExtensionPage) return;
 
-    if (msg.type === "STATE_UPDATED" && msg.tabId === currentTabId)
-      throttledLoadState();
+    if (msg.type === "STATE_UPDATED") {
+      if (msg.tabId === currentTabId || logFilter !== "active") {
+        throttledLoadState();
+      }
+    }
     if (msg.type === "FUZZ_UPDATE" && msg.tabId === currentTabId)
       renderFuzzUpdate(msg.update);
+    if (msg.type === "FUZZ_COMPLETE" && msg.tabId === currentTabId) {
+      setFuzzUIState(false);
+      const log = document.getElementById("fuzz-log");
+      const summary = el("div", "card fuzz-card fuzz-summary");
+      summary.innerHTML = `<div class="card-label">${msg.cancelled ? "Cancelled" : "Complete"} — ${msg.total} requests sent</div>`;
+      log.prepend(summary);
+    }
+    if (msg.type === "FUZZ_ERROR" && msg.tabId === currentTabId) {
+      setFuzzUIState(false);
+      const log = document.getElementById("fuzz-log");
+      const card = el("div", "card fuzz-card");
+      card.innerHTML = `<div class="card-label fuzz-error">${esc(msg.error)}</div>`;
+      log.prepend(card);
+    }
   });
   loadState();
 });
@@ -183,13 +284,66 @@ async function loadState() {
     type: "GET_STATE",
     tabId: currentTabId,
   });
+  if (logFilter !== "active") {
+    await loadRequestLog();
+  }
   render();
 }
 
 async function clearState() {
   await chrome.runtime.sendMessage({ type: "CLEAR_TAB", tabId: currentTabId });
   tabData = null;
+  allTabsData = null;
   render();
+}
+
+async function loadRequestLog() {
+  if (logFilter === "active") {
+    allTabsData = null;
+    return;
+  }
+  try {
+    allTabsData = await chrome.runtime.sendMessage({
+      type: "GET_ALL_LOGS",
+      filter: logFilter,
+    });
+  } catch (_) {
+    allTabsData = null;
+  }
+}
+
+async function populateTabFilter() {
+  const select = document.getElementById("log-tab-filter");
+  if (!select) return;
+  try {
+    const tabList = await chrome.runtime.sendMessage({ type: "GET_TAB_LIST", tabId: currentTabId });
+    // Remove old dynamic options (keep "Active Tab" and "All Tabs")
+    while (select.options.length > 2) {
+      select.remove(2);
+    }
+    if (tabList && tabList.length > 1) {
+      const divider = document.createElement("option");
+      divider.disabled = true;
+      divider.textContent = "──────────";
+      select.appendChild(divider);
+
+      for (const t of tabList) {
+        const opt = document.createElement("option");
+        opt.value = String(t.tabId);
+        let label = t.title
+          ? (t.title.length > 30 ? t.title.slice(0, 30) + "\u2026" : t.title)
+          : `Tab ${t.tabId}`;
+        if (t.closed) label += " (closed)";
+        opt.textContent = `${label} (${t.count})`;
+        if (t.tabId === currentTabId) opt.textContent += " \u2605";
+        select.appendChild(opt);
+      }
+    }
+    // Restore selection
+    if (logFilter !== "active" && logFilter !== "all") {
+      select.value = String(logFilter);
+    }
+  } catch (_) {}
 }
 
 // ─── Render ──────────────────────────────────────────────────────────────────
@@ -198,6 +352,7 @@ function render() {
   renderDataPanel();
   renderSendPanel();
   renderResponsePanel();
+  populateTabFilter();
 }
 
 // ─── Data Panel ──────────────────────────────────────────────────────────────
@@ -410,7 +565,6 @@ async function loadVirtualSchema(service, methodId, initialData = null) {
 
 function pbTreeToMap(nodes) {
   if (!nodes) return null;
-  console.log("[Popup] pbTreeToMap processing nodes:", nodes);
   const map = {};
   for (const node of nodes) {
     if (node.message) {
@@ -832,7 +986,6 @@ async function sendRequest() {
     body = { mode: "raw", formData: null, rawBody: null, frameId: currentReplayRequest?.frameId };
   } else if (isFormMode) {
     const formValues = collectFormValues();
-    console.log("[Popup] Collected form values:", formValues);
     if (Object.keys(formValues.params).length > 0) {
       try {
         const urlObj = new URL(url);
@@ -875,7 +1028,6 @@ async function sendRequest() {
     headers,
     body,
   };
-  console.log("[Popup] Sending request message:", msg);
 
   try {
     const result = await chrome.runtime.sendMessage(msg);
@@ -1005,7 +1157,7 @@ function esc(s) {
   if (s == null) return "";
   const d = document.createElement("div");
   d.textContent = String(s);
-  return d.innerHTML;
+  return d.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 function el(tag, className) {
@@ -1063,7 +1215,6 @@ function renderPbTree(nodes, schema = null) {
         }
         if (fieldDef) {
           fieldName = fieldDef.name || fieldName;
-        } else {
         }
       } else {
         const entries = Object.entries(fieldMap);
@@ -1089,14 +1240,9 @@ function renderPbTree(nodes, schema = null) {
           if (fieldDef.name) {
             fieldName = fieldDef.name;
           }
-        } else {
         }
       }
     }
-
-    // Fallback: If no ID match, maybe it IS the key? (unlikely for numbers)
-
-    // Debug log for the first 20 fields to avoid spam
 
     const typeLabel = fieldDef
       ? `<span class="pb-type-badge">${fieldDef.type}</span>`
@@ -1113,6 +1259,21 @@ function renderPbTree(nodes, schema = null) {
     if (node.message) {
       const childrenSchema = fieldDef?.children || null;
       html += `<div class="pb-nested">${renderPbTree(node.message, childrenSchema)}</div>`;
+    } else if (node.packed) {
+      // Packed repeated scalars (proto3 default)
+      html += '<div class="pb-repeated">';
+      for (const val of node.packed) {
+        html += `<span class="pb-scalar-item">${esc(String(val))}</span> `;
+      }
+      html += "</div>";
+    } else if (node.isRepeatedScalar && Array.isArray(node.value)) {
+      // JSPB repeated scalar (array of primitives)
+      html += '<div class="pb-repeated">';
+      for (const val of node.value) {
+        if (val === null || val === undefined) continue;
+        html += `<span class="pb-scalar-item">${esc(JSON.stringify(val))}</span> `;
+      }
+      html += "</div>";
     } else if (Array.isArray(node.value) && node.isJspb) {
       // JSPB: could be nested message or repeated field
       const isRepeated = fieldDef?.label === "repeated";
@@ -1195,21 +1356,39 @@ function renderResponsePanel() {
   // Stabilize container height during re-render
   container.style.minHeight = container.scrollHeight + "px";
 
-  if (!tabData?.requestLog?.length) {
+  // Build entry list based on filter mode
+  let entries = [];
+  if (logFilter === "active") {
+    entries = (tabData?.requestLog || []).map((r) => ({ ...r, _tabId: currentTabId }));
+  } else if (allTabsData) {
+    for (const [tidStr, data] of Object.entries(allTabsData)) {
+      const tid = parseInt(tidStr, 10);
+      const meta = data.meta || {};
+      for (const req of data.requestLog) {
+        entries.push({ ...req, _tabId: tid, _tabTitle: meta.title || `Tab ${tid}` });
+      }
+    }
+    entries.sort((a, b) => b.timestamp - a.timestamp);
+    if (entries.length > 200) entries = entries.slice(0, 200);
+  }
+
+  if (entries.length === 0) {
     container.innerHTML = '<div class="empty">No requests captured yet.</div>';
     container.style.minHeight = "";
     return;
   }
 
+  const showTabLabel = logFilter !== "active";
   let html = "";
-  for (const req of tabData.requestLog) {
+  for (const req of entries) {
     const hasProto = !!req.decodedBody;
 
-    html += `<div class="card request-card clickable-card" style="margin-bottom:8px;" data-id="${req.id}">
+    html += `<div class="card request-card clickable-card" style="margin-bottom:8px;" data-id="${req.id}" data-tab-id="${req._tabId}">
       <div class="card-label" style="display:flex;justify-content:space-between;align-items:center">
         <span>
           <span class="badge ${req.method}">${req.method}</span>
           <span style="color:#aaa;font-size:11px;margin-left:6px">${new Date(req.timestamp).toLocaleTimeString()}</span>
+          ${showTabLabel ? `<span class="badge badge-tab">${esc(req._tabTitle || "Tab " + req._tabId)}</span>` : ""}
         </span>
         ${getStatusBadge(req.status)}
       </div>
@@ -1239,7 +1418,10 @@ function renderResponsePanel() {
 
   // Attach listeners
   container.querySelectorAll(".request-card").forEach((c) => {
-    c.onclick = () => replayRequest(c.dataset.id);
+    c.onclick = () => {
+      const sourceTabId = c.dataset.tabId ? parseInt(c.dataset.tabId, 10) : undefined;
+      replayRequest(c.dataset.id, sourceTabId);
+    };
   });
 }
 
@@ -1286,9 +1468,15 @@ function getStatusBadge(status) {
 
 let currentReplayRequest = null;
 
-function replayRequest(reqId) {
-  // Use string comparison for IDs
-  const req = tabData.requestLog.find((r) => String(r.id) === String(reqId));
+function replayRequest(reqId, sourceTabId) {
+  // Search the correct log source
+  let req;
+  if (sourceTabId && allTabsData && allTabsData[sourceTabId]) {
+    req = allTabsData[sourceTabId].requestLog.find((r) => String(r.id) === String(reqId));
+  }
+  if (!req) {
+    req = tabData?.requestLog?.find((r) => String(r.id) === String(reqId));
+  }
   if (!req) {
     console.error(`[Replay] Request ${reqId} not found in log`);
     return;
@@ -1308,10 +1496,8 @@ function replayRequest(reqId) {
       const bytes = base64ToUint8(req.rawBodyB64);
       const text = new TextDecoder().decode(bytes);
       const calls = parseBatchExecuteRequest(text);
-      console.log("[Popup] Replay batchexecute calls:", calls);
       if (calls && calls.length > 0) {
-        targetRpcId = calls[0].rpcId; // Primary RPC ID
-        console.log("[Popup] targetRpcId:", targetRpcId);
+        targetRpcId = calls[0].rpcId;
       }
     }
 
@@ -1375,13 +1561,10 @@ function replayRequest(reqId) {
         const text = new TextDecoder().decode(bytes);
         const calls = parseBatchExecuteRequest(text);
         if (calls && calls.length > 0) {
-          console.log("[Popup] Processing call[0].data:", calls[0].data);
           initialData = jspbToTree(
             Array.isArray(calls[0].data) ? calls[0].data : [calls[0].data],
           );
-          console.log("[Popup] jspbToTree result:", initialData);
           initialData = pbTreeToMap(initialData);
-          console.log("[Popup] pbTreeToMap result:", initialData);
         }
       } else {
         initialData = pbTreeToMap(req.decodedBody) || {};
@@ -1518,10 +1701,24 @@ function replayRequest(reqId) {
 }
 
 document.getElementById("btn-clear-log").addEventListener("click", async () => {
-  // Clear the log in the UI
-  tabData.requestLog = [];
+  if (logFilter === "active") {
+    if (tabData) tabData.requestLog = [];
+    await chrome.runtime.sendMessage({ type: "CLEAR_LOG", tabId: currentTabId });
+  } else if (logFilter === "all") {
+    allTabsData = null;
+    if (tabData) tabData.requestLog = [];
+    await chrome.runtime.sendMessage({ type: "CLEAR_LOG", clearAll: true });
+  } else {
+    // Clearing a specific tab
+    const targetTabId = logFilter;
+    if (allTabsData && allTabsData[targetTabId]) {
+      delete allTabsData[targetTabId];
+    }
+    if (targetTabId === currentTabId && tabData) {
+      tabData.requestLog = [];
+    }
+    await chrome.runtime.sendMessage({ type: "CLEAR_LOG", tabId: targetTabId });
+  }
   renderResponsePanel();
-
-  // Optionally tell background to clear its log for this tab (if we add that message type)
-  // For now, local UI clear is sufficient for the view
+  populateTabFilter();
 });

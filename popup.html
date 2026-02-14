@@ -35,7 +35,7 @@
 
     <!-- Send Panel -->
     <section id="panel-send" class="panel">
-      <p class="hint">Select an method to load field info.</p>
+      <p class="hint">Select a method to load field info.</p>
 
       <div id="send-controls">
         <select id="send-ep-select">
@@ -119,11 +119,15 @@
     <!-- Response Panel -->
     <section id="panel-response" class="panel active">
       <div id="response-log-container">
-        <div class="section-header">
-          Request Log (Active Tab)
-          <button id="btn-clear-log" class="btn-small" style="float: right">
-            Clear
-          </button>
+        <div class="section-header" style="display:flex;align-items:center;justify-content:space-between">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span>Request Log</span>
+            <select id="log-tab-filter" class="log-filter-select">
+              <option value="active">Active Tab</option>
+              <option value="all">All Tabs</option>
+            </select>
+          </div>
+          <button id="btn-clear-log" class="btn-small">Clear</button>
         </div>
         <div id="response-log" class="log-list"></div>
       </div>

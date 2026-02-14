@@ -163,6 +163,13 @@
     return true; // async sendResponse
   });
 
+  // ─── Response Body Relay: intercept.js (main world) → background ──────────
+
+  document.addEventListener("__uasr_resp", (e) => {
+    if (!e.detail) return;
+    chrome.runtime.sendMessage({ type: "RESPONSE_BODY", ...e.detail });
+  });
+
   // ─── Init ──────────────────────────────────────────────────────────────────
 
   const { keys, endpoints } = scanPage();

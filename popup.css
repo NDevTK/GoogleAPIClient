@@ -973,10 +973,87 @@ details summary:hover {
 }
 
 #fuzz-log {
-  max-height: 150px;
+  max-height: 250px;
   overflow-y: auto;
   border: 1px solid #21262d;
   background: #0d1117;
   border-radius: 4px;
   padding: 4px;
+}
+
+.badge-error {
+  background: #3d1418;
+  color: #f85149;
+}
+.badge-interesting {
+  background: #3d1418;
+  color: #ff7b72;
+  font-weight: 700;
+}
+
+.fuzz-card {
+  border-left: 2px solid #21262d;
+  margin-bottom: 2px;
+  padding: 3px 6px;
+}
+.fuzz-card code {
+  font-size: 10px;
+  word-break: break-all;
+}
+.fuzz-error {
+  color: #f85149;
+  font-size: 10px;
+}
+.fuzz-body {
+  color: #8b949e;
+  font-size: 10px;
+  max-height: 40px;
+  overflow: hidden;
+}
+.fuzz-body code {
+  white-space: pre-wrap;
+}
+.fuzz-summary {
+  border-left: 2px solid #58a6ff;
+  color: #58a6ff;
+  font-weight: 600;
+}
+.fuzz-progress {
+  font-size: 10px;
+  color: #484f58;
+  margin-left: 4px;
+}
+
+.btn-fuzz-cancel {
+  background: #da3633 !important;
+}
+.btn-fuzz-cancel:hover {
+  background: #f85149 !important;
+}
+
+/* ─── Request Log Filter ─── */
+.log-filter-select {
+  background: #161b22;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.log-filter-select:focus {
+  border-color: #58a6ff;
+  outline: none;
+}
+
+.badge-tab {
+  background: #1c2536;
+  color: #79c0ff;
+  font-size: 9px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
 }

@@ -1,29 +1,35 @@
 # Universal API Security Researcher
 
-A powerful Chrome Extension for reverse-engineering and security testing APIs across any website. It acts as an autonomous discovery engine that "learns" the structure, protocols, and authentication of APIs as you browse.
+A Chrome Extension for reverse-engineering and security testing APIs across any website. It passively discovers, maps, and learns the structure, protocols, and authentication of APIs as you browse.
 
 ## Key Features
 
 ### 1. Universal Discovery & Mapping
 
-- **Autonomous Discovery**: Automatically probes for official documentation like **OpenAPI (Swagger)** and Google Discovery documents (`/.well-known/openapi.json`, `/swagger.json`, `$discovery/rest`, etc.).
-- **Normalization Engine**: Transparently converts various documentation standards (OpenAPI/Swagger) into a unified internal format for replay and testing.
-- **Interface Grouping**: Groups endpoints into logical interfaces (e.g., `api.example.com/v1`) based on path heuristics.
-- **Smart Key Extraction**: Scans URLs, Headers, and Response Bodies (via Debugger) for API keys and tokens (Google, Firebase, JWT, Stripe, Bearer, etc.).
-- **Collaborative Mapping**: Rename fields (`field1` -> `session_id`) and URL parameters directly in the UI. Names are persisted in `chrome.storage` and shared across all panels.
+- **Autonomous Discovery**: Probes for official documentation (OpenAPI/Swagger, Google Discovery) at well-known paths (`/.well-known/openapi.json`, `/swagger.json`, `$discovery/rest`, etc.).
+- **Normalization Engine**: Converts OpenAPI/Swagger into a unified internal format for replay and testing.
+- **Interface Grouping**: Groups endpoints into logical interfaces (e.g., `api.example.com/v1`) based on host and path heuristics.
+- **Smart Key Extraction**: Scans URLs, headers, and response bodies for API keys and tokens (Google, Firebase, JWT, Stripe, Bearer, Mapbox, GitHub, etc.).
+- **Collaborative Mapping**: Rename fields and URL parameters directly in the UI. Names persist in `chrome.storage` and apply across all panels.
 
 ### 2. Deep Protocol Inspection
 
-- **batchexecute Support**: Specialized decoding for Google's internal batch system (via `lib/discovery.js`). It recursively unpacks nested RPC IDs and provides structured trees for double-JSON-encoded payloads.
-- **Protobuf & JSPB Support**: Decodes binary Protobuf and Google's JSPB format into readable trees (via `lib/protobuf.js`).
-- **Recursive Key Scanning**: Automatically decodes base64-encoded strings (up to 3 levels deep) within Protobuf messages and scripts to find hidden tokens.
-- **Passive Response Capture**: Uses the Chrome `debugger` API to capture and decode response bodies, enabling the learning of output schemas and detection of data leaks.
+- **batchexecute Support**: Decodes Google's internal batch RPC system, recursively unpacking nested RPC IDs and double-JSON-encoded payloads.
+- **Protobuf & JSPB Support**: Decodes binary Protobuf wire format and Google's JSPB (JSON+Protobuf) into readable trees.
+- **Recursive Key Scanning**: Decodes base64-encoded strings (up to 3 levels deep) within Protobuf messages to find hidden tokens.
+- **Passive Response Capture**: A main-world `fetch`/`XHR` interceptor captures response bodies without the Chrome debugger bar, enabling output schema learning and key extraction from responses.
 
 ### 3. Advanced Security Testing
 
-- **Fuzzing Engine**: Automated field-level probing for SQLi, XSS, Overflow, and type-confusion across any discovered method (integrated into the **Send** tab).
-- **Session-Aware Replay**: The "Send" panel executes requests within the target page's context, automatically attaching active cookies and authentication.
-- **Unified Inspection Workflow**: Click any request in the **Requests** log to instantly inspect its structured details (Protobuf, JSON, Headers) and historical response directly in the **Send** tab for seamless analysis and replay.
+- **Fuzzing Engine**: Automated field-level probing for SQLi, XSS, overflow, and type-confusion with adaptive rate limiting, cancel support, and tiered status classification (integrated into the **Send** tab).
+- **Session-Aware Replay**: The Send panel executes requests within the target page's context, automatically attaching cookies and authentication.
+- **Unified Inspection Workflow**: Click any request in the log to inspect decoded Protobuf, JSON, headers, and historical response data directly in the Send tab.
+
+### 4. Cross-Tab Request Log
+
+- **Multi-Tab Viewing**: Filter the request log by active tab, all tabs, or a specific tab via the dropdown selector.
+- **Session Persistence**: Request logs are persisted to `chrome.storage.session`, surviving MV3 service worker restarts while clearing on browser close.
+- **Closed Tab Retention**: Logs from closed tabs remain accessible through the All Tabs filter.
 
 ## Installation
 
@@ -31,20 +37,35 @@ A powerful Chrome Extension for reverse-engineering and security testing APIs ac
 2. Open `chrome://extensions`.
 3. Enable **Developer mode**.
 4. Click **Load unpacked** and select the extension folder.
-5. **Important**: Reload the extension after updates or if permissions are requested.
 
 ## Usage
 
-1. **Browse**: Browse any website. The extension passively maps APIs and searches for documentation in the background.
-2. **Inspect**: Open the popup to see discovered keys and mapped interfaces.
-3. **Analyze**: Click a request in the **Requests** tab to view decoded Protobuf, JSON, or `batchexecute` traffic and historical responses in the **Send** tab.
-4. **Map**: Click the **✎** icon next to any field to give it a descriptive name. 5. **Test**: Load any method into the **Send** tab to replay it, or expand the **Fuzzing Controls** section for automated vulnerability probing.
+1. **Browse**: Visit any website. The extension passively maps APIs and searches for documentation in the background.
+2. **Inspect**: Open the popup to see discovered keys, mapped interfaces, and request traffic.
+3. **Analyze**: Click a request in the log to view decoded Protobuf, JSON, or batchexecute traffic and historical responses in the Send tab.
+4. **Map**: Click the **pencil** icon next to any field to give it a descriptive name.
+5. **Test**: Load any method into the Send tab to replay it, or expand the Fuzzing Controls section for automated vulnerability probing.
+
+## Architecture
+
+```
+intercept.js   Main-world fetch/XHR interceptor (response body capture)
+content.js     Isolated-world content script (DOM key scanning, fetch relay, intercept relay)
+background.js  Service worker (request interception, schema learning, fuzzing, storage)
+popup.js       Popup controller (UI rendering, cross-tab filtering, replay)
+popup.html     Popup markup
+popup.css      Popup styles
+lib/
+  discovery.js   batchexecute parsing, OpenAPI/Swagger normalization
+  protobuf.js    Wire-format codec, JSPB decoder, recursive base64 scanning
+  req2proto.js   Error-based schema probing (Google + generic)
+```
 
 ## Security & Privacy
 
 - This tool is for **authorized security research only**.
-- It **redacts** actual cookie values; it only tracks their presence to provide research context.
-- Passive response capture requires the standard Chrome "Debugger" permission bar to appear.
+- Cookie values are redacted; only their presence is tracked for research context.
+- No debugger permission required. Response capture uses non-invasive prototype wrapping with no visible browser UI.
 
 ## License
 
