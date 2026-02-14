@@ -38,22 +38,20 @@
       <p class="hint">Select a method to load field info.</p>
 
       <div id="send-controls">
+        <div class="service-row">
+          <select id="spec-service-select">
+            <option value="">All Services</option>
+          </select>
+          <button id="btn-export-spec" class="btn-spec" type="button" title="Export as OpenAPI">Export</button>
+          <button id="btn-import-spec" class="btn-spec" type="button" title="Import OpenAPI spec">Import</button>
+          <input id="import-spec-file" type="file" accept=".json,.yaml,.yml" style="display:none" />
+        </div>
         <select id="send-ep-select">
           <option value="">-- select method --</option>
         </select>
       </div>
 
 
-      <div id="send-ct-row">
-        <label>Content-Type:</label>
-        <select id="send-ct">
-          <option value="application/json">JSON</option>
-          <option value="application/json+protobuf">
-            JSPB (json+protobuf)
-          </option>
-          <option value="application/x-protobuf">Binary Protobuf</option>
-        </select>
-      </div>
 
       <details id="send-headers-section">
         <summary>Custom Headers</summary>
@@ -64,18 +62,29 @@
       </details>
 
       <div id="send-body-section">
-        <div id="send-body-toggle">
-          <button class="toggle-btn active" data-mode="form" type="button">
-            Form
-          </button>
-          <button class="toggle-btn" data-mode="raw" type="button">Raw</button>
-        </div>
         <div id="send-form-fields"></div>
         <textarea
           id="send-raw-body"
           style="display: none"
           placeholder='{"field": "value"} or base64 for protobuf'
         ></textarea>
+        <div id="send-graphql-fields" style="display: none">
+          <textarea
+            id="send-gql-query"
+            placeholder="query { user(id: 1) { name email } }"
+            rows="4"
+          ></textarea>
+          <textarea
+            id="send-gql-variables"
+            placeholder='Variables (JSON): {"id": 1}'
+            rows="2"
+          ></textarea>
+          <input
+            id="send-gql-opname"
+            type="text"
+            placeholder="Operation name (optional)"
+          />
+        </div>
       </div>
 
       <div class="send-actions">

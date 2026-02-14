@@ -1144,7 +1144,44 @@ function learnFromResponse(tabId, interfaceName, entry) {
   if (!textBody) return;
 
   const mimeType = entry.mimeType || "";
-  if (url.pathname.includes("batchexecute")) {
+  if (isAsyncChunkedResponse(textBody)) {
+    const chunks = parseAsyncChunkedResponse(textBody);
+    if (chunks) {
+      if (!doc.resources.learned) doc.resources.learned = { methods: {} };
+      // Use endpoint path as the method key (e.g. "hpba" from /async/hpba)
+      const asyncPath = url.pathname.split("/").filter(Boolean).pop() || methodName;
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        if (chunk.type !== "jspb" || !Array.isArray(chunk.data)) continue;
+
+        const chunkKey = `${asyncPath}_chunk${i}`;
+        let callM =
+          doc.resources.learned.methods[chunkKey] ||
+          doc.resources.probed?.methods[chunkKey];
+        if (!callM) {
+          doc.resources.learned.methods[chunkKey] = {
+            id: `${interfaceName.replace(/\//g, ".")}.${chunkKey}`,
+            path: url.pathname.substring(1),
+            httpMethod: entry.method || "GET",
+            parameters: {},
+            request: null,
+            response: null,
+          };
+          callM = doc.resources.learned.methods[chunkKey];
+        }
+
+        const schemaName = `${chunkKey}Response`;
+        callM.response = { $ref: schemaName };
+        const newSchema = generateSchemaFromJson(
+          chunk.data,
+          schemaName,
+          doc.schemas,
+          true,
+        );
+        mergeSchemaInto(doc, schemaName, newSchema);
+      }
+    }
+  } else if (url.pathname.includes("batchexecute")) {
     const results = parseBatchExecuteResponse(textBody);
     if (results) {
       if (!doc.resources.learned) doc.resources.learned = { methods: {} };
@@ -1176,6 +1213,126 @@ function learnFromResponse(tabId, interfaceName, entry) {
         mergeSchemaInto(doc, schemaName, newSchema);
       }
     }
+  } else if (isGrpcWeb(mimeType)) {
+    // gRPC-Web: unwrap frames, decode protobuf payload
+    try {
+      let bytes;
+      if (isGrpcWebText(mimeType)) {
+        // grpc-web-text uses base64 encoding
+        bytes = base64ToUint8(
+          entry.responseBase64 ? entry.responseBody : btoa(entry.responseBody),
+        );
+      } else {
+        bytes = entry.responseBase64
+          ? base64ToUint8(entry.responseBody)
+          : new TextEncoder().encode(entry.responseBody);
+      }
+      const parsed = parseGrpcWebFrames(bytes);
+      if (parsed) {
+        for (const frame of parsed.frames) {
+          if (frame.type !== "data") continue;
+          const tree = pbDecodeTree(frame.data, 8, (val) => {
+            if (typeof val === "string") {
+              extractKeysFromText(tabId, val, entry.url, "response_grpc");
+            }
+          });
+          const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Response`;
+          targetM.response = { $ref: schemaName };
+          const newSchema = generateSchemaFromPbTree(
+            tree,
+            schemaName,
+            doc.schemas,
+          );
+          mergeSchemaInto(doc, schemaName, newSchema);
+        }
+      }
+    } catch (e) {}
+  } else if (isSSE(mimeType)) {
+    // Server-Sent Events: learn schema from JSON data payloads
+    try {
+      const events = parseSSE(textBody);
+      if (events) {
+        for (const evt of events) {
+          if (typeof evt.data === "object" && evt.data !== null) {
+            const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Event`;
+            targetM.response = { $ref: schemaName };
+            const newSchema = generateSchemaFromJson(
+              evt.data,
+              schemaName,
+              doc.schemas,
+            );
+            mergeSchemaInto(doc, schemaName, newSchema);
+            break; // Schema from first JSON event is representative
+          }
+        }
+      }
+    } catch (e) {}
+  } else if (isNDJSON(mimeType)) {
+    // NDJSON: learn schema from first object
+    try {
+      const objects = parseNDJSON(textBody);
+      if (objects && objects.length > 0) {
+        const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Response`;
+        targetM.response = { $ref: schemaName };
+        const newSchema = generateSchemaFromJson(
+          objects[0],
+          schemaName,
+          doc.schemas,
+        );
+        mergeSchemaInto(doc, schemaName, newSchema);
+      }
+    } catch (e) {}
+  } else if (isMultipartBatch(mimeType)) {
+    // Multipart batch: learn schema from each part's body
+    try {
+      const parts = parseMultipartBatch(textBody, mimeType);
+      if (parts) {
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i];
+          if (!part.body) continue;
+          try {
+            const json = JSON.parse(part.body);
+            const partKey = `${methodName}_part${i}`;
+            if (!doc.resources.learned) doc.resources.learned = { methods: {} };
+            let partM = doc.resources.learned.methods[partKey];
+            if (!partM) {
+              doc.resources.learned.methods[partKey] = {
+                id: `${interfaceName.replace(/\//g, ".")}.${partKey}`,
+                path: url.pathname.substring(1),
+                httpMethod: entry.method || "POST",
+                parameters: {},
+                request: null,
+                response: null,
+              };
+              partM = doc.resources.learned.methods[partKey];
+            }
+            const schemaName = `${partKey}Response`;
+            partM.response = { $ref: schemaName };
+            const newSchema = generateSchemaFromJson(
+              json,
+              schemaName,
+              doc.schemas,
+            );
+            mergeSchemaInto(doc, schemaName, newSchema);
+          } catch (_) {}
+        }
+      }
+    } catch (e) {}
+  } else if (isGraphQLUrl(url.href) && mimeType.includes("json")) {
+    // GraphQL response: extract data/errors structure
+    try {
+      const gqlResp = parseGraphQLResponse(textBody);
+      if (gqlResp && gqlResp.data) {
+        const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Response`;
+        targetM.response = { $ref: schemaName };
+        const newSchema = generateSchemaFromJson(
+          gqlResp.data,
+          schemaName,
+          doc.schemas,
+        );
+        mergeSchemaInto(doc, schemaName, newSchema);
+      }
+    } catch (e) {}
   } else if (mimeType.includes("json")) {
     try {
       const json = JSON.parse(textBody);
@@ -2418,6 +2575,93 @@ function handlePopupMessage(msg, _sender, sendResponse) {
       }
       return;
     }
+
+    case "EXPORT_OPENAPI": {
+      if (tabId == null) return;
+      const tab = getTab(tabId);
+      const svc = msg.service;
+      const docEntry =
+        tab.discoveryDocs.get(svc) || globalStore.discoveryDocs.get(svc);
+      if (!docEntry?.doc) {
+        sendResponse({ error: "No discovery document found for " + svc });
+        return;
+      }
+      const openapi = convertDiscoveryToOpenApi(docEntry.doc, svc);
+      sendResponse({ ok: true, spec: openapi });
+      return;
+    }
+
+    case "IMPORT_OPENAPI": {
+      if (tabId == null) return;
+      const tab = getTab(tabId);
+      try {
+        const spec = msg.spec;
+        if (!spec || !spec.paths) {
+          sendResponse({ error: "Invalid OpenAPI spec: missing paths" });
+          return;
+        }
+        // Determine service name from server URL or info.title
+        let svcName;
+        if (spec.servers?.[0]?.url) {
+          try {
+            svcName = new URL(spec.servers[0].url).hostname;
+          } catch (_) {}
+        }
+        if (!svcName) {
+          svcName = (spec.info?.title || "imported")
+            .toLowerCase().replace(/[^a-z0-9.]/g, "_");
+        }
+
+        // Convert to internal Discovery format
+        const sourceUrl = spec.servers?.[0]?.url || "https://" + svcName;
+        const doc = convertOpenApiToDiscovery(spec, sourceUrl);
+
+        // Merge with existing doc if present
+        const existing = tab.discoveryDocs.get(svcName) ||
+          globalStore.discoveryDocs.get(svcName);
+        if (existing?.doc) {
+          // Merge imported methods into existing doc
+          for (const [rName, resource] of Object.entries(doc.resources)) {
+            if (!existing.doc.resources[rName]) {
+              existing.doc.resources[rName] = resource;
+            } else {
+              for (const [mName, method] of Object.entries(resource.methods || {})) {
+                if (!existing.doc.resources[rName].methods[mName]) {
+                  existing.doc.resources[rName].methods[mName] = method;
+                }
+              }
+            }
+          }
+          // Merge schemas (imported fills gaps, doesn't overwrite)
+          for (const [sName, schema] of Object.entries(doc.schemas)) {
+            if (!existing.doc.schemas[sName]) {
+              existing.doc.schemas[sName] = schema;
+            }
+          }
+          existing.summary = summarizeDiscovery(existing.doc);
+        } else {
+          // Store as new discovery doc
+          const entry = {
+            status: "found",
+            url: sourceUrl,
+            method: "IMPORT",
+            apiKey: null,
+            fetchedAt: Date.now(),
+            summary: summarizeDiscovery(doc),
+            doc,
+            isVirtual: false,
+          };
+          tab.discoveryDocs.set(svcName, entry);
+          globalStore.discoveryDocs.set(svcName, entry);
+        }
+        mergeToGlobal(tab);
+        scheduleSave();
+        sendResponse({ ok: true, service: svcName });
+      } catch (err) {
+        sendResponse({ error: "Import failed: " + err.message });
+      }
+      return;
+    }
   }
 }
 
@@ -2475,7 +2719,15 @@ async function buildExportRequest(tabId, msg) {
       body = msg.body.rawBody;
     } else if (msg.body.mode === "form" && msg.body.formData?.fields?.length) {
       const fields = msg.body.formData.fields;
-      if (msg.contentType === "application/x-protobuf") {
+      if (
+        msg.contentType === "application/grpc-web+proto" ||
+        msg.contentType === "application/grpc-web-text+proto"
+      ) {
+        // gRPC-Web: encode protobuf, wrap in frame
+        const pbBytes = encodeFormToProtobuf(fields);
+        const framed = encodeGrpcWebFrame(pbBytes);
+        body = uint8ToBase64(framed);
+      } else if (msg.contentType === "application/x-protobuf") {
         const encoded = encodeFormToProtobuf(fields);
         body = uint8ToBase64(encoded);
       } else if (msg.contentType === "application/json+protobuf") {
@@ -2484,6 +2736,25 @@ async function buildExportRequest(tabId, msg) {
         body = JSON.stringify(encodeFormToJson(fields));
       }
     }
+  }
+
+  // GraphQL: wrap query/variables in standard envelope
+  if (isGraphQLUrl(url) && msg.body?.mode === "graphql") {
+    const gqlBody = {
+      query: msg.body.query || "",
+    };
+    if (msg.body.variables) {
+      try {
+        gqlBody.variables = JSON.parse(msg.body.variables);
+      } catch (_) {
+        gqlBody.variables = msg.body.variables;
+      }
+    }
+    if (msg.body.operationName) {
+      gqlBody.operationName = msg.body.operationName;
+    }
+    body = JSON.stringify(gqlBody);
+    headers["Content-Type"] = "application/json";
   }
 
   return { url, method: msg.httpMethod || "POST", headers, body };
@@ -2986,7 +3257,11 @@ async function executeSendRequest(tabId, msg) {
       headers["Content-Type"] =
         "application/x-www-form-urlencoded;charset=UTF-8";
     } else if (msg.body.mode === "raw" && msg.body.rawBody) {
-      if (msg.contentType === "application/x-protobuf") {
+      if (
+        msg.contentType === "application/x-protobuf" ||
+        msg.contentType === "application/grpc-web+proto" ||
+        msg.contentType === "application/grpc-web-text+proto"
+      ) {
         body = msg.body.rawBody;
         bodyEncoding = "base64";
       } else {
@@ -2994,7 +3269,16 @@ async function executeSendRequest(tabId, msg) {
       }
     } else if (msg.body.mode === "form" && msg.body.formData?.fields?.length) {
       const fields = msg.body.formData.fields;
-      if (msg.contentType === "application/x-protobuf") {
+      if (
+        msg.contentType === "application/grpc-web+proto" ||
+        msg.contentType === "application/grpc-web-text+proto"
+      ) {
+        // gRPC-Web: encode protobuf, wrap in frame
+        const pbBytes = encodeFormToProtobuf(fields);
+        const framed = encodeGrpcWebFrame(pbBytes);
+        body = uint8ToBase64(framed);
+        bodyEncoding = "base64";
+      } else if (msg.contentType === "application/x-protobuf") {
         const encoded = encodeFormToProtobuf(fields);
         body = uint8ToBase64(encoded);
         bodyEncoding = "base64";
@@ -3004,6 +3288,25 @@ async function executeSendRequest(tabId, msg) {
         body = JSON.stringify(encodeFormToJson(fields));
       }
     }
+  }
+
+  // GraphQL: wrap query/variables in standard envelope
+  if (isGraphQLUrl(url) && msg.body?.mode === "graphql") {
+    const gqlBody = {
+      query: msg.body.query || "",
+    };
+    if (msg.body.variables) {
+      try {
+        gqlBody.variables = JSON.parse(msg.body.variables);
+      } catch (_) {
+        gqlBody.variables = msg.body.variables;
+      }
+    }
+    if (msg.body.operationName) {
+      gqlBody.operationName = msg.body.operationName;
+    }
+    body = JSON.stringify(gqlBody);
+    headers["Content-Type"] = "application/json";
   }
 
   // Resolve initiator origin
@@ -3039,7 +3342,49 @@ async function executeSendRequest(tabId, msg) {
   const respCt = resp.headers?.["content-type"] || "";
   let bodyResult;
 
-  if (resp.bodyEncoding === "base64" || isBinaryContentType(respCt)) {
+  if (isGrpcWeb(respCt)) {
+    // gRPC-Web: pass raw bytes for frame-level rendering in popup
+    try {
+      let bytes;
+      if (isGrpcWebText(respCt)) {
+        bytes = base64ToUint8(
+          resp.bodyEncoding === "base64" ? resp.body : btoa(resp.body),
+        );
+      } else {
+        bytes = resp.bodyEncoding === "base64"
+          ? base64ToUint8(resp.body)
+          : new TextEncoder().encode(resp.body);
+      }
+      // Scan protobuf frames for keys
+      const parsed = parseGrpcWebFrames(bytes);
+      if (parsed) {
+        for (const frame of parsed.frames) {
+          if (frame.type !== "data") continue;
+          try {
+            pbDecodeTree(frame.data, 8, (val) => {
+              if (typeof val === "string") {
+                extractKeysFromText(tabId, val, url, "send_response_grpc");
+              }
+            });
+          } catch (_) {}
+        }
+      }
+      // Serialize bytes as base64 array for message passing
+      bodyResult = {
+        format: "grpc_web",
+        bytesB64: uint8ToBase64(bytes),
+        raw: resp.body,
+        size: bytes.length,
+      };
+    } catch (_) {
+      bodyResult = {
+        format: "binary",
+        parsed: null,
+        raw: resp.body,
+        size: (resp.body || "").length,
+      };
+    }
+  } else if (resp.bodyEncoding === "base64" || isBinaryContentType(respCt)) {
     // Binary protobuf response
     try {
       const bytes =

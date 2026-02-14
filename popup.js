@@ -5,8 +5,20 @@ let tabData = null;
 let currentSchema = null;
 let currentRequestUrl = "";
 let currentRequestMethod = "POST";
+let currentContentType = "application/json";
+let currentBodyMode = "form"; // "form" | "raw" | "graphql"
 let logFilter = "active"; // "active" | "all" | tabId (number)
 let allTabsData = null; // { tabId: { meta, requestLog } }
+
+function setBodyMode(mode) {
+  currentBodyMode = mode;
+  document.getElementById("send-form-fields").style.display =
+    mode === "form" ? "block" : "none";
+  document.getElementById("send-raw-body").style.display =
+    mode === "raw" ? "block" : "none";
+  document.getElementById("send-graphql-fields").style.display =
+    mode === "graphql" ? "block" : "none";
+}
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
@@ -55,6 +67,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("btn-copy-fetch").addEventListener("click", () => copyAsFormat("fetch"));
   document.getElementById("btn-copy-python").addEventListener("click", () => copyAsFormat("python"));
 
+  // Service filter + spec export/import
+  document.getElementById("spec-service-select").addEventListener("change", () => {
+    renderMethodDropdown();
+  });
+  document.getElementById("btn-export-spec").addEventListener("click", exportOpenApiSpec);
+  document.getElementById("btn-import-spec").addEventListener("click", () => {
+    document.getElementById("import-spec-file").click();
+  });
+  document.getElementById("import-spec-file").addEventListener("change", importOpenApiSpec);
+
   // Request log tab filter
   document.getElementById("log-tab-filter").addEventListener("change", async (e) => {
     const val = e.target.value;
@@ -95,35 +117,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  for (const btn of document.querySelectorAll(
-    "#send-body-toggle .toggle-btn",
-  )) {
-    btn.addEventListener("click", () => {
-      document
-        .querySelector("#send-body-toggle .toggle-btn.active")
-        .classList.remove("active");
-      btn.classList.add("active");
-      const isForm = btn.dataset.mode === "form";
-      document.getElementById("send-form-fields").style.display = isForm
-        ? "block"
-        : "none";
-      document.getElementById("send-raw-body").style.display = isForm
-        ? "none"
-        : "block";
-    });
-  }
-
   // ─── Export Functions ──────────────────────────────────────────────────────
 
   async function buildCurrentRequest() {
-    const isFormMode =
-      document.querySelector("#send-body-toggle .toggle-btn.active").dataset
-        .mode === "form";
+    const bodyMode = currentBodyMode;
     let url = currentRequestUrl;
     if (!url) return null;
 
     const httpMethod = currentRequestMethod;
-    const contentType = document.getElementById("send-ct").value;
+    const contentType = currentContentType;
     const epKey = document.getElementById("send-ep-select").value;
     const sel = document.getElementById("send-ep-select");
     const selectedOpt = sel.options[sel.selectedIndex];
@@ -140,7 +142,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     let body;
     if (httpMethod === "GET" || httpMethod === "DELETE") {
       body = null;
-    } else if (isFormMode) {
+    } else if (bodyMode === "form") {
       const formValues = collectFormValues();
       if (Object.keys(formValues.params).length > 0) {
         try {
@@ -154,6 +156,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       body = {
         mode: "form",
         formData: { fields: formValues.fields },
+      };
+    } else if (bodyMode === "graphql") {
+      body = {
+        mode: "graphql",
+        query: document.getElementById("send-gql-query").value,
+        variables: document.getElementById("send-gql-variables").value,
+        operationName: document.getElementById("send-gql-opname").value,
       };
     } else {
       body = {
@@ -387,20 +396,41 @@ function renderDataPanel() {
 // ─── Send Panel ──────────────────────────────────────────────────────────────
 
 function renderSendPanel() {
+  // Populate service selector
+  const svcSelect = document.getElementById("spec-service-select");
+  const prevSvc = svcSelect.value;
+  svcSelect.innerHTML = '<option value="">All Services</option>';
+  if (tabData?.discoveryDocs) {
+    for (const [svcName, svcData] of Object.entries(tabData.discoveryDocs).sort((a, b) => a[0].localeCompare(b[0]))) {
+      if (svcData.status === "found" && svcData.summary?.resources) {
+        const methodCount = Object.values(svcData.summary.resources).reduce((n, arr) => n + arr.length, 0);
+        const opt = document.createElement("option");
+        opt.value = svcName;
+        opt.textContent = `${svcName} (${methodCount})`;
+        svcSelect.appendChild(opt);
+      }
+    }
+  }
+  if (prevSvc) svcSelect.value = prevSvc;
+
+  renderMethodDropdown();
+}
+
+function renderMethodDropdown() {
+  const svcFilter = document.getElementById("spec-service-select").value;
   const select = document.getElementById("send-ep-select");
   const prev = select.value;
 
   select.innerHTML = '<option value="">-- select method --</option>';
 
-  // Populate from Discovery Docs
   if (tabData?.discoveryDocs) {
     const services = Object.entries(tabData.discoveryDocs).sort((a, b) =>
       a[0].localeCompare(b[0]),
     );
 
     for (const [svcName, svcData] of services) {
+      if (svcFilter && svcName !== svcFilter) continue;
       if (svcData.status === "found" && svcData.summary?.resources) {
-        // Flatten methods from summary
         const methods = [];
         for (const [rName, rMethods] of Object.entries(
           svcData.summary.resources,
@@ -546,6 +576,22 @@ async function loadVirtualSchema(service, methodId, initialData = null) {
 
     currentSchema = schema;
 
+    // Auto-determine Content-Type from learned schema
+    if (schema.contentTypes?.length) {
+      currentContentType = schema.contentTypes[0];
+    } else if (schema.endpoint?.contentType) {
+      currentContentType = schema.endpoint.contentType;
+    } else {
+      currentContentType = "application/json";
+    }
+
+    // Auto-set body mode: GraphQL if URL matches, otherwise form
+    if (isGraphQLUrl(currentRequestUrl)) {
+      setBodyMode("graphql");
+    } else {
+      setBodyMode("form");
+    }
+
     buildFormFields(schema, initialData);
   } catch (err) {
     console.error("Error loading virtual schema:", err);
@@ -577,10 +623,10 @@ function buildFormFields(schema, initialData = null) {
   const container = document.getElementById("send-form-fields");
   container.innerHTML = "";
 
-  if (schema.method) {
+  if (schema.method && (schema.method.description || schema.method.scopes?.length)) {
     const info = el("div", "card");
     info.style.marginBottom = "8px";
-    let html = `<div class="card-label">${esc(schema.method.id || "method")} <span class="badge badge-source">${esc(schema.source)}</span></div>`;
+    let html = "";
     if (schema.method.description) {
       html += `<div class="card-meta">${esc(schema.method.description)}</div>`;
     }
@@ -955,12 +1001,10 @@ async function sendRequest() {
   btn.disabled = true;
   btn.textContent = "Sending...";
 
-  const isFormMode =
-    document.querySelector("#send-body-toggle .toggle-btn.active").dataset
-      .mode === "form";
+  const bodyMode = currentBodyMode;
   let url = currentRequestUrl;
   const httpMethod = currentRequestMethod;
-  const contentType = document.getElementById("send-ct").value;
+  const contentType = currentContentType;
   const epKey = document.getElementById("send-ep-select").value;
 
   const headers = {};
@@ -975,7 +1019,7 @@ async function sendRequest() {
   let body;
   if (httpMethod === "GET" || httpMethod === "DELETE") {
     body = { mode: "raw", formData: null, rawBody: null, frameId: currentReplayRequest?.frameId };
-  } else if (isFormMode) {
+  } else if (bodyMode === "form") {
     const formValues = collectFormValues();
     if (Object.keys(formValues.params).length > 0) {
       try {
@@ -993,6 +1037,14 @@ async function sendRequest() {
       mode: "form",
       formData: { fields: formValues.fields },
       rawBody: null,
+      frameId: currentReplayRequest?.frameId,
+    };
+  } else if (bodyMode === "graphql") {
+    body = {
+      mode: "graphql",
+      query: document.getElementById("send-gql-query").value,
+      variables: document.getElementById("send-gql-variables").value,
+      operationName: document.getElementById("send-gql-opname").value,
       frameId: currentReplayRequest?.frameId,
     };
   } else {
@@ -1094,12 +1146,57 @@ function renderResultBody(result) {
     }
   }
 
+  // Check raw body for async chunked format (takes priority — it wraps JSPB)
+  const rawBody = result.body.raw || "";
+  const respContentType = result.headers?.["content-type"] || "";
+
+  if (isAsyncChunkedResponse(rawBody)) {
+    return renderAsyncResponse(
+      rawBody,
+      { service: result.service || svc, url: currentRequestUrl },
+      discoveryInfo?.doc,
+    );
+  }
+
+  // gRPC-Web: unwrap frames, render protobuf trees
+  if (result.body.format === "grpc_web") {
+    const grpcBytes = result.body.bytes || (result.body.bytesB64 ? base64ToUint8(result.body.bytesB64) : null);
+    if (grpcBytes) {
+      return renderGrpcWebResponse(
+        grpcBytes,
+        { service: result.service || svc, methodId: result.methodId },
+        discoveryInfo?.doc,
+      );
+    }
+  }
+
+  // SSE: split events, render individually
+  if (isSSE(respContentType)) {
+    return renderSSEResponse(rawBody);
+  }
+
+  // NDJSON: split lines, render as records
+  if (isNDJSON(respContentType)) {
+    return renderNDJSONResponse(rawBody);
+  }
+
+  // Multipart batch: parse MIME parts
+  if (isMultipartBatch(respContentType)) {
+    return renderMultipartBatchResponse(rawBody, respContentType);
+  }
+
+  // GraphQL: enhanced display with data/errors/extensions sections
+  if (isGraphQLUrl(currentRequestUrl) && result.body.format === "json") {
+    const gqlHtml = renderGraphQLResponse(rawBody);
+    if (gqlHtml) return gqlHtml;
+  }
+
   if (result.body.format === "json") {
     return `<pre class="resp-body">${esc(JSON.stringify(result.body.parsed, null, 2))}</pre>`;
   } else if (currentRequestUrl.includes("batchexecute")) {
     // Force batch rendering for batchexecute requests
     return renderBatchExecuteResponse(
-      result.body.raw || "",
+      rawBody,
       { service: result.service || svc },
       discoveryInfo?.doc,
     );
@@ -1140,6 +1237,119 @@ function copyToClipboard(panelName, data) {
       btn.classList.remove("copied");
     }, 1500);
   });
+}
+
+// ─── Spec Export / Import ────────────────────────────────────────────────────
+
+async function exportOpenApiSpec() {
+  const svcFilter = document.getElementById("spec-service-select").value;
+
+  // Collect services to export
+  const services = [];
+  if (svcFilter) {
+    services.push(svcFilter);
+  } else if (tabData?.discoveryDocs) {
+    for (const [svcName, svcData] of Object.entries(tabData.discoveryDocs)) {
+      if (svcData.status === "found") services.push(svcName);
+    }
+  }
+  if (!services.length) {
+    alert("No services discovered yet.");
+    return;
+  }
+
+  const btn = document.getElementById("btn-export-spec");
+  btn.disabled = true;
+  btn.textContent = "...";
+
+  try {
+    if (services.length === 1) {
+      // Single service export
+      const svc = services[0];
+      const result = await chrome.runtime.sendMessage({
+        type: "EXPORT_OPENAPI",
+        tabId: currentTabId,
+        service: svc,
+      });
+      if (result?.error) { alert(result.error); return; }
+      downloadJson(result.spec, svc.replace(/[^a-zA-Z0-9.-]/g, "_") + ".openapi.json");
+    } else {
+      // Multi-service: export each as separate file in sequence
+      for (const svc of services) {
+        const result = await chrome.runtime.sendMessage({
+          type: "EXPORT_OPENAPI",
+          tabId: currentTabId,
+          service: svc,
+        });
+        if (result?.spec) {
+          downloadJson(result.spec, svc.replace(/[^a-zA-Z0-9.-]/g, "_") + ".openapi.json");
+        }
+      }
+    }
+    btn.textContent = "Done!";
+    setTimeout(() => { btn.textContent = "Export"; btn.disabled = false; }, 1500);
+  } catch (err) {
+    alert("Export failed: " + err.message);
+    btn.textContent = "Export";
+    btn.disabled = false;
+  }
+}
+
+function downloadJson(obj, filename) {
+  const json = JSON.stringify(obj, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importOpenApiSpec(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  e.target.value = "";
+
+  const btn = document.getElementById("btn-import-spec");
+  btn.disabled = true;
+  btn.textContent = "Importing...";
+
+  try {
+    const text = await file.text();
+    let spec;
+    try {
+      spec = JSON.parse(text);
+    } catch (_) {
+      alert("Only JSON format is supported. Convert YAML to JSON first.");
+      btn.textContent = "Import";
+      btn.disabled = false;
+      return;
+    }
+
+    const result = await chrome.runtime.sendMessage({
+      type: "IMPORT_OPENAPI",
+      tabId: currentTabId,
+      spec,
+    });
+
+    if (result?.error) {
+      alert(result.error);
+      btn.textContent = "Import";
+      btn.disabled = false;
+      return;
+    }
+
+    btn.textContent = "Imported!";
+    setTimeout(() => { btn.textContent = "Import"; btn.disabled = false; }, 1500);
+
+    // Refresh the UI to show imported methods
+    await loadState();
+  } catch (err) {
+    alert("Import failed: " + err.message);
+    btn.textContent = "Import";
+    btn.disabled = false;
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1386,8 +1596,14 @@ function renderResponsePanel() {
       <div class="card-value" style="font-family:monospace;font-size:11px;word-break:break-all;margin:4px 0">${esc(req.url)}</div>
       <div class="card-meta">
         ${req.service ? `Service: <strong>${esc(req.service)}</strong>` : ""}
-        ${hasProto ? ' <span class="badge badge-found">PROTOBUF BODY</span>' : ""}
+        ${hasProto ? ' <span class="badge badge-found">PROTOBUF</span>' : ""}
         ${req.url.includes("batchexecute") ? ' <span class="badge badge-batch">BATCHEXECUTE</span>' : ""}
+        ${isGrpcWeb(req.mimeType || req.contentType || "") ? ' <span class="badge badge-grpc">gRPC-WEB</span>' : ""}
+        ${isSSE(req.mimeType || "") ? ' <span class="badge badge-sse">SSE</span>' : ""}
+        ${isNDJSON(req.mimeType || "") ? ' <span class="badge badge-ndjson">NDJSON</span>' : ""}
+        ${isGraphQLUrl(req.url) ? ' <span class="badge badge-graphql">GRAPHQL</span>' : ""}
+        ${isMultipartBatch(req.mimeType || "") ? ' <span class="badge badge-multipart">MULTIPART</span>' : ""}
+        ${/\/async\//.test(req.url) ? ' <span class="badge badge-batch">ASYNC</span>' : ""}
       </div>
     </div>`;
   }
@@ -1440,6 +1656,221 @@ function renderBatchExecuteResponse(bodyText, req, overrideDoc = null) {
       <div class="pb-container" style="margin-bottom:0;box-shadow:none;background:transparent;border:none;padding:0">
         ${renderPbTree(nodes, schema)}
       </div>
+    </div>`;
+  }
+  html += "</div>";
+  return html;
+}
+
+function renderAsyncResponse(bodyText, req, overrideDoc = null) {
+  const chunks = parseAsyncChunkedResponse(bodyText);
+  if (!chunks || chunks.length === 0)
+    return `<pre class="resp-body">${esc(bodyText)}</pre>`;
+
+  const svc = req.service;
+  const doc = overrideDoc || tabData?.discoveryDocs?.[svc]?.doc;
+  const url = req.url ? new URL(req.url) : null;
+  const asyncPath =
+    url?.pathname
+      .split("/")
+      .filter(Boolean)
+      .pop() || "async";
+
+  let html = '<div class="pb-tree">';
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    if (chunk.type === "jspb" && Array.isArray(chunk.data)) {
+      const nodes = jspbToTree(chunk.data);
+      let schema = null;
+      if (doc) {
+        const schemaName = `${asyncPath}_chunk${i}Response`;
+        schema = doc.schemas?.[schemaName];
+      }
+      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+        <div class="card-label">Chunk ${i} <span class="badge badge-found">JSPB</span></div>
+        <div class="pb-container" style="margin-bottom:0;box-shadow:none;background:transparent;border:none;padding:0">
+          ${renderPbTree(nodes, schema)}
+        </div>
+      </div>`;
+    } else if (chunk.type === "html") {
+      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+        <div class="card-label">Chunk ${i} <span class="badge badge-pending">HTML</span></div>
+        <pre class="resp-body" style="max-height:120px;overflow:auto">${esc(chunk.raw)}</pre>
+      </div>`;
+    } else {
+      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+        <div class="card-label">Chunk ${i} <span class="badge">text</span></div>
+        <pre class="resp-body">${esc(chunk.raw)}</pre>
+      </div>`;
+    }
+  }
+  html += "</div>";
+  return html;
+}
+
+// ─── gRPC-Web Renderer ──────────────────────────────────────────────────────
+
+function renderGrpcWebResponse(bytes, req, overrideDoc = null) {
+  const parsed = parseGrpcWebFrames(bytes);
+  if (!parsed || parsed.frames.length === 0)
+    return `<pre class="resp-body">[gRPC-Web: no frames decoded]</pre>`;
+
+  const svc = req.service;
+  const doc = overrideDoc || tabData?.discoveryDocs?.[svc]?.doc;
+  const methodId = req.methodId || document.getElementById("send-ep-select")?.dataset?.discoveryId;
+  let respSchema = null;
+  if (doc && methodId) {
+    const methodInfo = findMethodById(doc, methodId);
+    if (methodInfo?.method?.response?.$ref) {
+      respSchema = resolveDiscoverySchema(doc, methodInfo.method.response.$ref);
+    }
+  }
+
+  let html = '<div class="pb-tree">';
+
+  // Trailers summary
+  if (Object.keys(parsed.trailers).length > 0) {
+    const grpcStatus = parsed.trailers["grpc-status"] || "?";
+    const grpcMsg = parsed.trailers["grpc-message"] || "";
+    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      <div class="card-label">gRPC Status: <strong>${esc(grpcStatus)}</strong>
+        ${grpcMsg ? ` &mdash; ${esc(decodeURIComponent(grpcMsg))}` : ""}</div>
+    </div>`;
+  }
+
+  for (let i = 0; i < parsed.frames.length; i++) {
+    const frame = parsed.frames[i];
+    if (frame.type === "data") {
+      const tree = pbDecodeTree(frame.data);
+      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+        <div class="card-label">Data Frame ${i} <span class="badge badge-found">protobuf</span>
+          <span style="color:#484f58;font-size:9px;margin-left:4px">${frame.data.length} bytes</span></div>
+        <div class="pb-container" style="margin-bottom:0;box-shadow:none;background:transparent;border:none;padding:0">
+          ${renderPbTree(tree, respSchema)}
+        </div>
+      </div>`;
+    } else if (frame.type === "trailers") {
+      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+        <div class="card-label">Trailers</div>
+        <pre class="resp-body" style="max-height:80px;overflow:auto">${esc(frame.data)}</pre>
+      </div>`;
+    }
+  }
+  html += "</div>";
+  return html;
+}
+
+// ─── SSE Renderer ───────────────────────────────────────────────────────────
+
+function renderSSEResponse(bodyText) {
+  const events = parseSSE(bodyText);
+  if (!events || events.length === 0)
+    return `<pre class="resp-body">${esc(bodyText)}</pre>`;
+
+  let html = `<div class="card-label">Server-Sent Events (${events.length} events)</div><div class="pb-tree">`;
+  for (let i = 0; i < events.length; i++) {
+    const evt = events[i];
+    const typeBadge = evt.event !== "message"
+      ? ` <span class="badge badge-pending">${esc(evt.event)}</span>`
+      : "";
+    const idBadge = evt.id
+      ? ` <span style="color:#484f58;font-size:9px">id: ${esc(evt.id)}</span>`
+      : "";
+
+    let bodyHtml;
+    if (typeof evt.data === "object" && evt.data !== null) {
+      bodyHtml = `<pre class="resp-body">${esc(JSON.stringify(evt.data, null, 2))}</pre>`;
+    } else {
+      bodyHtml = `<pre class="resp-body">${esc(evt.raw)}</pre>`;
+    }
+
+    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      <div class="card-label">Event ${i}${typeBadge}${idBadge}</div>
+      ${bodyHtml}
+    </div>`;
+  }
+  html += "</div>";
+  return html;
+}
+
+// ─── NDJSON Renderer ────────────────────────────────────────────────────────
+
+function renderNDJSONResponse(bodyText) {
+  const objects = parseNDJSON(bodyText);
+  if (!objects || objects.length === 0)
+    return `<pre class="resp-body">${esc(bodyText)}</pre>`;
+
+  let html = `<div class="card-label">NDJSON (${objects.length} records)</div><div class="pb-tree">`;
+  for (let i = 0; i < objects.length; i++) {
+    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      <div class="card-label">Record ${i}</div>
+      <pre class="resp-body">${esc(JSON.stringify(objects[i], null, 2))}</pre>
+    </div>`;
+  }
+  html += "</div>";
+  return html;
+}
+
+// ─── GraphQL Renderer ───────────────────────────────────────────────────────
+
+function renderGraphQLResponse(bodyText) {
+  const gql = parseGraphQLResponse(bodyText);
+  if (!gql) return null; // Fall through to normal JSON rendering
+
+  let html = '<div class="pb-tree">';
+
+  if (gql.errors) {
+    html += `<div class="card" style="margin-bottom:4px;border-color:#da3633">
+      <div class="card-label" style="color:#f85149">Errors (${gql.errors.length})</div>
+      <pre class="resp-body">${esc(JSON.stringify(gql.errors, null, 2))}</pre>
+    </div>`;
+  }
+
+  if (gql.data) {
+    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      <div class="card-label">Data</div>
+      <pre class="resp-body">${esc(JSON.stringify(gql.data, null, 2))}</pre>
+    </div>`;
+  }
+
+  if (gql.extensions) {
+    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      <div class="card-label" style="color:#484f58">Extensions</div>
+      <pre class="resp-body" style="max-height:120px;overflow:auto">${esc(JSON.stringify(gql.extensions, null, 2))}</pre>
+    </div>`;
+  }
+
+  html += "</div>";
+  return html;
+}
+
+// ─── Multipart Batch Renderer ───────────────────────────────────────────────
+
+function renderMultipartBatchResponse(bodyText, contentType) {
+  const parts = parseMultipartBatch(bodyText, contentType);
+  if (!parts || parts.length === 0)
+    return `<pre class="resp-body">${esc(bodyText)}</pre>`;
+
+  let html = `<div class="card-label">Multipart Batch (${parts.length} parts)</div><div class="pb-tree">`;
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    const statusBadge = part.status
+      ? (part.status >= 200 && part.status < 300
+          ? `<span class="badge badge-found">${part.status}</span>`
+          : `<span class="badge badge-notfound">${part.status}</span>`)
+      : "";
+
+    let bodyHtml;
+    try {
+      const json = JSON.parse(part.body);
+      bodyHtml = `<pre class="resp-body">${esc(JSON.stringify(json, null, 2))}</pre>`;
+    } catch (_) {
+      bodyHtml = `<pre class="resp-body">${esc(part.body)}</pre>`;
+    }
+
+    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      <div class="card-label">Part ${i} ${statusBadge} ${esc(part.statusText || "")}</div>
+      ${bodyHtml}
     </div>`;
   }
   html += "</div>";
@@ -1580,31 +2011,44 @@ function replayRequest(reqId, sourceTabId) {
 
   // Internal state already updated in replayRequest
 
-  // Handle Content-Type synchronization
-  let originalContentType = "";
+  // Auto-determine Content-Type from the original request
   if (req.requestHeaders) {
     const ctHeader = Object.keys(req.requestHeaders).find(
       (k) => k.toLowerCase() === "content-type",
     );
     if (ctHeader) {
-      originalContentType = req.requestHeaders[ctHeader];
+      currentContentType = req.requestHeaders[ctHeader];
+    } else {
+      currentContentType = "application/json";
     }
   }
 
-  // Map to dropdown value
-  const ctSelect = document.getElementById("send-ct");
-  if (originalContentType.includes("json+protobuf")) {
-    ctSelect.value = "application/json+protobuf";
-  } else if (
-    originalContentType.includes("x-protobuf") ||
-    originalContentType.includes("application/protobuf")
-  ) {
-    ctSelect.value = "application/x-protobuf";
-  } else if (originalContentType.includes("application/json")) {
-    ctSelect.value = "application/json";
+  // Auto-determine body mode
+  let gqlDetected = false;
+  if (isGraphQLUrl(req.url) && req.rawBodyB64) {
+    try {
+      const bytes = base64ToUint8(req.rawBodyB64);
+      const text = new TextDecoder().decode(bytes);
+      const gqlReq = parseGraphQLRequest(text);
+      if (gqlReq) {
+        gqlDetected = true;
+        setBodyMode("graphql");
+        document.getElementById("send-gql-query").value = gqlReq.query || "";
+        document.getElementById("send-gql-variables").value =
+          gqlReq.variables ? JSON.stringify(gqlReq.variables, null, 2) : "";
+        document.getElementById("send-gql-opname").value = gqlReq.operationName || "";
+      }
+    } catch (_) {}
+  }
+  if (!gqlDetected) {
+    // Form mode if schema was loaded, otherwise raw
+    setBodyMode(currentSchema ? "form" : "raw");
+    document.getElementById("send-gql-query").value = "";
+    document.getElementById("send-gql-variables").value = "";
+    document.getElementById("send-gql-opname").value = "";
   }
 
-  // Add headers (filtering out Content-Type to avoid duplication with dropdown)
+  // Add headers (filtering out Content-Type which is auto-determined)
   const headersList = document.getElementById("send-headers-list");
   headersList.innerHTML = "";
   if (req.requestHeaders) {
@@ -1614,7 +2058,7 @@ function replayRequest(reqId, sourceTabId) {
     }
   }
 
-  // Clear previous body
+  // Clear previous raw body
   document.getElementById("send-raw-body").value = "";
 
   // Populate historical response if available
@@ -1648,7 +2092,27 @@ function replayRequest(reqId, sourceTabId) {
         } catch (e) {}
       }
 
-      if (isProtobuf) {
+      if (isGrpcWeb(mimeType)) {
+        // gRPC-Web: pass raw bytes for frame parsing
+        try {
+          let bytes;
+          if (isGrpcWebText(mimeType)) {
+            bytes = base64ToUint8(
+              req.responseBase64 ? req.responseBody : btoa(req.responseBody),
+            );
+          } else {
+            bytes = req.responseBase64
+              ? base64ToUint8(req.responseBody)
+              : new TextEncoder().encode(req.responseBody);
+          }
+          historicalResult.body = {
+            format: "grpc_web",
+            bytes,
+            raw: bodyText,
+            size: bytes.length,
+          };
+        } catch (e) {}
+      } else if (isProtobuf) {
         try {
           const bytes = req.responseBase64
             ? base64ToUint8(req.responseBody)
@@ -1671,6 +2135,8 @@ function replayRequest(reqId, sourceTabId) {
         } catch (e) {}
       }
 
+      // SSE, NDJSON, multipart, and async chunked are detected by renderResultBody()
+      // via content-type headers and body inspection — just need raw text preserved.
       if (!historicalResult.body) {
         historicalResult.body = {
           format: "text",
