@@ -64,6 +64,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         const svc = select.dataset.svc;
         const methodId = select.dataset.discoveryId; // This is the ID of the selected method/endpoint
         const url = currentRequestUrl;
+
+        // Preserve current form data
+        const currentData = formValuesToInitialData(collectFormValues());
+
         await chrome.runtime.sendMessage({
           type: "RENAME_FIELD",
           tabId: currentTabId,
@@ -74,8 +78,8 @@ document.addEventListener("DOMContentLoaded", async () => {
           newName,
           url,
         });
-        // Reload schema to reflect change
-        loadVirtualSchema(svc, select.dataset.discoveryId);
+        // Reload schema to reflect change, passing preserved data
+        loadVirtualSchema(svc, select.dataset.discoveryId, currentData);
       }
     }
   });
@@ -692,6 +696,27 @@ function createSingleInput(fieldDef, initialValue = null) {
 }
 
 // ─── Send Panel: Value Collection + Request ──────────────────────────────────
+
+function formFieldsToMap(fields) {
+  const map = {};
+  for (const f of fields) {
+    if (f.number === null || f.number === undefined) continue;
+    if (f.type === "message" && f.children) {
+      map[f.number] = formFieldsToMap(f.children);
+    } else {
+      map[f.number] = f.value;
+    }
+  }
+  return map;
+}
+
+function formValuesToInitialData(formValues) {
+  if (!formValues) return null;
+  const data = { ...formValues.params };
+  const fieldMap = formFieldsToMap(formValues.fields);
+  Object.assign(data, fieldMap);
+  return data;
+}
 
 function collectFormValues() {
   const params = {};
