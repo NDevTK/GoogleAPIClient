@@ -1115,6 +1115,7 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
   if (!doc.resources.learned) doc.resources.learned = { methods: {} };
 
   const { methodName, methodId } = calculateMethodMetadata(url, interfaceName);
+  entry.methodId = methodId;
 
   if (!doc.resources.learned.methods[methodName]) {
     doc.resources.learned.methods[methodName] = {
