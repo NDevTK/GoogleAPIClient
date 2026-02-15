@@ -9,6 +9,7 @@ let currentContentType = "application/json";
 let currentBodyMode = "form"; // "form" | "raw" | "graphql"
 let logFilter = "active"; // "active" | "all" | tabId (number)
 let allTabsData = null; // { tabId: { meta, requestLog } }
+let lastSendResult = null; // Last rendered response for re-render after rename
 
 function setBodyMode(mode) {
   currentBodyMode = mode;
@@ -111,8 +112,15 @@ document.addEventListener("DOMContentLoaded", async () => {
           newName,
           url,
         });
-        // Reload schema to reflect change, passing preserved data
+        // Refresh tabData so re-renders pick up the new schema
+        tabData = await chrome.runtime.sendMessage({
+          type: "GET_STATE",
+          tabId: currentTabId,
+        });
+        // Reload form to reflect change, passing preserved data
         loadVirtualSchema(svc, select.dataset.discoveryId, currentData);
+        // Re-render response tree so renamed field is immediately visible
+        if (lastSendResult) renderResponse(lastSendResult);
       }
     }
   });
@@ -1114,6 +1122,7 @@ async function sendRequest() {
 }
 
 function renderResponse(result) {
+  lastSendResult = result;
   const container = document.getElementById("send-response");
   container.style.display = "block";
 
@@ -1185,11 +1194,18 @@ function renderResultBody(result) {
   // Prioritize discovery info returned in the result (most up-to-date)
   const discoveryInfo = result.discovery || tabData?.discoveryDocs?.[svc];
 
+  // Deterministic schema ID for storing response field renames
+  const responseSchemaId = methodId ? `${methodId}.response` : "";
+
   if (svc && methodId && discoveryInfo?.doc) {
     const doc = discoveryInfo.doc;
     const methodInfo = findMethodById(doc, methodId);
     if (methodInfo?.method?.response?.$ref) {
       respSchema = resolveDiscoverySchema(doc, methodInfo.method.response.$ref);
+    }
+    // Also check for manually-renamed fields stored under the fallback schema ID
+    if (!respSchema && responseSchemaId && doc.schemas?.[responseSchemaId]) {
+      respSchema = doc.schemas[responseSchemaId];
     }
   }
 
@@ -1262,12 +1278,12 @@ function renderResultBody(result) {
     const nodes = jsonToTree(result.body.parsed);
     return (
       `<div class="card-label">Decoded JSON</div>` +
-      renderPbTree(nodes, respSchema)
+      renderPbTree(nodes, respSchema, responseSchemaId)
     );
   } else if (result.body.format === "protobuf_tree") {
     return (
       `<div class="card-label">Decoded Protobuf</div>` +
-      renderPbTree(result.body.parsed, respSchema)
+      renderPbTree(result.body.parsed, respSchema, responseSchemaId)
     );
   } else {
     return `<pre class="resp-body">${esc(result.body.raw || "")}</pre>`;
@@ -1494,7 +1510,7 @@ function el(tag, className) {
   return e;
 }
 
-function renderPbTree(nodes, schema = null) {
+function renderPbTree(nodes, schema = null, fallbackSchemaId = "") {
   if (!nodes || nodes.length === 0)
     return '<div class="pb-empty">Empty body</div>';
 
@@ -1577,9 +1593,9 @@ function renderPbTree(nodes, schema = null) {
       ? `<span class="pb-type-badge">${esc(fieldDef.type || "")}</span>`
       : `<span class="pb-wire-badge">${node.wire === 0 ? "varint" : node.wire === 1 ? "64bit" : node.wire === 2 ? "len" : "32bit"}</span>`;
 
-    const currentSchemaId = schema?.id || (schema?.$ref) || "";
+    const currentSchemaId = schema?.id || (schema?.$ref) || fallbackSchemaId;
     const renameAttr = `data-schema="${esc(currentSchemaId)}" data-key="${esc(fieldDef ? (fieldDef.id || fieldDef.number || fieldName) : node.field)}" data-is-raw="${!fieldDef}"`;
-    const renameBtn = ` <span class="btn-rename" title="Rename field" ${renameAttr}>✎</span>`;
+    const renameBtn = currentSchemaId ? ` <span class="btn-rename" title="Rename field" ${renameAttr}>✎</span>` : "";
 
     html += `<div class="pb-node">
       <span class="pb-field">${esc(fieldName)}</span>${renameBtn}
@@ -1587,7 +1603,8 @@ function renderPbTree(nodes, schema = null) {
 
     if (node.message) {
       const childrenSchema = fieldDef?.children || null;
-      html += `<div class="pb-nested">${renderPbTree(node.message, childrenSchema)}</div>`;
+      const childFallback = currentSchemaId ? `${currentSchemaId}.${node.field}` : "";
+      html += `<div class="pb-nested">${renderPbTree(node.message, childrenSchema, childFallback)}</div>`;
     } else if (node.packed) {
       // Packed repeated scalars (proto3 default)
       html += '<div class="pb-repeated">';
@@ -1615,7 +1632,8 @@ function renderPbTree(nodes, schema = null) {
           if (isMessage && Array.isArray(item)) {
             // Repeated message item
             const itemNodes = jspbToTree(item);
-            html += `<div class="pb-nested-item">${renderPbTree(itemNodes, fieldDef?.children)}</div>`;
+            const childFallback = currentSchemaId ? `${currentSchemaId}.${node.field}` : "";
+            html += `<div class="pb-nested-item">${renderPbTree(itemNodes, fieldDef?.children, childFallback)}</div>`;
           } else {
             // Repeated scalar item
             html += `<span class="pb-scalar-item">${esc(JSON.stringify(item))}</span>`;
@@ -1625,7 +1643,8 @@ function renderPbTree(nodes, schema = null) {
       } else if (isMessage) {
         // Single nested message
         const nestedNodes = jspbToTree(node.value);
-        html += `<div class="pb-nested">${renderPbTree(nestedNodes, fieldDef?.children)}</div>`;
+        const childFallback = currentSchemaId ? `${currentSchemaId}.${node.field}` : "";
+        html += `<div class="pb-nested">${renderPbTree(nestedNodes, fieldDef?.children, childFallback)}</div>`;
       } else {
         html += `<span class="pb-string">${esc(JSON.stringify(node.value))}</span>`;
       }
@@ -1799,16 +1818,16 @@ function renderBatchExecuteResponse(bodyText, req, overrideDoc = null) {
     const nodes = jspbToTree(
       Array.isArray(call.data) ? call.data : [call.data],
     );
+    const schemaName = `${call.rpcId}Response`;
     let schema = null;
     if (doc) {
-      const schemaName = `${call.rpcId}Response`;
       schema = doc.schemas?.[schemaName];
     }
 
     html += `<div class="card card-compact">
       <div class="card-label">RPC ID: <strong>${esc(call.rpcId)}</strong></div>
       <div class="pb-container pb-container-inline">
-        ${renderPbTree(nodes, schema)}
+        ${renderPbTree(nodes, schema, schemaName)}
       </div>
     </div>`;
   }
@@ -1835,15 +1854,15 @@ function renderAsyncResponse(bodyText, req, overrideDoc = null) {
     const chunk = chunks[i];
     if (chunk.type === "jspb" && Array.isArray(chunk.data)) {
       const nodes = jspbToTree(chunk.data);
+      const schemaName = `${asyncPath}_chunk${i}Response`;
       let schema = null;
       if (doc) {
-        const schemaName = `${asyncPath}_chunk${i}Response`;
         schema = doc.schemas?.[schemaName];
       }
       html += `<div class="card card-compact">
         <div class="card-label">Chunk ${i} <span class="badge badge-found">JSPB</span></div>
         <div class="pb-container pb-container-inline">
-          ${renderPbTree(nodes, schema)}
+          ${renderPbTree(nodes, schema, schemaName)}
         </div>
       </div>`;
     } else if (chunk.type === "html") {
@@ -1872,11 +1891,15 @@ function renderGrpcWebResponse(bytes, req, overrideDoc = null) {
   const svc = req.service;
   const doc = overrideDoc || tabData?.discoveryDocs?.[svc]?.doc;
   const methodId = req.methodId || document.getElementById("send-ep-select")?.dataset?.discoveryId;
+  const grpcFallbackId = methodId ? `${methodId}.response` : "";
   let respSchema = null;
   if (doc && methodId) {
     const methodInfo = findMethodById(doc, methodId);
     if (methodInfo?.method?.response?.$ref) {
       respSchema = resolveDiscoverySchema(doc, methodInfo.method.response.$ref);
+    }
+    if (!respSchema && grpcFallbackId && doc.schemas?.[grpcFallbackId]) {
+      respSchema = doc.schemas[grpcFallbackId];
     }
   }
 
@@ -1900,7 +1923,7 @@ function renderGrpcWebResponse(bytes, req, overrideDoc = null) {
         <div class="card-label">Data Frame ${i} <span class="badge badge-found">protobuf</span>
           <span class="text-muted-sm ml-4">${frame.data.length} bytes</span></div>
         <div class="pb-container pb-container-inline">
-          ${renderPbTree(tree, respSchema)}
+          ${renderPbTree(tree, respSchema, grpcFallbackId)}
         </div>
       </div>`;
     } else if (frame.type === "trailers") {
