@@ -746,6 +746,9 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 
     learnFromRequest(details.tabId, service, entry, headerMap);
 
+    // Sync learned data to globalStore immediately so it survives SW restarts
+    mergeToGlobal(tab);
+
     // 2. Proactive Active Probing for Protobuf
     // If it's a Protobuf request, check if we already have a detailed schema.
     // If not, trigger a probe to leak field names/numbers.
@@ -1150,8 +1153,16 @@ function learnFromResponse(tabId, interfaceName, entry) {
   const tab = getTab(tabId);
   const url = new URL(entry.url);
   const { methodName } = calculateMethodMetadata(url, interfaceName);
-
-  const docEntry = tab.discoveryDocs.get(interfaceName);
+  // Check tab-level first, then fall back to globalStore (survives SW restarts)
+  let docEntry = tab.discoveryDocs.get(interfaceName);
+  if (!docEntry?.doc) {
+    const globalEntry = globalStore.discoveryDocs.get(interfaceName);
+    if (globalEntry?.doc) {
+      docEntry = globalEntry;
+      // Also set on tab so subsequent lookups are fast
+      tab.discoveryDocs.set(interfaceName, docEntry);
+    }
+  }
   if (!docEntry || !docEntry.doc) return;
   const doc = docEntry.doc;
   const m = doc.resources.learned
@@ -1507,17 +1518,40 @@ function generateSchemaFromJson(json, name, schemas, isIndexed = false) {
             description: "Learned (null)",
           };
         } else if (Array.isArray(val)) {
-          properties[fieldKey] = {
-            id: fieldNum,
-            number: fieldNum,
-            $ref: nestedName,
-          };
-          schemas[nestedName] = generateSchemaFromJson(
-            val,
-            nestedName,
-            schemas,
-            true,
-          );
+          // Distinguish repeated scalars from nested JSPB messages:
+          // - All primitives (string/number/bool/null) → repeated scalar
+          // - Contains sub-arrays or objects → nested message
+          const allPrim =
+            val.length > 0 &&
+            val.every(
+              (v) =>
+                v === null ||
+                v === undefined ||
+                typeof v === "string" ||
+                typeof v === "number" ||
+                typeof v === "boolean",
+            );
+          if (allPrim) {
+            const itemType = inferRepeatedItemType(val);
+            properties[fieldKey] = {
+              id: fieldNum,
+              number: fieldNum,
+              type: itemType,
+              label: "repeated",
+            };
+          } else {
+            properties[fieldKey] = {
+              id: fieldNum,
+              number: fieldNum,
+              $ref: nestedName,
+            };
+            schemas[nestedName] = generateSchemaFromJson(
+              val,
+              nestedName,
+              schemas,
+              true,
+            );
+          }
         } else if (typeof val === "object") {
           // Object within indexed array → nested named-key message
           properties[fieldKey] = {
@@ -1586,6 +1620,15 @@ function inferJsonType(val) {
     return Number.isInteger(val) ? "int64" : "double";
   }
   if (typeof val === "string") return "string";
+  return "string";
+}
+
+/** Infer the best scalar type for a repeated field from sample values. */
+function inferRepeatedItemType(arr) {
+  for (const v of arr) {
+    if (v === null || v === undefined) continue;
+    return inferJsonType(v);
+  }
   return "string";
 }
 
