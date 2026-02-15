@@ -1015,10 +1015,10 @@ function calculateMethodMetadata(urlObj, interfaceName) {
 
   let methodSegments = segments.slice(startIdx);
 
-  // Strip segments that look like hashes or long ID lists
+  // Strip segments that look like hashes, long ID lists, or path-style params
   methodSegments = methodSegments.filter((s) => {
     if (s.length > 32) return false;
-    if (s.includes("=") && s.includes(",")) return false;
+    if (s.includes("=")) return false; // path-style parameter (e.g. name=foo)
     return true;
   });
 
