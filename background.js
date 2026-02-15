@@ -3441,15 +3441,39 @@ async function executeSendRequest(tabId, msg) {
     headers["Content-Type"] = msg.contentType;
   }
 
-  // API key from endpoint
+  // API key: endpoint → service keys → discovery doc key
   const tab = getTab(tabId);
   const epKey = msg.endpointKey;
   const ep = epKey ? tab.endpoints.get(epKey) : null;
-  if (ep?.apiKey) {
-    if (ep.apiKeySource === "url") {
-      parsedUrl.searchParams.set("key", ep.apiKey);
+  let apiKey = ep?.apiKey || null;
+  let apiKeySource = ep?.apiKeySource || "header";
+
+  if (!apiKey && service) {
+    const hostname = parsedUrl.hostname;
+    const svcKeys = collectKeysForService(tab, service, hostname);
+    // Also check globalStore for keys from previous sessions
+    if (svcKeys.length === 0) {
+      for (const [key, data] of globalStore.apiKeys) {
+        if (data.services?.has(service) || data.hosts?.has(hostname)) {
+          svcKeys.push(key);
+        }
+      }
+    }
+    if (svcKeys.length > 0) {
+      apiKey = svcKeys[0];
+    }
+    // Fall back to discovery doc's key
+    if (!apiKey) {
+      const docEntry = tab.discoveryDocs.get(service) || globalStore.discoveryDocs.get(service);
+      if (docEntry?.apiKey) apiKey = docEntry.apiKey;
+    }
+  }
+
+  if (apiKey) {
+    if (apiKeySource === "url" || parsedUrl.searchParams.has("key")) {
+      parsedUrl.searchParams.set("key", apiKey);
     } else {
-      headers["X-Goog-Api-Key"] = ep.apiKey;
+      headers["X-Goog-Api-Key"] = apiKey;
     }
   }
 

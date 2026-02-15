@@ -402,7 +402,7 @@ function renderDataPanel() {
         </div>`;
 
       if (services.length) {
-        html += `<div class="card-meta">Interfaces: ${[...services].map((s) => `<code>${esc(s)}</code>`).join(" ")}</div>`;
+        html += `<div class="card-meta">Services: ${[...services].map((s) => `<code>${esc(s)}</code>`).join(" ")}</div>`;
       }
       html += `</div>`;
     }
