@@ -259,11 +259,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;
 
+  // Threat model: popup runs in the extension process (trusted), but broadcast
+  // messages are received by all listeners including content scripts. sender.id
+  // is spoofable (our content script runs in every renderer), so the real gate
+  // is sender.url — set by the browser process, unforgeable by the renderer.
+  // See SECURITY.md.
   chrome.runtime.onMessage.addListener((msg, sender) => {
     if (sender.id !== chrome.runtime.id) return;
 
-    // Security: Only accept coordination messages from internal extension contexts (e.g. background.js)
-    // Content scripts will have the website's URL here, not the extension's origin.
     const isExtensionPage =
       sender.url && sender.url.startsWith(EXTENSION_ORIGIN + "/");
     if (!isExtensionPage) return;

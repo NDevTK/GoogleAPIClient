@@ -4,6 +4,9 @@
 
 (function () {
   // ─── Response Body Relay (must be first — drains intercept.js buffer) ────
+  // Threat model: intercept.js (main world) is untrusted — same origin as the page.
+  // This relay only forwards to background.js via sendMessage; background validates
+  // the RESPONSE_BODY type against the content-script allowlist. See SECURITY.md.
 
   document.addEventListener("__uasr_resp", (e) => {
     if (!e.detail) return;
@@ -162,7 +165,10 @@
     }
   }
 
-  // Listen for messages from the background service worker
+  // Listen for messages from the background service worker.
+  // Threat model: this content script runs in the web page's renderer process.
+  // It only accepts PING and PAGE_FETCH from background — never reads storage
+  // or handles data-returning message types. See SECURITY.md.
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "PING") {
       sendResponse({ ok: true });

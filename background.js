@@ -148,7 +148,77 @@ async function captureTabMeta(tabId) {
   }
 }
 
-// ─── Persistent Storage ─────────────────────────────────────────────────────
+// ─── Persistent Storage (IndexedDB) ─────────────────────────────────────────
+
+const _IDB_NAME = "uasr_store";
+const _IDB_VERSION = 1;
+const _IDB_STORE = "global";
+
+function _openIDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(_IDB_NAME, _IDB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(_IDB_STORE)) {
+        db.createObjectStore(_IDB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function _idbGet(key) {
+  return _openIDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(_IDB_STORE, "readonly");
+        const store = tx.objectStore(_IDB_STORE);
+        const req = store.get(key);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+        tx.oncomplete = () => db.close();
+      }),
+  );
+}
+
+function _idbSet(key, value) {
+  return _openIDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(_IDB_STORE, "readwrite");
+        const store = tx.objectStore(_IDB_STORE);
+        store.put(value, key);
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => {
+          db.close();
+          reject(tx.error);
+        };
+      }),
+  );
+}
+
+function _idbClear() {
+  return _openIDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(_IDB_STORE, "readwrite");
+        const store = tx.objectStore(_IDB_STORE);
+        store.clear();
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => {
+          db.close();
+          reject(tx.error);
+        };
+      }),
+  );
+}
 
 let _saveTimer = null;
 
@@ -157,9 +227,8 @@ function scheduleSave() {
   _saveTimer = setTimeout(saveGlobalStore, 2000);
 }
 
-async function saveGlobalStore() {
-  _saveTimer = null;
-  const serialized = {
+function _serializeGlobalStore() {
+  return {
     apiKeys: Object.fromEntries(
       [...globalStore.apiKeys].map(([k, v]) => [
         k,
@@ -199,8 +268,41 @@ async function saveGlobalStore() {
     scopes: Object.fromEntries(globalStore.scopes),
     savedAt: Date.now(),
   };
+}
+
+function _deserializeIntoGlobalStore(s) {
+  if (s.apiKeys) {
+    for (const [k, v] of Object.entries(s.apiKeys)) {
+      globalStore.apiKeys.set(k, {
+        ...v,
+        services: new Set(v.services || []),
+        hosts: new Set(v.hosts || []),
+        endpoints: new Set(v.endpoints || []),
+      });
+    }
+  }
+  if (s.endpoints) {
+    for (const [k, v] of Object.entries(s.endpoints))
+      globalStore.endpoints.set(k, v);
+  }
+  if (s.discoveryDocs) {
+    for (const [k, v] of Object.entries(s.discoveryDocs))
+      globalStore.discoveryDocs.set(k, v);
+  }
+  if (s.probeResults) {
+    for (const [k, v] of Object.entries(s.probeResults))
+      globalStore.probeResults.set(k, v);
+  }
+  if (s.scopes) {
+    for (const [k, v] of Object.entries(s.scopes))
+      globalStore.scopes.set(k, v);
+  }
+}
+
+async function saveGlobalStore() {
+  _saveTimer = null;
   try {
-    await chrome.storage.local.set({ gapiStore: serialized });
+    await _idbSet("gapiStore", _serializeGlobalStore());
   } catch (_) {
     console.error("[Storage] Save failed:", _);
   }
@@ -208,39 +310,17 @@ async function saveGlobalStore() {
 
 async function loadGlobalStore() {
   try {
-    const data = await chrome.storage.local.get("gapiStore");
-    if (!data.gapiStore) return;
-    const s = data.gapiStore;
-    if (s.apiKeys) {
-      for (const [k, v] of Object.entries(s.apiKeys)) {
-        globalStore.apiKeys.set(k, {
-          ...v,
-          services: new Set(v.services || []),
-          hosts: new Set(v.hosts || []),
-          endpoints: new Set(v.endpoints || []),
-        });
-      }
+    // Migrate from chrome.storage.local if data exists there (one-time)
+    const legacy = await chrome.storage.local.get("gapiStore");
+    if (legacy.gapiStore) {
+      _deserializeIntoGlobalStore(legacy.gapiStore);
+      await _idbSet("gapiStore", _serializeGlobalStore());
+      await chrome.storage.local.remove("gapiStore");
+      return;
     }
-    if (s.endpoints) {
-      for (const [k, v] of Object.entries(s.endpoints)) {
-        globalStore.endpoints.set(k, v);
-      }
-    }
-    if (s.discoveryDocs) {
-      for (const [k, v] of Object.entries(s.discoveryDocs)) {
-        globalStore.discoveryDocs.set(k, v);
-      }
-    }
-    if (s.probeResults) {
-      for (const [k, v] of Object.entries(s.probeResults)) {
-        globalStore.probeResults.set(k, v);
-      }
-    }
-    if (s.scopes) {
-      for (const [k, v] of Object.entries(s.scopes)) {
-        globalStore.scopes.set(k, v);
-      }
-    }
+    // Normal load from IndexedDB
+    const s = await _idbGet("gapiStore");
+    if (s) _deserializeIntoGlobalStore(s);
   } catch (_) {
     console.error("[Storage] Load failed:", _);
   }
@@ -315,7 +395,7 @@ async function clearGlobalStore() {
   globalStore.probeResults.clear();
   globalStore.scopes.clear();
   try {
-    await chrome.storage.local.remove("gapiStore");
+    await _idbClear();
   } catch (_) {
     console.error("[Storage] Clear failed:", _);
   }
@@ -2843,6 +2923,16 @@ const CONTENT_TYPES = new Set([
   "RESPONSE_BODY",
 ]);
 
+// Threat model: Content scripts run in web page renderer processes. A compromised
+// renderer has our extension's sender.id (since we inject into every page), so
+// sender.id only rejects other extensions. The real security gate is sender.url —
+// set by the browser process, unforgeable by the renderer. This router enforces:
+//   1. sender.id must match our extension (rejects other extensions)
+//   2. sender.url origin check (extension page vs content script — unforgeable)
+//   3. Extension pages → handlePopupMessage (rejects CONTENT_TYPES)
+//   4. Content scripts → handleContentMessage (rejects everything except CONTENT_TYPES)
+// Data-returning types (GET_STATE, GET_ALL_LOGS, GET_TAB_LIST) are only reachable
+// from extension pages, never from content scripts. See SECURITY.md.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id) return;
 
@@ -2850,12 +2940,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sender.url && sender.url.startsWith(EXTENSION_ORIGIN + "/");
 
   if (isExtensionPage) {
-    // Popup / extension pages — reject content-script message types
     if (CONTENT_TYPES.has(msg.type)) return;
     return handlePopupMessage(msg, sender, sendResponse);
   }
 
-  // Content script — only allow CONTENT_KEYS and CONTENT_ENDPOINTS
   if (!CONTENT_TYPES.has(msg.type)) return;
   handleContentMessage(msg, sender);
 });
