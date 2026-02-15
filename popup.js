@@ -190,14 +190,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function formatCurl(req) {
-    const parts = [`curl -X ${req.method}`];
+    const sq = (s) => s.replace(/'/g, "'\\''");
+    const parts = [`curl -X '${sq(req.method)}'`];
     for (const [k, v] of Object.entries(req.headers || {})) {
-      parts.push(`  -H '${k}: ${v}'`);
+      parts.push(`  -H '${sq(k)}: ${sq(v)}'`);
     }
     if (req.body) {
-      parts.push(`  -d '${req.body.replace(/'/g, "'\\''")}'`);
+      parts.push(`  -d '${sq(req.body)}'`);
     }
-    parts.push(`  '${req.url}'`);
+    parts.push(`  '${sq(req.url)}'`);
     return parts.join(" \\\n");
   }
 
@@ -599,7 +600,7 @@ async function loadVirtualSchema(service, methodId, initialData = null) {
   } catch (err) {
     console.error("Error loading virtual schema:", err);
     document.getElementById("send-form-fields").innerHTML =
-      `<div class="hint">Error loading schema: ${err.message}</div>`;
+      `<div class="hint">Error loading schema: ${esc(err.message)}</div>`;
   }
 }
 
@@ -1108,7 +1109,7 @@ function renderResponse(result) {
       ? "resp-status-ok"
       : "resp-status-error";
   statusEl.innerHTML =
-    `<span class="${statusClass}">${result.status} ${esc(result.statusText || "")}</span>` +
+    `<span class="${statusClass}">${esc(String(result.status))} ${esc(result.statusText || "")}</span>` +
     ` <span class="resp-timing">${result.timing || 0}ms</span>` +
     ` <span class="resp-size">${result.body?.size || 0} bytes</span>`;
 
@@ -1451,7 +1452,7 @@ function renderPbTree(nodes, schema = null) {
     }
 
     const typeLabel = fieldDef
-      ? `<span class="pb-type-badge">${fieldDef.type}</span>`
+      ? `<span class="pb-type-badge">${esc(fieldDef.type || "")}</span>`
       : `<span class="pb-wire-badge">${node.wire === 0 ? "varint" : node.wire === 1 ? "64bit" : node.wire === 2 ? "len" : "32bit"}</span>`;
 
     const currentSchemaId = schema?.id || (schema?.$ref) || "";
@@ -1509,9 +1510,9 @@ function renderPbTree(nodes, schema = null) {
     } else if (node.string !== undefined) {
       html += `<span class="pb-string">"${esc(node.string)}"</span>`;
     } else if (node.value !== undefined) {
-      html += `<span class="pb-number">${node.value}</span>`;
+      html += `<span class="pb-number">${esc(String(node.value))}</span>`;
     } else if (node.hex) {
-      html += `<span class="pb-hex">0x${node.hex}</span>`;
+      html += `<span class="pb-hex">0x${esc(node.hex)}</span>`;
     } else if (node.asFloat !== undefined) {
       html += `<span class="pb-number">${node.asFloat.toFixed(4)}</span>`;
     }
@@ -1589,10 +1590,10 @@ function renderResponsePanel() {
   for (const req of entries) {
     const hasProto = !!req.decodedBody;
 
-    html += `<div class="card request-card clickable-card" style="margin-bottom:8px;" data-id="${req.id}" data-tab-id="${req._tabId}">
+    html += `<div class="card request-card clickable-card" style="margin-bottom:8px;" data-id="${esc(String(req.id))}" data-tab-id="${esc(String(req._tabId))}">
       <div class="card-label" style="display:flex;justify-content:space-between;align-items:center">
         <span>
-          <span class="badge ${req.method}">${req.method}</span>
+          <span class="badge ${esc(req.method)}">${esc(req.method)}</span>
           <span style="color:#aaa;font-size:11px;margin-left:6px">${new Date(req.timestamp).toLocaleTimeString()}</span>
           ${showTabLabel ? `<span class="badge badge-tab">${esc(req._tabTitle || "Tab " + req._tabId)}</span>` : ""}
         </span>
@@ -1739,7 +1740,7 @@ function renderGrpcWebResponse(bytes, req, overrideDoc = null) {
     const grpcMsg = parsed.trailers["grpc-message"] || "";
     html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
       <div class="card-label">gRPC Status: <strong>${esc(grpcStatus)}</strong>
-        ${grpcMsg ? ` &mdash; ${esc(decodeURIComponent(grpcMsg))}` : ""}</div>
+        ${grpcMsg ? ` &mdash; ${esc((() => { try { return decodeURIComponent(grpcMsg); } catch (_) { return grpcMsg; } })())}` : ""}</div>
     </div>`;
   }
 

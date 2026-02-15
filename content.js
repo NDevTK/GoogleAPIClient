@@ -10,7 +10,17 @@
 
   document.addEventListener("__uasr_resp", (e) => {
     if (!e.detail) return;
-    chrome.runtime.sendMessage({ type: "RESPONSE_BODY", ...e.detail });
+    const d = e.detail;
+    chrome.runtime.sendMessage({
+      type: "RESPONSE_BODY",
+      url: d.url,
+      method: d.method,
+      status: d.status,
+      contentType: d.contentType,
+      responseHeaders: d.responseHeaders,
+      body: d.body,
+      base64Encoded: d.base64Encoded,
+    });
   });
   // Signal intercept.js that the relay is listening — replays buffered events
   document.dispatchEvent(new CustomEvent("__uasr_ready"));
