@@ -1147,6 +1147,17 @@ function renderResponse(result) {
   }
 
   bodyEl.innerHTML = renderResultBody(result);
+
+  const dlBtn = document.getElementById("btn-download-response");
+  if (dlBtn) {
+    dlBtn.addEventListener("click", () => {
+      saveBinaryResponse(
+        result.body.raw,
+        result.body.bodyEncoding,
+        result.body.contentType,
+      ).catch(() => {});
+    });
+  }
 }
 
 function renderResultBody(result) {
@@ -1223,6 +1234,17 @@ function renderResultBody(result) {
     );
   }
 
+  if (result.body.format === "binary_download") {
+    const ct = result.body.contentType || "application/octet-stream";
+    const sizeKB = (result.body.size / 1024).toFixed(1);
+    const ext = mimeToExt(ct);
+    return `<div class="card card-compact">
+      <div class="card-label">Binary Response</div>
+      <div class="card-value">${esc(ct)} — ${sizeKB} KB</div>
+      <button class="btn-action" id="btn-download-response">Save As${ext ? " (." + ext + ")" : ""}</button>
+    </div>`;
+  }
+
   if (result.body.format === "json") {
     return `<pre class="resp-body">${esc(JSON.stringify(result.body.parsed, null, 2))}</pre>`;
   } else if (result.body.format === "protobuf_tree") {
@@ -1288,29 +1310,57 @@ async function exportOpenApiSpec() {
   btn.textContent = "...";
 
   try {
-    if (services.length === 1) {
-      // Single service export
-      const svc = services[0];
+    // Collect all specs
+    const specs = [];
+    for (const svc of services) {
       const result = await chrome.runtime.sendMessage({
         type: "EXPORT_OPENAPI",
         tabId: currentTabId,
         service: svc,
       });
-      if (result?.error) { alert(result.error); return; }
-      downloadJson(result.spec, svc.replace(/[^a-zA-Z0-9.-]/g, "_") + ".openapi.json");
+      if (result?.error && services.length === 1) { alert(result.error); return; }
+      if (result?.spec) specs.push({ svc, spec: result.spec });
+    }
+    if (!specs.length) { alert("No specs to export."); return; }
+
+    let combined;
+    let filename;
+    if (specs.length === 1) {
+      combined = specs[0].spec;
+      filename = specs[0].svc.replace(/[^a-zA-Z0-9.-]/g, "_") + ".openapi.json";
     } else {
-      // Multi-service: export each as separate file in sequence
-      for (const svc of services) {
-        const result = await chrome.runtime.sendMessage({
-          type: "EXPORT_OPENAPI",
-          tabId: currentTabId,
-          service: svc,
-        });
-        if (result?.spec) {
-          downloadJson(result.spec, svc.replace(/[^a-zA-Z0-9.-]/g, "_") + ".openapi.json");
+      // Merge all specs into one
+      combined = {
+        openapi: "3.0.3",
+        info: {
+          title: "API Security Researcher — Combined Export",
+          description: `Merged from ${specs.length} services: ${specs.map(s => s.svc).join(", ")}`,
+          version: "v1",
+        },
+        servers: [],
+        paths: {},
+        components: { schemas: {} },
+      };
+      const seenServers = new Set();
+      for (const { spec } of specs) {
+        for (const srv of spec.servers || []) {
+          if (!seenServers.has(srv.url)) {
+            seenServers.add(srv.url);
+            combined.servers.push(srv);
+          }
+        }
+        Object.assign(combined.paths, spec.paths || {});
+        Object.assign(combined.components.schemas, spec.components?.schemas || {});
+        if (spec.components?.securitySchemes) {
+          combined.components.securitySchemes = {
+            ...combined.components.securitySchemes,
+            ...spec.components.securitySchemes,
+          };
         }
       }
+      filename = "combined.openapi.json";
     }
+    await downloadJson(combined, filename);
     btn.textContent = "Done!";
     setTimeout(() => { btn.textContent = "Export"; btn.disabled = false; }, 1500);
   } catch (err) {
@@ -1320,15 +1370,50 @@ async function exportOpenApiSpec() {
   }
 }
 
-function downloadJson(obj, filename) {
+async function downloadJson(obj, filename) {
   const json = JSON.stringify(obj, null, 2);
-  const blob = new Blob([json], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+  const handle = await window.showSaveFilePicker({
+    suggestedName: filename,
+    types: [{
+      description: "JSON",
+      accept: { "application/json": [".json"] },
+    }],
+  });
+  const writable = await handle.createWritable();
+  await writable.write(json);
+  await writable.close();
+}
+
+function mimeToExt(ct) {
+  const map = {
+    "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif",
+    "image/webp": "webp", "image/svg+xml": "svg",
+    "video/mp4": "mp4", "video/webm": "webm",
+    "audio/mpeg": "mp3", "audio/ogg": "ogg", "audio/wav": "wav",
+    "application/pdf": "pdf", "application/zip": "zip",
+    "application/octet-stream": "bin",
+  };
+  for (const [mime, ext] of Object.entries(map)) {
+    if (ct.includes(mime)) return ext;
+  }
+  return "";
+}
+
+async function saveBinaryResponse(base64Data, bodyEncoding, contentType) {
+  const ext = mimeToExt(contentType);
+  const handle = await window.showSaveFilePicker({
+    suggestedName: `response${ext ? "." + ext : ""}`,
+    types: [{
+      description: contentType,
+      accept: { [contentType.split(";")[0].trim()]: ext ? ["." + ext] : [] },
+    }],
+  });
+  const writable = await handle.createWritable();
+  const bytes = bodyEncoding === "base64"
+    ? base64ToUint8(base64Data)
+    : new TextEncoder().encode(base64Data);
+  await writable.write(bytes);
+  await writable.close();
 }
 
 async function importOpenApiSpec(e) {

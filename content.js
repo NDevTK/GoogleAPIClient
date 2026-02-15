@@ -99,7 +99,12 @@
       lower.includes("protobuf") ||
       lower.includes("proto") ||
       lower.includes("grpc") ||
-      lower.includes("octet-stream")
+      lower.includes("octet-stream") ||
+      lower.startsWith("image/") ||
+      lower.startsWith("video/") ||
+      lower.startsWith("audio/") ||
+      lower.includes("application/pdf") ||
+      lower.includes("application/zip")
     );
   }
 

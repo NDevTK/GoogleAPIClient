@@ -3652,6 +3652,21 @@ async function executeSendRequest(tabId, msg) {
         size: (resp.body || "").length,
       };
     }
+  } else if (
+    (resp.bodyEncoding === "base64" || isBinaryContentType(respCt)) &&
+    (/^(image|video|audio)\//i.test(respCt) || /application\/(pdf|zip)/i.test(respCt))
+  ) {
+    // Non-API binary (media/document) — pass through for download
+    const size = resp.bodyEncoding === "base64"
+      ? Math.floor(resp.body.length * 3 / 4)
+      : resp.body.length;
+    bodyResult = {
+      format: "binary_download",
+      raw: resp.body,
+      bodyEncoding: resp.bodyEncoding || "text",
+      contentType: respCt,
+      size,
+    };
   } else if (resp.bodyEncoding === "base64" || isBinaryContentType(respCt)) {
     // Binary protobuf response
     try {

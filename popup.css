@@ -1022,6 +1022,20 @@ details summary:hover {
 .mb-8 { margin-bottom: 8px; }
 .ml-4 { margin-left: 4px; }
 .ml-8 { margin-left: 8px; }
+.btn-action {
+  display: block;
+  width: 100%;
+  background: #238636;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 8px;
+}
+.btn-action:hover { background: #2ea043; }
 .f-name[data-indent="1"] { padding-left: 16px; }
 .f-name[data-indent="2"] { padding-left: 32px; }
 .f-name[data-indent="3"] { padding-left: 48px; }
