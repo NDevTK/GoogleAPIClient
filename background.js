@@ -2248,12 +2248,6 @@ async function fetchDiscoveryForService(
           }
 
           notifyPopup(tabId);
-          // Auto-trigger AST analysis once per tab+host
-          const astKey = tabId + ":" + hostname;
-          if (!_astAnalyzed.has(astKey)) {
-            _astAnalyzed.add(astKey);
-            analyzeBundlesForTab(tabId).catch(function() {});
-          }
           return;
         }
       } catch (err) {
@@ -2645,65 +2639,48 @@ async function handleResponseBody(tabId, msg) {
 
 // ─── AST Bundle Analysis ─────────────────────────────────────────────────────
 
-const _astAnalyzed = new Set(); // tabId:hostname — avoid re-analyzing
-
-async function analyzeBundlesForTab(tabId) {
-  const tab = getTab(tabId);
-
-  // Get script URLs from content script
-  let scriptUrls;
+function analyzeScript(tabId, scriptUrl, code) {
+  var tab = getTab(tabId);
+  var analysis;
   try {
-    scriptUrls = await chrome.tabs.sendMessage(tabId, { type: "GET_SCRIPT_URLS" });
-  } catch (_) {
-    return { error: "content_script_unavailable" };
-  }
-  if (!Array.isArray(scriptUrls) || !scriptUrls.length) {
-    return { error: "no_scripts", count: 0 };
-  }
+    analysis = analyzeJSBundle(code, scriptUrl);
+  } catch (_) { return; }
 
-  var results = [];
-  for (var i = 0; i < scriptUrls.length; i++) {
-    var scriptUrl = scriptUrls[i];
-    try {
-      var resp = await pageContextFetch(tabId, scriptUrl, { method: "GET" }, new URL(scriptUrl).origin);
-      if (resp.error || !resp.body) continue;
-      var analysis = analyzeJSBundle(resp.body, scriptUrl);
-      if (analysis.protoEnums.length || analysis.protoFieldMaps.length ||
-          analysis.fetchCallSites.length || analysis.enumConstants.length ||
-          analysis.stringLiterals.length || analysis.sourceMapUrl) {
-        results.push(analysis);
-      }
+  var hasFindings = analysis.protoEnums.length || analysis.protoFieldMaps.length ||
+    analysis.fetchCallSites.length || analysis.enumConstants.length ||
+    analysis.stringLiterals.length || analysis.sourceMapUrl;
+  if (!hasFindings) return;
 
-      // Source map recovery
-      if (analysis.sourceMapUrl) {
-        try {
-          var smUrl = analysis.sourceMapUrl;
-          if (!/^https?:\/\//i.test(smUrl)) {
-            // Resolve relative URL
-            var base = new URL(scriptUrl);
-            smUrl = new URL(smUrl, base).href;
-          }
-          var smResp = await pageContextFetch(tabId, smUrl, { method: "GET" }, new URL(smUrl).origin);
-          if (smResp.body && !smResp.error) {
-            var smJson = JSON.parse(smResp.body);
-            var smData = parseSourceMap(smJson);
-            analysis.sourceMap = smData;
-            // Extract types from embedded sources
-            if (smData.sourcesContent && smData.sourcesContent.length) {
-              analysis.sourceMapTypes = extractTypesFromSources(smData.sourcesContent, smData.sources);
-            }
-          }
-        } catch (_sm) {}
-      }
-    } catch (_) {}
-  }
-
-  tab._astResults = results;
-  mergeASTResultsIntoVDD(tab, results);
+  if (!tab._astResults) tab._astResults = [];
+  tab._astResults.push(analysis);
+  mergeASTResultsIntoVDD(tab, [analysis]);
   mergeToGlobal(tab);
   notifyPopup(tabId);
 
-  return { count: results.length, scripts: scriptUrls.length };
+  // Source map recovery (async, fires after initial merge)
+  if (analysis.sourceMapUrl) {
+    var smUrl = analysis.sourceMapUrl;
+    try {
+      if (!/^https?:\/\//i.test(smUrl)) {
+        smUrl = new URL(smUrl, new URL(scriptUrl)).href;
+      }
+    } catch (_) { return; }
+    pageContextFetch(tabId, smUrl, { method: "GET" }, new URL(smUrl).origin)
+      .then(function(smResp) {
+        if (!smResp.body || smResp.error) return;
+        try {
+          var smJson = JSON.parse(smResp.body);
+          var smData = parseSourceMap(smJson);
+          analysis.sourceMap = smData;
+          if (smData.sourcesContent && smData.sourcesContent.length) {
+            analysis.sourceMapTypes = extractTypesFromSources(smData.sourcesContent, smData.sources);
+          }
+          mergeASTResultsIntoVDD(tab, [analysis]);
+          mergeToGlobal(tab);
+          notifyPopup(tabId);
+        } catch (_) {}
+      }).catch(function() {});
+  }
 }
 
 function mergeASTResultsIntoVDD(tab, results) {
@@ -2792,7 +2769,7 @@ function mergeASTResultsIntoVDD(tab, results) {
 
 // ─── Message Handling ────────────────────────────────────────────────────────
 
-// Content scripts handle CONTENT_KEYS, CONTENT_ENDPOINTS, and RESPONSE_BODY.
+// Content scripts handle CONTENT_KEYS, CONTENT_ENDPOINTS, RESPONSE_BODY, and SCRIPT_SOURCE.
 // Manifest "matches" already restricts which pages they run on.
 function handleContentMessage(msg, sender) {
   if (!sender.tab) return;
@@ -2801,6 +2778,14 @@ function handleContentMessage(msg, sender) {
   // RESPONSE_BODY comes from intercept.js via content.js relay
   if (msg.type === "RESPONSE_BODY") {
     handleResponseBody(tabId, msg);
+    return;
+  }
+
+  // SCRIPT_SOURCE comes from content.js script extraction
+  if (msg.type === "SCRIPT_SOURCE") {
+    if (msg.code && typeof msg.code === "string") {
+      analyzeScript(tabId, msg.url || "", msg.code);
+    }
     return;
   }
 
@@ -2992,18 +2977,6 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
         msg.methodId,
       );
       sendResponse(result);
-      return;
-    }
-
-    case "ANALYZE_BUNDLES": {
-      if (tabId == null) return;
-      analyzeBundlesForTab(tabId).then(sendResponse);
-      return true;
-    }
-
-    case "GET_AST_RESULTS": {
-      if (tabId == null) return;
-      sendResponse(getTab(tabId)._astResults || null);
       return;
     }
 
@@ -3283,6 +3256,7 @@ const CONTENT_TYPES = new Set([
   "CONTENT_KEYS",
   "CONTENT_ENDPOINTS",
   "RESPONSE_BODY",
+  "SCRIPT_SOURCE",
 ]);
 
 // Threat model: Content scripts run in web page renderer processes. A compromised

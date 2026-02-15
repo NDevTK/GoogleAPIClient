@@ -190,12 +190,6 @@
       sendResponse({ ok: true });
       return;
     }
-    if (msg.type === "GET_SCRIPT_URLS") {
-      var scripts = [];
-      document.querySelectorAll("script[src]").forEach(function(s) { scripts.push(s.src); });
-      sendResponse(scripts);
-      return;
-    }
     if (msg.type !== "PAGE_FETCH") return;
     handlePageFetch(msg).then(sendResponse);
     return true; // async sendResponse
@@ -220,6 +214,51 @@
     });
   }
 
+  // ─── Script Source Extraction (for AST analysis) ────────────────────────────
+
+  const _sentScripts = new Set(); // track URLs/hashes already sent
+
+  function sendScriptSource(url, code) {
+    if (!code || code.length < 50) return; // skip trivial scripts
+    var key = url || hashCode(code);
+    if (_sentScripts.has(key)) return;
+    _sentScripts.add(key);
+    chrome.runtime.sendMessage({
+      type: "SCRIPT_SOURCE",
+      url: url || location.href,
+      code: code,
+    });
+  }
+
+  function hashCode(str) {
+    var h = 0;
+    for (var i = 0; i < Math.min(str.length, 200); i++) {
+      h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+    }
+    return "inline:" + h;
+  }
+
+  function extractScriptSource(scriptEl) {
+    if (scriptEl.src) {
+      // External script — fetch from page context
+      var src = scriptEl.src;
+      if (_sentScripts.has(src)) return;
+      fetch(src, { credentials: "same-origin" }).then(function(r) {
+        if (r.ok) return r.text();
+        return null;
+      }).then(function(code) {
+        if (code) sendScriptSource(src, code);
+      }).catch(function() {});
+    } else {
+      // Inline script
+      var code = scriptEl.textContent;
+      if (code) sendScriptSource(null, code);
+    }
+  }
+
+  // Extract all existing scripts on page load
+  document.querySelectorAll("script").forEach(extractScriptSource);
+
   // ─── Mutation Observer (Dynamic Loading) ───────────────────────────────────
 
   let debounceTimer = null;
@@ -240,11 +279,8 @@
               res.endpoints.forEach((e) => pendingEndpoints.add(e));
               changed = true;
             }
-          }
-          // Check other elements for text content (naive scan of innerHTML is too expensive)
-          // tailored to common config patterns (e.g. JSON blobs in other tags)
-          if (node.tagName === "DIV" || node.tagName === "SPAN") {
-            // Optional: deep scan if needed, or specific attributes
+            // Extract source for AST analysis
+            extractScriptSource(node);
           }
         }
       }
