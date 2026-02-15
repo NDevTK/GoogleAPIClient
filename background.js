@@ -1070,7 +1070,9 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
   const { methodName, methodId } = calculateMethodMetadata(url, interfaceName);
   entry.methodId = methodId;
 
-  if (!doc.resources.learned.methods[methodName]) {
+  // If this method was already probed with richer schema, update it there instead
+  const probedMethod = doc.resources.probed?.methods?.[methodName];
+  if (!doc.resources.learned.methods[methodName] && !probedMethod) {
     doc.resources.learned.methods[methodName] = {
       id: methodId,
       path: url.pathname.substring(1),
@@ -1080,7 +1082,7 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
     };
   }
 
-  const m = doc.resources.learned.methods[methodName];
+  const m = probedMethod || doc.resources.learned.methods[methodName];
 
   // Learn query parameters from URL
   if (!url.pathname.includes("batchexecute")) {
