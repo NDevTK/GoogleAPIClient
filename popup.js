@@ -1391,6 +1391,7 @@ function renderPbTree(nodes, schema = null) {
     else fieldMap = schema; // Fallback for raw probed fields
   }
 
+
   let html = '<div class="pb-tree">';
 
   for (const node of nodes) {
@@ -2079,14 +2080,17 @@ async function replayRequest(reqId, sourceTabId) {
 
     if (req.responseBody) {
       const mimeType = req.mimeType || "";
-      const isProtobuf =
-        mimeType.includes("protobuf") ||
+      const isBinaryProtobuf =
+        (mimeType.includes("protobuf") && !mimeType.includes("json")) ||
         (req.requestHeaders &&
           Object.entries(req.requestHeaders).some(
             ([k, v]) =>
               k.toLowerCase() === "content-type" &&
-              v.toLowerCase().includes("protobuf"),
+              v.toLowerCase().includes("protobuf") &&
+              !v.toLowerCase().includes("json"),
           ));
+      const isJspb = mimeType.includes("json+protobuf") ||
+        mimeType.includes("json; protobuf");
 
       let bodyText = req.responseBody;
       if (req.responseBase64) {
@@ -2116,7 +2120,21 @@ async function replayRequest(reqId, sourceTabId) {
             size: bytes.length,
           };
         } catch (e) {}
-      } else if (isProtobuf) {
+      } else if (isJspb) {
+        // JSPB (JSON+Protobuf): parse as JSON, convert to protobuf tree
+        try {
+          const parsed = JSON.parse(bodyText);
+          if (Array.isArray(parsed)) {
+            historicalResult.body = {
+              format: "protobuf_tree",
+              parsed: jspbToTree(parsed),
+              raw: bodyText,
+              size: bodyText.length,
+              isJspb: true,
+            };
+          }
+        } catch (e) {}
+      } else if (isBinaryProtobuf) {
         try {
           const bytes = req.responseBase64
             ? base64ToUint8(req.responseBody)
@@ -2128,19 +2146,32 @@ async function replayRequest(reqId, sourceTabId) {
             size: bytes.length,
           };
         } catch (e) {}
-      } else if (mimeType.includes("json")) {
+      } else if (mimeType.includes("json") || mimeType.includes("text/plain")) {
         try {
           // Strip Google XSSI prefix before parsing
           let jsonText = bodyText;
           if (jsonText.trimStart().startsWith(")]}'")) {
             jsonText = jsonText.trimStart().substring(4).trimStart();
           }
-          historicalResult.body = {
-            format: "json",
-            parsed: JSON.parse(jsonText),
-            raw: bodyText,
-            size: bodyText.length,
-          };
+          const parsed = JSON.parse(jsonText);
+          // Detect JSPB in text/plain responses (Google returns these)
+          if (Array.isArray(parsed) && parsed.length > 0 &&
+              parsed.some((item) => item === null || Array.isArray(item) || typeof item !== "object")) {
+            historicalResult.body = {
+              format: "protobuf_tree",
+              parsed: jspbToTree(parsed),
+              raw: bodyText,
+              size: bodyText.length,
+              isJspb: true,
+            };
+          } else {
+            historicalResult.body = {
+              format: "json",
+              parsed,
+              raw: bodyText,
+              size: bodyText.length,
+            };
+          }
         } catch (e) {}
       }
 

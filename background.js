@@ -401,8 +401,8 @@ async function clearGlobalStore() {
   }
 }
 
-// Load persisted data on startup
-loadGlobalStore();
+// Load persisted data on startup — handlers must await this before reading globalStore
+const _globalStoreReady = loadGlobalStore();
 
 // ─── Session Storage (Request Logs) ─────────────────────────────────────────
 
@@ -1726,12 +1726,32 @@ function mergeSchemaInto(doc, schemaName, newSchema) {
   if (!existing.properties) existing.properties = {};
   const newProps = newSchema.properties || {};
 
+  // Build field-number → key index for deduplication
+  const numToKey = {};
+  for (const [k, p] of Object.entries(existing.properties)) {
+    const n = p.number ?? p.id;
+    if (n != null) numToKey[n] = k;
+  }
+
   for (const [key, newProp] of Object.entries(newProps)) {
-    const old = existing.properties[key];
+    // Match by key first, then fall back to field number
+    const fieldNum = newProp.number ?? newProp.id;
+    const matchKey = existing.properties[key] ? key
+      : (fieldNum != null && numToKey[fieldNum]) ? numToKey[fieldNum]
+      : null;
+    const old = matchKey ? existing.properties[matchKey] : null;
+
     if (!old) {
       // Brand new field — add it
       existing.properties[key] = newProp;
+      if (fieldNum != null) numToKey[fieldNum] = key;
     } else {
+      // Re-key if matched by field number and the new key has a real name
+      if (matchKey !== key && !old.customName && !/^field\d+$/.test(key)) {
+        existing.properties[key] = old;
+        delete existing.properties[matchKey];
+        numToKey[fieldNum] = key;
+      }
       // Merge: preserve custom names, upgrade types
       if (old.customName) {
         // Keep the user's rename
@@ -1771,6 +1791,8 @@ function mergeSchemaInto(doc, schemaName, newSchema) {
         old.$ref = newProp.$ref;
         old.type = "message";
       }
+      if (newProp.children && !old.children) old.children = newProp.children;
+      if (newProp.description && !old.description) old.description = newProp.description;
       // Merge nested schema recursively
       if (newProp.$ref && doc.schemas[newProp.$ref]) {
         mergeSchemaInto(doc, newProp.$ref, doc.schemas[newProp.$ref]);
@@ -2250,11 +2272,28 @@ function updateOrCreateVirtualDoc(service, seedUrl, probeResult, existingDoc) {
   // but always preserve user's customName renames.
   function mergeProbeInto(target, probeProps) {
     if (!target.properties) target.properties = {};
+    // Build field-number → key index for deduplication
+    const numToKey = {};
+    for (const [k, p] of Object.entries(target.properties)) {
+      const n = p.number ?? p.id;
+      if (n != null) numToKey[n] = k;
+    }
     for (const [key, probeProp] of Object.entries(probeProps)) {
-      const existing = target.properties[key];
+      const fieldNum = probeProp.number ?? probeProp.id;
+      const matchKey = target.properties[key] ? key
+        : (fieldNum != null && numToKey[fieldNum]) ? numToKey[fieldNum]
+        : null;
+      const existing = matchKey ? target.properties[matchKey] : null;
       if (!existing) {
         target.properties[key] = probeProp;
+        if (fieldNum != null) numToKey[fieldNum] = key;
       } else {
+        // Re-key: probe has the real name, replace generic fieldN key
+        if (matchKey !== key && !existing.customName && !/^field\d+$/.test(key)) {
+          target.properties[key] = existing;
+          delete target.properties[matchKey];
+          numToKey[fieldNum] = key;
+        }
         // Probe has authoritative field numbers and types
         if (probeProp.id != null) existing.id = probeProp.id;
         if (probeProp.number != null) existing.number = probeProp.number;
@@ -2262,6 +2301,8 @@ function updateOrCreateVirtualDoc(service, seedUrl, probeResult, existingDoc) {
           existing.type = probeProp.type;
         }
         if (probeProp.$ref && !existing.$ref) existing.$ref = probeProp.$ref;
+        if (probeProp.children && !existing.children) existing.children = probeProp.children;
+        if (probeProp.description && !existing.description) existing.description = probeProp.description;
         // Preserve user renames
         if (existing.customName) {
           // keep existing.name
@@ -2407,8 +2448,9 @@ async function probeEndpoint(tabId, endpointKey) {
 
 // ─── Response Body Handling (from intercept.js via content.js relay) ─────────
 
-function handleResponseBody(tabId, msg) {
+async function handleResponseBody(tabId, msg) {
   if (!msg.url || !msg.body) return;
+  await _globalStoreReady;
 
   const tab = getTab(tabId);
 
@@ -2512,7 +2554,8 @@ function handleContentMessage(msg, sender) {
 }
 
 // Popup messages — sender.tab is absent for popup contexts.
-function handlePopupMessage(msg, _sender, sendResponse) {
+async function handlePopupMessage(msg, _sender, sendResponse) {
+  await _globalStoreReady;
   const tabId = msg.tabId;
 
   switch (msg.type) {
@@ -2941,7 +2984,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (isExtensionPage) {
     if (CONTENT_TYPES.has(msg.type)) return;
-    return handlePopupMessage(msg, sender, sendResponse);
+    handlePopupMessage(msg, sender, sendResponse);
+    return true; // keep sendResponse alive for async handlePopupMessage
   }
 
   if (!CONTENT_TYPES.has(msg.type)) return;
