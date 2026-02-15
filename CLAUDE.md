@@ -1,4 +1,4 @@
-# Universal API Security Researcher - Development Guide
+# API Security Researcher - Development Guide
 
 ## Project Overview
 

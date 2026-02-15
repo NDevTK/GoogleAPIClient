@@ -1,4 +1,4 @@
-# Universal API Security Researcher
+# API Security Researcher
 
 A Chrome Extension for reverse-engineering and security testing APIs across any website. It passively discovers, maps, and learns the structure, protocols, and authentication of APIs as you browse.
 
