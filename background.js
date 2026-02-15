@@ -732,8 +732,9 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     if (details.tabId < 0) return;
     const url = new URL(details.url);
 
-    // Skip internal probe requests early
+    // Skip internal requests early
     if (url.hash.includes("_internal_probe")) return;
+    if (url.hash.includes("_uasr_send")) return;
 
     // ─── CRITICAL: Universal Key Scanning ───
     // Scan EVERY request (scripts, assets, etc) for keys in URL and Headers
