@@ -1239,6 +1239,17 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
     });
   }
 
+  // Track body field values (JSON bodies only)
+  if (entry.isJson && entry.decodedBody && typeof entry.decodedBody === "object") {
+    const flat = flattenObjectValues(entry.decodedBody);
+    for (const [fieldPath, value] of Object.entries(flat)) {
+      if (typeof value === "string" || typeof value === "number") {
+        if (!m._stats.bodyFields[fieldPath]) m._stats.bodyFields[fieldPath] = createParamStats();
+        updateParamStats(m._stats.bodyFields[fieldPath], String(value));
+      }
+    }
+  }
+
   // Apply stats-derived metadata back to parameters
   applyStatsToMethod(m);
 
