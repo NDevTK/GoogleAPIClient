@@ -112,15 +112,20 @@ document.addEventListener("DOMContentLoaded", async () => {
           newName,
           url,
         });
+
         // Refresh tabData so re-renders pick up the new schema
         tabData = await chrome.runtime.sendMessage({
           type: "GET_STATE",
           tabId: currentTabId,
         });
+
         // Reload form to reflect change, passing preserved data
         loadVirtualSchema(svc, select.dataset.discoveryId, currentData);
         // Re-render response tree so renamed field is immediately visible
-        if (lastSendResult) renderResponse(lastSendResult);
+        if (lastSendResult) {
+          delete lastSendResult.discovery; // Clear stale snapshot so tabData is used
+          renderResponse(lastSendResult);
+        }
       }
     }
   });
@@ -1197,13 +1202,13 @@ function renderResultBody(result) {
   // Deterministic schema ID for storing response field renames
   const responseSchemaId = methodId ? `${methodId}.response` : "";
 
-  if (svc && methodId && discoveryInfo?.doc) {
-    const doc = discoveryInfo.doc;
+  const doc = discoveryInfo?.doc || null;
+  if (svc && methodId && doc) {
     const methodInfo = findMethodById(doc, methodId);
     if (methodInfo?.method?.response?.$ref) {
       respSchema = resolveDiscoverySchema(doc, methodInfo.method.response.$ref);
     }
-    // Also check for manually-renamed fields stored under the fallback schema ID
+    // Fallback: check for manually-created schema when no probed schema exists
     if (!respSchema && responseSchemaId && doc.schemas?.[responseSchemaId]) {
       respSchema = doc.schemas[responseSchemaId];
     }
@@ -1278,12 +1283,12 @@ function renderResultBody(result) {
     const nodes = jsonToTree(result.body.parsed);
     return (
       `<div class="card-label">Decoded JSON</div>` +
-      renderPbTree(nodes, respSchema, responseSchemaId)
+      renderPbTree(nodes, respSchema, responseSchemaId, doc)
     );
   } else if (result.body.format === "protobuf_tree") {
     return (
       `<div class="card-label">Decoded Protobuf</div>` +
-      renderPbTree(result.body.parsed, respSchema, responseSchemaId)
+      renderPbTree(result.body.parsed, respSchema, responseSchemaId, doc)
     );
   } else {
     return `<pre class="resp-body">${esc(result.body.raw || "")}</pre>`;
@@ -1510,7 +1515,7 @@ function el(tag, className) {
   return e;
 }
 
-function renderPbTree(nodes, schema = null, fallbackSchemaId = "") {
+function renderPbTree(nodes, schema = null, fallbackSchemaId = "", doc = null) {
   if (!nodes || nodes.length === 0)
     return '<div class="pb-empty">Empty body</div>';
 
@@ -1602,9 +1607,12 @@ function renderPbTree(nodes, schema = null, fallbackSchemaId = "") {
       ${typeLabel}: `;
 
     if (node.message) {
-      const childrenSchema = fieldDef?.children || null;
+      let childrenSchema = fieldDef?.children || null;
       const childFallback = currentSchemaId ? `${currentSchemaId}.${node.field}` : "";
-      html += `<div class="pb-nested">${renderPbTree(node.message, childrenSchema, childFallback)}</div>`;
+      if (!childrenSchema && childFallback && doc?.schemas?.[childFallback]) {
+        childrenSchema = doc.schemas[childFallback];
+      }
+      html += `<div class="pb-nested">${renderPbTree(node.message, childrenSchema, childFallback, doc)}</div>`;
     } else if (node.packed) {
       // Packed repeated scalars (proto3 default)
       html += '<div class="pb-repeated">';
@@ -1633,7 +1641,7 @@ function renderPbTree(nodes, schema = null, fallbackSchemaId = "") {
             // Repeated message item
             const itemNodes = jspbToTree(item);
             const childFallback = currentSchemaId ? `${currentSchemaId}.${node.field}` : "";
-            html += `<div class="pb-nested-item">${renderPbTree(itemNodes, fieldDef?.children, childFallback)}</div>`;
+            html += `<div class="pb-nested-item">${renderPbTree(itemNodes, fieldDef?.children, childFallback, doc)}</div>`;
           } else {
             // Repeated scalar item
             html += `<span class="pb-scalar-item">${esc(JSON.stringify(item))}</span>`;
@@ -1644,7 +1652,7 @@ function renderPbTree(nodes, schema = null, fallbackSchemaId = "") {
         // Single nested message
         const nestedNodes = jspbToTree(node.value);
         const childFallback = currentSchemaId ? `${currentSchemaId}.${node.field}` : "";
-        html += `<div class="pb-nested">${renderPbTree(nestedNodes, fieldDef?.children, childFallback)}</div>`;
+        html += `<div class="pb-nested">${renderPbTree(nestedNodes, fieldDef?.children, childFallback, doc)}</div>`;
       } else {
         html += `<span class="pb-string">${esc(JSON.stringify(node.value))}</span>`;
       }
@@ -1827,7 +1835,7 @@ function renderBatchExecuteResponse(bodyText, req, overrideDoc = null) {
     html += `<div class="card card-compact">
       <div class="card-label">RPC ID: <strong>${esc(call.rpcId)}</strong></div>
       <div class="pb-container pb-container-inline">
-        ${renderPbTree(nodes, schema, schemaName)}
+        ${renderPbTree(nodes, schema, schemaName, doc)}
       </div>
     </div>`;
   }
@@ -1862,7 +1870,7 @@ function renderAsyncResponse(bodyText, req, overrideDoc = null) {
       html += `<div class="card card-compact">
         <div class="card-label">Chunk ${i} <span class="badge badge-found">JSPB</span></div>
         <div class="pb-container pb-container-inline">
-          ${renderPbTree(nodes, schema, schemaName)}
+          ${renderPbTree(nodes, schema, schemaName, doc)}
         </div>
       </div>`;
     } else if (chunk.type === "html") {
@@ -1923,7 +1931,7 @@ function renderGrpcWebResponse(bytes, req, overrideDoc = null) {
         <div class="card-label">Data Frame ${i} <span class="badge badge-found">protobuf</span>
           <span class="text-muted-sm ml-4">${frame.data.length} bytes</span></div>
         <div class="pb-container pb-container-inline">
-          ${renderPbTree(tree, respSchema, grpcFallbackId)}
+          ${renderPbTree(tree, respSchema, grpcFallbackId, doc)}
         </div>
       </div>`;
     } else if (frame.type === "trailers") {
