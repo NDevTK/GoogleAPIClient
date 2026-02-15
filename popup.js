@@ -487,7 +487,7 @@ function renderFieldsTable(fields, depth) {
 
     html += `<tr>
       <td class="f-num">${f.number ?? ""}</td>
-      <td class="f-name" style="${indent}">${depth > 0 ? "&#x2514; " : ""}${esc(name)}</td>
+      <td class="f-name"${indent ? ` data-indent="${depth}"` : ""}>${depth > 0 ? "&#x2514; " : ""}${esc(name)}</td>
       <td class="f-type">${esc(f.type)}</td>
       <td class="f-msg">${esc(f.messageType || "")}</td>
       <td class="${labelClass}">${esc(labelText)}</td>
@@ -1095,18 +1095,6 @@ async function sendRequest() {
     body,
   };
 
-  console.log("[Send] Message to background:", {
-    url: msg.url,
-    httpMethod: msg.httpMethod,
-    contentType: msg.contentType,
-    bodyMode: body?.mode,
-    rawBody: body?.rawBody?.substring?.(0, 200),
-    formFields: body?.formData?.fields?.length,
-    headers: msg.headers,
-    service: msg.service,
-    methodId: msg.methodId,
-  });
-
   try {
     const result = await chrome.runtime.sendMessage(msg);
     renderResponse(result);
@@ -1622,16 +1610,16 @@ function renderResponsePanel() {
   for (const req of entries) {
     const hasProto = !!req.decodedBody;
 
-    html += `<div class="card request-card clickable-card" style="margin-bottom:8px;" data-id="${esc(String(req.id))}" data-tab-id="${esc(String(req._tabId))}">
-      <div class="card-label" style="display:flex;justify-content:space-between;align-items:center">
+    html += `<div class="card request-card clickable-card mb-8" data-id="${esc(String(req.id))}" data-tab-id="${esc(String(req._tabId))}">
+      <div class="card-label flex-between">
         <span>
           <span class="badge ${esc(req.method)}">${esc(req.method)}</span>
-          <span style="color:#aaa;font-size:11px;margin-left:6px">${new Date(req.timestamp).toLocaleTimeString()}</span>
+          <span class="text-timestamp">${new Date(req.timestamp).toLocaleTimeString()}</span>
           ${showTabLabel ? `<span class="badge badge-tab">${esc(req._tabTitle || "Tab " + req._tabId)}</span>` : ""}
         </span>
         ${getStatusBadge(req.status)}
       </div>
-      <div class="card-value" style="font-family:monospace;font-size:11px;word-break:break-all;margin:4px 0">${esc(req.url)}</div>
+      <div class="card-value card-value-mono">${esc(req.url)}</div>
       <div class="card-meta">
         ${req.service ? `Service: <strong>${esc(req.service)}</strong>` : ""}
         ${hasProto ? ' <span class="badge badge-found">PROTOBUF</span>' : ""}
@@ -1689,9 +1677,9 @@ function renderBatchExecuteResponse(bodyText, req, overrideDoc = null) {
       schema = doc.schemas?.[schemaName];
     }
 
-    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+    html += `<div class="card card-compact">
       <div class="card-label">RPC ID: <strong>${esc(call.rpcId)}</strong></div>
-      <div class="pb-container" style="margin-bottom:0;box-shadow:none;background:transparent;border:none;padding:0">
+      <div class="pb-container pb-container-inline">
         ${renderPbTree(nodes, schema)}
       </div>
     </div>`;
@@ -1724,19 +1712,19 @@ function renderAsyncResponse(bodyText, req, overrideDoc = null) {
         const schemaName = `${asyncPath}_chunk${i}Response`;
         schema = doc.schemas?.[schemaName];
       }
-      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      html += `<div class="card card-compact">
         <div class="card-label">Chunk ${i} <span class="badge badge-found">JSPB</span></div>
-        <div class="pb-container" style="margin-bottom:0;box-shadow:none;background:transparent;border:none;padding:0">
+        <div class="pb-container pb-container-inline">
           ${renderPbTree(nodes, schema)}
         </div>
       </div>`;
     } else if (chunk.type === "html") {
-      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      html += `<div class="card card-compact">
         <div class="card-label">Chunk ${i} <span class="badge badge-pending">HTML</span></div>
-        <pre class="resp-body" style="max-height:120px;overflow:auto">${esc(chunk.raw)}</pre>
+        <pre class="resp-body resp-body-scroll">${esc(chunk.raw)}</pre>
       </div>`;
     } else {
-      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      html += `<div class="card card-compact">
         <div class="card-label">Chunk ${i} <span class="badge">text</span></div>
         <pre class="resp-body">${esc(chunk.raw)}</pre>
       </div>`;
@@ -1770,7 +1758,7 @@ function renderGrpcWebResponse(bytes, req, overrideDoc = null) {
   if (Object.keys(parsed.trailers).length > 0) {
     const grpcStatus = parsed.trailers["grpc-status"] || "?";
     const grpcMsg = parsed.trailers["grpc-message"] || "";
-    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+    html += `<div class="card card-compact">
       <div class="card-label">gRPC Status: <strong>${esc(grpcStatus)}</strong>
         ${grpcMsg ? ` &mdash; ${esc((() => { try { return decodeURIComponent(grpcMsg); } catch (_) { return grpcMsg; } })())}` : ""}</div>
     </div>`;
@@ -1780,17 +1768,17 @@ function renderGrpcWebResponse(bytes, req, overrideDoc = null) {
     const frame = parsed.frames[i];
     if (frame.type === "data") {
       const tree = pbDecodeTree(frame.data);
-      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      html += `<div class="card card-compact">
         <div class="card-label">Data Frame ${i} <span class="badge badge-found">protobuf</span>
-          <span style="color:#484f58;font-size:9px;margin-left:4px">${frame.data.length} bytes</span></div>
-        <div class="pb-container" style="margin-bottom:0;box-shadow:none;background:transparent;border:none;padding:0">
+          <span class="text-muted-sm ml-4">${frame.data.length} bytes</span></div>
+        <div class="pb-container pb-container-inline">
           ${renderPbTree(tree, respSchema)}
         </div>
       </div>`;
     } else if (frame.type === "trailers") {
-      html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+      html += `<div class="card card-compact">
         <div class="card-label">Trailers</div>
-        <pre class="resp-body" style="max-height:80px;overflow:auto">${esc(frame.data)}</pre>
+        <pre class="resp-body resp-body-scroll-sm">${esc(frame.data)}</pre>
       </div>`;
     }
   }
@@ -1812,7 +1800,7 @@ function renderSSEResponse(bodyText) {
       ? ` <span class="badge badge-pending">${esc(evt.event)}</span>`
       : "";
     const idBadge = evt.id
-      ? ` <span style="color:#484f58;font-size:9px">id: ${esc(evt.id)}</span>`
+      ? ` <span class="text-muted-sm">id: ${esc(evt.id)}</span>`
       : "";
 
     let bodyHtml;
@@ -1822,7 +1810,7 @@ function renderSSEResponse(bodyText) {
       bodyHtml = `<pre class="resp-body">${esc(evt.raw)}</pre>`;
     }
 
-    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+    html += `<div class="card card-compact">
       <div class="card-label">Event ${i}${typeBadge}${idBadge}</div>
       ${bodyHtml}
     </div>`;
@@ -1840,7 +1828,7 @@ function renderNDJSONResponse(bodyText) {
 
   let html = `<div class="card-label">NDJSON (${objects.length} records)</div><div class="pb-tree">`;
   for (let i = 0; i < objects.length; i++) {
-    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+    html += `<div class="card card-compact">
       <div class="card-label">Record ${i}</div>
       <pre class="resp-body">${esc(JSON.stringify(objects[i], null, 2))}</pre>
     </div>`;
@@ -1858,23 +1846,23 @@ function renderGraphQLResponse(bodyText) {
   let html = '<div class="pb-tree">';
 
   if (gql.errors) {
-    html += `<div class="card" style="margin-bottom:4px;border-color:#da3633">
-      <div class="card-label" style="color:#f85149">Errors (${gql.errors.length})</div>
+    html += `<div class="card card-compact-error">
+      <div class="card-label card-label-error">Errors (${gql.errors.length})</div>
       <pre class="resp-body">${esc(JSON.stringify(gql.errors, null, 2))}</pre>
     </div>`;
   }
 
   if (gql.data) {
-    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+    html += `<div class="card card-compact">
       <div class="card-label">Data</div>
       <pre class="resp-body">${esc(JSON.stringify(gql.data, null, 2))}</pre>
     </div>`;
   }
 
   if (gql.extensions) {
-    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
-      <div class="card-label" style="color:#484f58">Extensions</div>
-      <pre class="resp-body" style="max-height:120px;overflow:auto">${esc(JSON.stringify(gql.extensions, null, 2))}</pre>
+    html += `<div class="card card-compact">
+      <div class="card-label card-label-muted">Extensions</div>
+      <pre class="resp-body resp-body-scroll">${esc(JSON.stringify(gql.extensions, null, 2))}</pre>
     </div>`;
   }
 
@@ -1906,7 +1894,7 @@ function renderMultipartBatchResponse(bodyText, contentType) {
       bodyHtml = `<pre class="resp-body">${esc(part.body)}</pre>`;
     }
 
-    html += `<div class="card" style="margin-bottom:4px;border-color:#30363d">
+    html += `<div class="card card-compact">
       <div class="card-label">Part ${i} ${statusBadge} ${esc(part.statusText || "")}</div>
       ${bodyHtml}
     </div>`;
@@ -1942,26 +1930,6 @@ async function replayRequest(reqId, sourceTabId) {
     return;
   }
   currentReplayRequest = req;
-
-  console.log("[Replay] Request:", {
-    url: req.url,
-    method: req.method,
-    service: req.service,
-    methodId: req.methodId,
-    hasRawBodyB64: !!req.rawBodyB64,
-    rawBodyB64Length: req.rawBodyB64?.length,
-    hasDecodedBody: !!req.decodedBody,
-    hasRequestHeaders: !!req.requestHeaders,
-    requestHeaders: req.requestHeaders,
-    mimeType: req.mimeType,
-  });
-  if (req.rawBodyB64) {
-    try {
-      const _dbgBytes = base64ToUint8(req.rawBodyB64);
-      const _dbgText = new TextDecoder().decode(_dbgBytes);
-      console.log("[Replay] Decoded raw body:", _dbgText.substring(0, 500));
-    } catch (_) {}
-  }
 
   // Try to find and select the matching endpoint in the dropdown to load the schema
   const epSelect = document.getElementById("send-ep-select");
@@ -2134,15 +2102,6 @@ async function replayRequest(reqId, sourceTabId) {
     document.getElementById("send-gql-variables").value = "";
     document.getElementById("send-gql-opname").value = "";
   }
-  console.log("[Replay] After mode detection:", {
-    found,
-    currentSchema: !!currentSchema,
-    currentBodyMode,
-    currentContentType,
-    currentRequestMethod,
-    currentRequestUrl,
-  });
-
   // Add headers (filtering out Content-Type which is auto-determined)
   const headersList = document.getElementById("send-headers-list");
   headersList.innerHTML = "";
@@ -2161,8 +2120,6 @@ async function replayRequest(reqId, sourceTabId) {
       document.getElementById("send-raw-body").value = new TextDecoder().decode(bytes);
     } catch (_) {}
   }
-  console.log("[Replay] Raw body populated:", document.getElementById("send-raw-body").value.substring(0, 200));
-
   // Populate historical response if available
   if (req.responseBody || req.status) {
     const historicalResult = {
@@ -2285,7 +2242,7 @@ async function replayRequest(reqId, sourceTabId) {
 
     renderResponse(historicalResult);
     document.getElementById("send-response-status").innerHTML +=
-      ' <span class="badge badge-source" style="margin-left:8px">Historical</span>';
+      ' <span class="badge badge-source ml-8">Historical</span>';
   } else {
     document.getElementById("send-response").style.display = "none";
   }

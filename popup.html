@@ -44,7 +44,7 @@
           </select>
           <button id="btn-export-spec" class="btn-spec" type="button" title="Export as OpenAPI">Export</button>
           <button id="btn-import-spec" class="btn-spec" type="button" title="Import OpenAPI spec">Import</button>
-          <input id="import-spec-file" type="file" accept=".json,.yaml,.yml" style="display:none" />
+          <input id="import-spec-file" type="file" accept=".json,.yaml,.yml" class="hidden" />
         </div>
         <select id="send-ep-select">
           <option value="">-- select method --</option>
@@ -65,10 +65,10 @@
         <div id="send-form-fields"></div>
         <textarea
           id="send-raw-body"
-          style="display: none"
+          class="hidden"
           placeholder='{"field": "value"} or base64 for protobuf'
         ></textarea>
-        <div id="send-graphql-fields" style="display: none">
+        <div id="send-graphql-fields" class="hidden">
           <textarea
             id="send-gql-query"
             placeholder="query { user(id: 1) { name email } }"
@@ -97,15 +97,7 @@
         </div>
       </div>
 
-      <div
-        id="send-response"
-        style="
-          display: none;
-          margin-top: 16px;
-          border-top: 1px solid #21262d;
-          padding-top: 16px;
-        "
-      >
+      <div id="send-response" class="hidden send-response-section">
         <div class="section-header">Manual Send Result</div>
         <div id="send-response-status"></div>
         <details id="send-response-headers-section">
@@ -120,8 +112,8 @@
     <!-- Response Panel -->
     <section id="panel-response" class="panel active">
       <div id="response-log-container">
-        <div class="section-header" style="display:flex;align-items:center;justify-content:space-between">
-          <div style="display:flex;align-items:center;gap:8px">
+        <div class="section-header flex-between">
+          <div class="flex-row">
             <span>Request Log</span>
             <select id="log-tab-filter" class="log-filter-select">
               <option value="active">Active Tab</option>

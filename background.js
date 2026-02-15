@@ -3577,17 +3577,6 @@ async function executeSendRequest(tabId, msg) {
     headers["Content-Type"] = "application/json";
   }
 
-  console.log("[SendReq] Final request:", {
-    url,
-    method: msg.httpMethod,
-    headers,
-    bodyLength: body?.length,
-    bodyPreview: typeof body === "string" ? body.substring(0, 300) : body,
-    bodyEncoding,
-    contentType: headers["Content-Type"],
-    bodyMode: msg.body?.mode,
-  });
-
   // Resolve initiator origin
   const initiatorOrigin =
     ep?.origin || ep?.referer || tab.authContext?.origin || null;
