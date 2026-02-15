@@ -138,7 +138,7 @@
 
     const opts = {
       method: msg.method || "GET",
-      credentials: "include",
+      credentials: "same-origin",
       headers,
     };
 
@@ -147,8 +147,8 @@
         msg.bodyEncoding === "base64" ? base64ToUint8(msg.body) : msg.body;
     }
 
-    async function doFetch(fetchOpts) {
-      const resp = await fetch(msg.url, fetchOpts);
+    try {
+      const resp = await fetch(msg.url, opts);
       const respHeaders = {};
       resp.headers.forEach((v, k) => {
         respHeaders[k] = v;
@@ -175,18 +175,8 @@
         headers: respHeaders,
         body,
       };
-    }
-
-    try {
-      return await doFetch(opts);
     } catch (err) {
-      // CORS failure with credentials — retry without credentials
-      try {
-        opts.credentials = "omit";
-        return await doFetch(opts);
-      } catch (retryErr) {
-        return { error: retryErr.message };
-      }
+      return { error: err.message };
     }
   }
 
