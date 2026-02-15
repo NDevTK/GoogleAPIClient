@@ -901,36 +901,62 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     entry.contentType = logContentType;
     entry.service = service;
 
-    if (isProtobuf && entry.rawBodyB64) {
+    if (entry.rawBodyB64) {
       try {
         const bytes = base64ToUint8(entry.rawBodyB64);
-        if (
-          logContentType.includes("json") ||
-          logContentType.includes("text")
-        ) {
-          // Try JSPB (JSON array) parsing
+        if (isProtobuf) {
+          if (
+            logContentType.includes("json") ||
+            logContentType.includes("text")
+          ) {
+            // Try JSPB (JSON array) parsing
+            try {
+              const text = new TextDecoder().decode(bytes);
+              if (text.trim().startsWith("[")) {
+                const json = JSON.parse(text);
+                if (Array.isArray(json)) {
+                  entry.decodedBody = jspbToTree(json);
+                  entry.isJspb = true;
+                }
+              }
+            } catch (e) {}
+          } else {
+            // Binary protobuf
+            entry.decodedBody = pbDecodeTree(bytes, 8, (val) => {
+              if (typeof val === "string") {
+                extractKeysFromText(
+                  details.tabId,
+                  val,
+                  details.url,
+                  "protobuf_body",
+                );
+              }
+            });
+          }
+        } else if (logContentType.includes("x-www-form-urlencoded")) {
+          // Form-urlencoded with f.req JSPB (e.g. browserinfo)
           try {
             const text = new TextDecoder().decode(bytes);
-            if (text.trim().startsWith("[")) {
-              const json = JSON.parse(text);
+            const params = new URLSearchParams(text);
+            const fReq = params.get("f.req");
+            if (fReq) {
+              const json = JSON.parse(fReq);
               if (Array.isArray(json)) {
                 entry.decodedBody = jspbToTree(json);
                 entry.isJspb = true;
               }
             }
           } catch (e) {}
-        } else {
-          // Binary protobuf
-          entry.decodedBody = pbDecodeTree(bytes, 8, (val) => {
-            if (typeof val === "string") {
-              extractKeysFromText(
-                details.tabId,
-                val,
-                details.url,
-                "protobuf_body",
-              );
+        } else if (logContentType.includes("json")) {
+          // JSON body — store parsed object for replay pre-fill
+          try {
+            const text = new TextDecoder().decode(bytes);
+            const json = JSON.parse(text);
+            if (json && typeof json === "object") {
+              entry.decodedBody = json;
+              entry.isJson = true;
             }
-          });
+          } catch (e) {}
         }
       } catch (err) {}
     }
@@ -1222,6 +1248,21 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
         m.request = { $ref: schemaName };
         const newSchema = generateSchemaFromJson(json, schemaName, doc.schemas);
         mergeSchemaInto(doc, schemaName, newSchema);
+      } catch (e) {}
+    } else if (headers["content-type"]?.includes("x-www-form-urlencoded")) {
+      // Form-urlencoded with f.req JSPB (non-batchexecute, e.g. browserinfo)
+      try {
+        const params = new URLSearchParams(text);
+        const fReq = params.get("f.req");
+        if (fReq) {
+          const json = JSON.parse(fReq);
+          if (Array.isArray(json)) {
+            const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Request`;
+            m.request = { $ref: schemaName };
+            const newSchema = generateSchemaFromJson(json, schemaName, doc.schemas, true);
+            mergeSchemaInto(doc, schemaName, newSchema);
+          }
+        }
       } catch (e) {}
     }
   }
@@ -2931,6 +2972,11 @@ async function buildExportRequest(tabId, msg) {
         body = uint8ToBase64(encoded);
       } else if (msg.contentType === "application/json+protobuf") {
         body = JSON.stringify(encodeFormToJspb(fields));
+      } else if (msg.contentType?.startsWith("application/x-www-form-urlencoded")) {
+        const argsArray = encodeFormToJspb(fields);
+        const params = new URLSearchParams();
+        params.set("f.req", JSON.stringify(argsArray));
+        body = params.toString();
       } else {
         body = JSON.stringify(encodeFormToJson(fields));
       }
@@ -3500,6 +3546,12 @@ async function executeSendRequest(tabId, msg) {
         bodyEncoding = "base64";
       } else if (msg.contentType === "application/json+protobuf") {
         body = JSON.stringify(encodeFormToJspb(fields));
+      } else if (msg.contentType?.startsWith("application/x-www-form-urlencoded")) {
+        // Form-urlencoded with f.req JSPB (non-batchexecute)
+        const argsArray = encodeFormToJspb(fields);
+        const params = new URLSearchParams();
+        params.set("f.req", JSON.stringify(argsArray));
+        body = params.toString();
       } else {
         body = JSON.stringify(encodeFormToJson(fields));
       }
@@ -3524,6 +3576,17 @@ async function executeSendRequest(tabId, msg) {
     body = JSON.stringify(gqlBody);
     headers["Content-Type"] = "application/json";
   }
+
+  console.log("[SendReq] Final request:", {
+    url,
+    method: msg.httpMethod,
+    headers,
+    bodyLength: body?.length,
+    bodyPreview: typeof body === "string" ? body.substring(0, 300) : body,
+    bodyEncoding,
+    contentType: headers["Content-Type"],
+    bodyMode: msg.body?.mode,
+  });
 
   // Resolve initiator origin
   const initiatorOrigin =
@@ -3627,18 +3690,24 @@ async function executeSendRequest(tabId, msg) {
       };
     }
   } else {
-    // Try JSON parse
+    // Try JSON parse (strip Google XSSI prefix if present)
+    let jsonText = resp.body || "";
+    if (jsonText.trimStart().startsWith(")]}'")) {
+      jsonText = jsonText.trimStart().substring(4).trimStart();
+    }
     try {
-      const parsed = JSON.parse(resp.body);
+      const parsed = JSON.parse(jsonText);
       if (
         Array.isArray(parsed) &&
         (respCt.includes("json+protobuf") ||
           (respCt.includes("text/plain") &&
             parsed.length > 0 &&
+            parsed.some((item) => item === null || Array.isArray(item) || typeof item !== "object")) ||
+          (respCt.includes("json") &&
+            parsed.length > 0 &&
             parsed.some((item) => item === null || Array.isArray(item) || typeof item !== "object")))
       ) {
-        // JSPB format: json+protobuf content-type, or text/plain with array structure
-        // (plain arrays of primitives/nulls/sub-arrays, not HTML or other text formats)
+        // JSPB format: json+protobuf content-type, or text/plain/json with array structure
         bodyResult = {
           format: "protobuf_tree",
           parsed: jspbToTree(parsed),

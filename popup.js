@@ -684,7 +684,9 @@ function buildFormFields(schema, initialData = null) {
       : "Request Body";
     section.innerHTML = `<div class="form-section-label">${label}</div>`;
     for (const field of schema.requestBody.fields) {
-      const fieldVal = initialData ? initialData[field.number] : null;
+      const fieldVal = initialData
+        ? (initialData[field.number] ?? initialData[field.name] ?? null)
+        : null;
       section.appendChild(
         createFieldInput(
           field.name,
@@ -700,6 +702,15 @@ function buildFormFields(schema, initialData = null) {
 
   if (!schema.parameters && !schema.requestBody?.fields?.length) {
     container.innerHTML = '<div class="hint">No schema available.</div>';
+  }
+
+  // Show raw body textarea alongside form when schema has no body fields
+  // but the method has a body (POST/PUT/PATCH) — allows editing unknown body formats
+  if (!schema.requestBody?.fields?.length) {
+    const method = (currentRequestMethod || "").toUpperCase();
+    if (method !== "GET" && method !== "DELETE") {
+      document.getElementById("send-raw-body").style.display = "block";
+    }
   }
 }
 
@@ -1037,12 +1048,20 @@ async function sendRequest() {
         console.warn("[Send] URL construction failed:", _);
       }
     }
-    body = {
-      mode: "form",
-      formData: { fields: formValues.fields },
-      rawBody: null,
-      frameId: currentReplayRequest?.frameId,
-    };
+    if (formValues.fields.length === 0) {
+      // No body fields in schema — fall back to raw body (e.g. replayed form-urlencoded body)
+      const rawFallback = document.getElementById("send-raw-body").value;
+      body = rawFallback
+        ? { mode: "raw", formData: null, rawBody: rawFallback, frameId: currentReplayRequest?.frameId }
+        : { mode: "form", formData: { fields: [] }, rawBody: null, frameId: currentReplayRequest?.frameId };
+    } else {
+      body = {
+        mode: "form",
+        formData: { fields: formValues.fields },
+        rawBody: null,
+        frameId: currentReplayRequest?.frameId,
+      };
+    }
   } else if (bodyMode === "graphql") {
     body = {
       mode: "graphql",
@@ -1075,6 +1094,18 @@ async function sendRequest() {
     headers,
     body,
   };
+
+  console.log("[Send] Message to background:", {
+    url: msg.url,
+    httpMethod: msg.httpMethod,
+    contentType: msg.contentType,
+    bodyMode: body?.mode,
+    rawBody: body?.rawBody?.substring?.(0, 200),
+    formFields: body?.formData?.fields?.length,
+    headers: msg.headers,
+    service: msg.service,
+    methodId: msg.methodId,
+  });
 
   try {
     const result = await chrome.runtime.sendMessage(msg);
@@ -1912,6 +1943,26 @@ async function replayRequest(reqId, sourceTabId) {
   }
   currentReplayRequest = req;
 
+  console.log("[Replay] Request:", {
+    url: req.url,
+    method: req.method,
+    service: req.service,
+    methodId: req.methodId,
+    hasRawBodyB64: !!req.rawBodyB64,
+    rawBodyB64Length: req.rawBodyB64?.length,
+    hasDecodedBody: !!req.decodedBody,
+    hasRequestHeaders: !!req.requestHeaders,
+    requestHeaders: req.requestHeaders,
+    mimeType: req.mimeType,
+  });
+  if (req.rawBodyB64) {
+    try {
+      const _dbgBytes = base64ToUint8(req.rawBodyB64);
+      const _dbgText = new TextDecoder().decode(_dbgBytes);
+      console.log("[Replay] Decoded raw body:", _dbgText.substring(0, 500));
+    } catch (_) {}
+  }
+
   // Try to find and select the matching endpoint in the dropdown to load the schema
   const epSelect = document.getElementById("send-ep-select");
   let found = false;
@@ -1995,8 +2046,39 @@ async function replayRequest(reqId, sourceTabId) {
           );
           initialData = pbTreeToMap(initialData);
         }
-      } else {
+      } else if (req.isJson && req.decodedBody) {
+        // JSON body — use parsed object directly as named-key initialData
+        initialData = req.decodedBody;
+      } else if (req.decodedBody) {
         initialData = pbTreeToMap(req.decodedBody) || {};
+      } else if (req.rawBodyB64) {
+        // Try to extract f.req JSPB from form-urlencoded body
+        try {
+          const bodyBytes = base64ToUint8(req.rawBodyB64);
+          const bodyText = new TextDecoder().decode(bodyBytes);
+          const bodyParams = new URLSearchParams(bodyText);
+          const fReq = bodyParams.get("f.req");
+          if (fReq) {
+            const parsed = JSON.parse(fReq);
+            if (Array.isArray(parsed)) {
+              initialData = pbTreeToMap(jspbToTree(parsed));
+            }
+          }
+        } catch (_) {}
+        // Also try plain JSON body
+        if (!initialData) {
+          try {
+            const bodyBytes = base64ToUint8(req.rawBodyB64);
+            const bodyText = new TextDecoder().decode(bodyBytes);
+            const json = JSON.parse(bodyText);
+            if (json && typeof json === "object" && !Array.isArray(json)) {
+              initialData = json;
+            }
+          } catch (_) {}
+        }
+        if (!initialData) initialData = {};
+      } else {
+        initialData = {};
       }
 
       // Merge query parameters from URL for pre-filling
@@ -2052,6 +2134,14 @@ async function replayRequest(reqId, sourceTabId) {
     document.getElementById("send-gql-variables").value = "";
     document.getElementById("send-gql-opname").value = "";
   }
+  console.log("[Replay] After mode detection:", {
+    found,
+    currentSchema: !!currentSchema,
+    currentBodyMode,
+    currentContentType,
+    currentRequestMethod,
+    currentRequestUrl,
+  });
 
   // Add headers (filtering out Content-Type which is auto-determined)
   const headersList = document.getElementById("send-headers-list");
@@ -2063,8 +2153,15 @@ async function replayRequest(reqId, sourceTabId) {
     }
   }
 
-  // Clear previous raw body
+  // Populate raw body textarea with original body as fallback
   document.getElementById("send-raw-body").value = "";
+  if (req.rawBodyB64 && !gqlDetected) {
+    try {
+      const bytes = base64ToUint8(req.rawBodyB64);
+      document.getElementById("send-raw-body").value = new TextDecoder().decode(bytes);
+    } catch (_) {}
+  }
+  console.log("[Replay] Raw body populated:", document.getElementById("send-raw-body").value.substring(0, 200));
 
   // Populate historical response if available
   if (req.responseBody || req.status) {
