@@ -668,8 +668,9 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (details.tabId < 0) return;
     const url = new URL(details.url);
 
-    // Skip internal probe requests immediately
+    // Skip internal requests immediately
     if (url.hash.includes("_internal_probe")) return;
+    if (url.hash.includes("_uasr_send")) return;
 
     if (!isApiRequest(url, details)) return;
 

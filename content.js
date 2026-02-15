@@ -148,7 +148,8 @@
     }
 
     try {
-      const resp = await fetch(msg.url, opts);
+      const fetchUrl = msg.url + (msg.url.includes("#") ? "&" : "#") + "_uasr_send";
+      const resp = await fetch(fetchUrl, opts);
       const respHeaders = {};
       resp.headers.forEach((v, k) => {
         respHeaders[k] = v;
