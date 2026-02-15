@@ -1117,8 +1117,21 @@ function renderResponse(result) {
   const container = document.getElementById("send-response");
   container.style.display = "block";
 
+  // Restore child structure if a previous error replaced it via innerHTML
+  if (!document.getElementById("send-response-status")) {
+    container.innerHTML =
+      '<div class="section-header">Manual Send Result</div>' +
+      '<div id="send-response-status"></div>' +
+      '<details id="send-response-headers-section"><summary>Response Headers</summary>' +
+      '<table id="send-response-headers" class="auth-table"></table></details>' +
+      '<div id="send-response-body"></div>';
+  }
+
   if (result.error && !result.status) {
-    container.innerHTML = `<div class="card"><div class="card-label">Error</div><div class="card-value">${esc(result.error)}</div></div>`;
+    document.getElementById("send-response-status").innerHTML = "";
+    document.getElementById("send-response-headers").innerHTML = "";
+    document.getElementById("send-response-body").innerHTML =
+      `<div class="card"><div class="card-label">Error</div><div class="card-value">${esc(result.error)}</div></div>`;
     return;
   }
 

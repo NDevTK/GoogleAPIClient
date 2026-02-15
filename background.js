@@ -3581,7 +3581,7 @@ async function executeSendRequest(tabId, msg) {
   const initiatorOrigin =
     ep?.origin || ep?.referer || tab.authContext?.origin || null;
 
-  // Send request
+  // Send request via page context (session-aware)
   let resp;
   try {
     resp = await pageContextFetch(

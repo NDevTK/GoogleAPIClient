@@ -147,8 +147,8 @@
         msg.bodyEncoding === "base64" ? base64ToUint8(msg.body) : msg.body;
     }
 
-    try {
-      const resp = await fetch(msg.url, opts);
+    async function doFetch(fetchOpts) {
+      const resp = await fetch(msg.url, fetchOpts);
       const respHeaders = {};
       resp.headers.forEach((v, k) => {
         respHeaders[k] = v;
@@ -175,8 +175,18 @@
         headers: respHeaders,
         body,
       };
+    }
+
+    try {
+      return await doFetch(opts);
     } catch (err) {
-      return { error: err.message };
+      // CORS failure with credentials — retry without credentials
+      try {
+        opts.credentials = "omit";
+        return await doFetch(opts);
+      } catch (retryErr) {
+        return { error: retryErr.message };
+      }
     }
   }
 
