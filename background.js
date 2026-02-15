@@ -495,37 +495,15 @@ loadSessionLogs();
 
 const API_KEY_RE = /AIzaSy[\w-]{33}/g;
 
-function isApiRequest(url, details, headers = {}) {
-  // Ignore common non-API static assets
-  const ext = url.pathname.split(".").pop().toLowerCase();
-  const staticExts = [
-    "png",
-    "jpg",
-    "jpeg",
-    "gif",
-    "svg",
-    "css",
-    "js",
-    "woff",
-    "woff2",
-    "ttf",
-    "otf",
-    "ico",
-    "map",
-  ];
-  if (staticExts.includes(ext)) return false;
+function isApiRequest(url, details) {
+  // Use the browser's own resource type classification
+  // xmlhttprequest covers both fetch() and XMLHttpRequest calls
+  if (details.type !== "xmlhttprequest") return false;
 
-  // batchexecute is always an API
-  if (url.pathname.includes("batchexecute")) return true;
-
-  // Ignore specific tracking/asset paths that aren't useful APIs
+  // Ignore tracking/telemetry noise
   const noisePaths = [
     "/gen_204",
-    "/_/js/",
-    "/_/ss/",
-    "/xjs/",
     "/client_204",
-    "/vt/",
     "/jserror",
     "/ulog",
     "/log",
@@ -534,32 +512,7 @@ function isApiRequest(url, details, headers = {}) {
   ];
   if (noisePaths.some((p) => url.pathname.includes(p))) return false;
 
-  // Look for API indicators in URL
-  if (url.hostname.includes("api")) return true;
-  if (/\/v\d+(?:\/|$)/.test(url.pathname)) return true; // versioning like /v1/ (path segment only)
-  if (url.pathname.includes("graphql")) return true;
-  if (url.pathname.includes("$rpc")) return true;
-  if (url.searchParams.has("alt") && url.searchParams.get("alt") === "json")
-    return true;
-
-  // Method indicator
-  if (details.method !== "GET") return true;
-
-  // Header indicators (if provided)
-  if (
-    headers["x-requested-with"] ||
-    headers["authorization"] ||
-    headers["x-api-key"] ||
-    headers["x-goog-api-key"]
-  ) {
-    return true;
-  }
-
-  // Heuristic: If it's a GET, check if the path looks like a data endpoint
-  const isDataPath = /json|data|query|search|async|rpc/.test(url.pathname);
-  if (isDataPath) return true;
-
-  return false;
+  return true;
 }
 
 // Extract interface name from URL with better granularity
@@ -754,7 +707,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       headerMap[h.name.toLowerCase()] = h.value;
     }
 
-    if (!isApiRequest(url, details, headerMap)) return;
+    if (!isApiRequest(url, details)) return;
 
     // Skip internal probe requests
     if (url.searchParams.has("_probe")) return;
@@ -984,7 +937,7 @@ chrome.webRequest.onHeadersReceived.addListener(
     }
 
     const url = new URL(details.url);
-    if (!isApiRequest(url, details, headerMap)) return;
+    if (!isApiRequest(url, details)) return;
 
     const tab = getTab(details.tabId);
     const service = extractInterfaceName(url);
