@@ -536,7 +536,7 @@ function isApiRequest(url, details, headers = {}) {
 
   // Look for API indicators in URL
   if (url.hostname.includes("api")) return true;
-  if (/\bv\d+\b/.test(url.pathname)) return true; // versioning like /v1/
+  if (/\/v\d+(?:\/|$)/.test(url.pathname)) return true; // versioning like /v1/ (path segment only)
   if (url.pathname.includes("graphql")) return true;
   if (url.pathname.includes("$rpc")) return true;
   if (url.searchParams.has("alt") && url.searchParams.get("alt") === "json")
