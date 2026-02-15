@@ -1659,7 +1659,17 @@ function renderPbTree(nodes, schema = null, fallbackSchemaId = "", doc = null) {
     } else if (node.string !== undefined) {
       html += `<span class="pb-string">"${esc(node.string)}"</span>`;
     } else if (node.value !== undefined) {
-      html += `<span class="pb-number">${esc(String(node.value))}</span>`;
+      if (typeof node.value === "object" && node.value !== null) {
+        const childNodes = jsonToTree(node.value);
+        let childrenSchema = fieldDef?.children || null;
+        const childFallback = currentSchemaId ? `${currentSchemaId}.${node.field}` : "";
+        if (!childrenSchema && childFallback && doc?.schemas?.[childFallback]) {
+          childrenSchema = doc.schemas[childFallback];
+        }
+        html += `<div class="pb-nested">${renderPbTree(childNodes, childrenSchema, childFallback, doc)}</div>`;
+      } else {
+        html += `<span class="pb-number">${esc(String(node.value))}</span>`;
+      }
     } else if (node.hex) {
       html += `<span class="pb-hex">0x${esc(node.hex)}</span>`;
     } else if (node.asFloat !== undefined) {
