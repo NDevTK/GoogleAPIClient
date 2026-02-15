@@ -3469,8 +3469,11 @@ async function executeSendRequest(tabId, msg) {
     }
   }
 
-  if (apiKey) {
-    if (apiKeySource === "url" || parsedUrl.searchParams.has("key")) {
+  // Only add key if not already present in headers or URL
+  const hasKeyHeader = headers["X-Goog-Api-Key"] || headers["x-goog-api-key"];
+  const hasKeyParam = parsedUrl.searchParams.has("key");
+  if (apiKey && !hasKeyHeader && !hasKeyParam) {
+    if (apiKeySource === "url") {
       parsedUrl.searchParams.set("key", apiKey);
     } else {
       headers["X-Goog-Api-Key"] = apiKey;
