@@ -1259,7 +1259,11 @@ function renderResultBody(result) {
   }
 
   if (result.body.format === "json") {
-    return `<pre class="resp-body">${esc(JSON.stringify(result.body.parsed, null, 2))}</pre>`;
+    const nodes = jsonToTree(result.body.parsed);
+    return (
+      `<div class="card-label">Decoded JSON</div>` +
+      renderPbTree(nodes, respSchema)
+    );
   } else if (result.body.format === "protobuf_tree") {
     return (
       `<div class="card-label">Decoded Protobuf</div>` +
@@ -1514,7 +1518,7 @@ function renderPbTree(nodes, schema = null) {
   for (const node of nodes) {
     // Find field definition
     let fieldDef = null;
-    let fieldName = `Field ${node.field}`;
+    let fieldName = node.isJson ? String(node.field) : `Field ${node.field}`;
 
     // Attempt lookup
     if (fieldMap) {
@@ -1638,6 +1642,32 @@ function renderPbTree(nodes, schema = null) {
   }
   html += "</div>";
   return html;
+}
+
+function jsonToTree(obj) {
+  if (obj === null || obj === undefined) return [];
+  if (Array.isArray(obj)) {
+    return obj.map((item, i) => {
+      if (item && typeof item === "object") {
+        return { field: i, wire: 2, message: jsonToTree(item), isJson: true };
+      }
+      return typeof item === "string"
+        ? { field: i, wire: 2, string: item, isJson: true }
+        : { field: i, wire: 0, value: item, isJson: true };
+    });
+  }
+  if (typeof obj !== "object") return [];
+  return Object.entries(obj).map(([key, val]) => {
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      return { field: key, wire: 2, message: jsonToTree(val), isJson: true };
+    }
+    if (Array.isArray(val)) {
+      return { field: key, wire: 2, message: jsonToTree(val), isJson: true };
+    }
+    return typeof val === "string"
+      ? { field: key, wire: 2, string: val, isJson: true }
+      : { field: key, wire: 0, value: val, isJson: true };
+  });
 }
 
 function findSchemaForRequest(req) {
