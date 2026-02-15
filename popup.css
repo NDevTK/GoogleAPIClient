@@ -652,6 +652,68 @@ details summary:hover {
   margin-left: 4px;
 }
 
+.field-stat {
+  font-size: 9px;
+  margin-left: 4px;
+  padding: 0 3px;
+  border-radius: 3px;
+}
+.badge-optional { color: #8b949e; background: rgba(139,148,158,0.1); }
+.badge-enum-detected { color: #7ee787; background: rgba(126,231,135,0.1); }
+.badge-default { color: #79c0ff; background: rgba(121,192,255,0.1); }
+.badge-range { color: #d2a8ff; background: rgba(210,168,255,0.1); }
+.badge-format { color: #f0883e; background: rgba(240,136,62,0.1); }
+
+/* Chain info */
+.chain-info-box {
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+.chain-section { margin-bottom: 4px; }
+.chain-section:last-child { margin-bottom: 0; }
+.chain-section-label {
+  color: #484f58;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  display: block;
+  margin-bottom: 2px;
+}
+.chain-link {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 0;
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-size: 11px;
+}
+.chain-incoming .chain-param { color: #79c0ff; font-weight: 600; }
+.chain-incoming .chain-source { color: #58a6ff; }
+.chain-incoming .chain-field { color: #8b949e; }
+.chain-incoming .chain-arrow { color: #58a6ff; }
+.chain-outgoing .chain-param { color: #8b949e; }
+.chain-outgoing .chain-source { color: #3fb950; }
+.chain-outgoing .chain-field { color: #79c0ff; font-weight: 600; }
+.chain-outgoing .chain-arrow { color: #3fb950; }
+.chain-count {
+  color: #484f58;
+  font-size: 9px;
+  margin-left: 2px;
+}
+.badge-chain {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 3px;
+  margin-left: 4px;
+}
+.badge-chain-in { color: #58a6ff; background: rgba(88,166,255,0.1); }
+.badge-chain-out { color: #3fb950; background: rgba(63,185,80,0.1); }
+.badge-ast { color: #d2a8ff; background: rgba(210,168,255,0.1); font-size: 9px; padding: 0 3px; border-radius: 3px; margin-left: 4px; }
+
 .btn-rename {
   font-size: 10px;
   cursor: pointer;

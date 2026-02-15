@@ -77,6 +77,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.getElementById("import-spec-file").click();
   });
   document.getElementById("import-spec-file").addEventListener("change", importOpenApiSpec);
+  document.getElementById("btn-analyze-js").addEventListener("click", triggerASTAnalysis);
 
   // Request log tab filter
   document.getElementById("log-tab-filter").addEventListener("change", async (e) => {
@@ -570,6 +571,7 @@ function onSendEndpointSelected() {
   currentRequestMethod = "POST";
   document.getElementById("send-form-fields").innerHTML =
     '<div class="hint">Select a method to load its schema.</div>';
+  renderChainInfo(null);
 }
 
 async function loadVirtualSchema(service, methodId, initialData = null) {
@@ -610,11 +612,162 @@ async function loadVirtualSchema(service, methodId, initialData = null) {
     }
 
     buildFormFields(schema, initialData);
+    renderChainInfo(schema.chains);
   } catch (err) {
     console.error("Error loading virtual schema:", err);
     document.getElementById("send-form-fields").innerHTML =
       `<div class="hint">Error loading schema: ${esc(err.message)}</div>`;
   }
+}
+
+function renderChainInfo(chains) {
+  const container = document.getElementById("send-chain-info");
+  if (!container) return;
+  if (!chains || (!chains.incoming?.length && !chains.outgoing?.length)) {
+    container.classList.add("hidden");
+    container.innerHTML = "";
+    return;
+  }
+  container.classList.remove("hidden");
+  let html = '<div class="chain-info-box">';
+  if (chains.incoming?.length) {
+    html += '<div class="chain-section"><span class="chain-section-label">Receives data from:</span>';
+    for (const link of chains.incoming) {
+      html += `<div class="chain-link chain-incoming">` +
+        `<span class="chain-param">${esc(link.paramName)}</span>` +
+        `<span class="chain-arrow">&larr;</span>` +
+        `<span class="chain-source">${esc(link.sourceMethodId)}</span>` +
+        `<span class="chain-field">.${esc(link.sourceFieldPath)}</span>` +
+        (link.observedCount > 1 ? `<span class="chain-count">${link.observedCount}x</span>` : "") +
+        `</div>`;
+    }
+    html += '</div>';
+  }
+  if (chains.outgoing?.length) {
+    html += '<div class="chain-section"><span class="chain-section-label">Feeds data to:</span>';
+    for (const link of chains.outgoing) {
+      html += `<div class="chain-link chain-outgoing">` +
+        `<span class="chain-field">${esc(link.sourceFieldPath)}</span>` +
+        `<span class="chain-arrow">&rarr;</span>` +
+        `<span class="chain-source">${esc(link.targetMethodId)}</span>` +
+        `<span class="chain-param">.${esc(link.paramName)}</span>` +
+        (link.observedCount > 1 ? `<span class="chain-count">${link.observedCount}x</span>` : "") +
+        `</div>`;
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+async function triggerASTAnalysis() {
+  const btn = document.getElementById("btn-analyze-js");
+  btn.disabled = true;
+  btn.textContent = "Analyzing...";
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: "ANALYZE_BUNDLES",
+      tabId: currentTabId,
+    });
+    btn.textContent = result.error ? "No scripts" : `${result.count} bundles`;
+    setTimeout(function() { btn.textContent = "Analyze JS"; btn.disabled = false; }, 2000);
+
+    // Fetch and render results
+    const astData = await chrome.runtime.sendMessage({
+      type: "GET_AST_RESULTS",
+      tabId: currentTabId,
+    });
+    if (astData) renderASTResults(astData);
+  } catch (err) {
+    btn.textContent = "Error";
+    setTimeout(function() { btn.textContent = "Analyze JS"; btn.disabled = false; }, 2000);
+  }
+}
+
+function renderASTResults(results) {
+  if (!results || !results.length) return;
+
+  // Render in the send-response area
+  const container = document.getElementById("send-response");
+  if (!container) return;
+
+  let html = '<div class="section-header">AST Analysis Results</div>';
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    var shortUrl = r.sourceUrl;
+    try { shortUrl = new URL(r.sourceUrl).pathname.split("/").pop() || r.sourceUrl; } catch (_) {}
+
+    html += '<div class="card">';
+    html += `<div class="card-label">${esc(shortUrl)}</div>`;
+    html += '<div class="card-meta">';
+    if (r.protoEnums.length) html += `<span class="badge badge-found">${r.protoEnums.length} enums</span>`;
+    if (r.protoFieldMaps.length) html += `<span class="badge badge-found">${r.protoFieldMaps.length} fields</span>`;
+    if (r.fetchCallSites.length) html += `<span class="badge badge-source">${r.fetchCallSites.length} fetch calls</span>`;
+    if (r.enumConstants.length) html += `<span class="badge badge-batch">${r.enumConstants.length} constants</span>`;
+    if (r.stringLiterals.length) html += `<span class="badge badge-status">${r.stringLiterals.length} API strings</span>`;
+    if (r.sourceMapUrl) html += '<span class="badge badge-found">source map</span>';
+    html += '</div>';
+
+    // Expandable details
+    if (r.fetchCallSites.length) {
+      html += '<details class="discovery-inline"><summary class="discovery-summary">Fetch call sites</summary>';
+      for (var fc = 0; fc < r.fetchCallSites.length; fc++) {
+        var cs = r.fetchCallSites[fc];
+        html += `<div class="method-row"><span class="badge ${esc(cs.method)}">${esc(cs.method)}</span> <span class="method-id">${esc(cs.url)}</span></div>`;
+      }
+      html += '</details>';
+    }
+    if (r.protoFieldMaps.length) {
+      html += '<details class="discovery-inline"><summary class="discovery-summary">Proto field maps</summary>';
+      for (var pf = 0; pf < r.protoFieldMaps.length; pf++) {
+        var fm = r.protoFieldMaps[pf];
+        html += `<div class="method-row"><span class="field-number">#${fm.fieldNumber}</span> <span class="field-name">${esc(fm.fieldName)}</span> <span class="text-muted-sm">(${esc(fm.accessorName)})</span></div>`;
+      }
+      html += '</details>';
+    }
+    if (r.protoEnums.length) {
+      html += '<details class="discovery-inline"><summary class="discovery-summary">Proto enums</summary>';
+      for (var pe = 0; pe < r.protoEnums.length; pe++) {
+        var en = r.protoEnums[pe];
+        var keys = Object.keys(en.values).slice(0, 10);
+        html += `<div class="method-row text-muted-sm">${keys.map(function(k) { return esc(k) + "=" + en.values[k]; }).join(", ")}${Object.keys(en.values).length > 10 ? "..." : ""}</div>`;
+      }
+      html += '</details>';
+    }
+    // Source map findings
+    if (r.sourceMap) {
+      html += '<details class="discovery-inline"><summary class="discovery-summary">Source map (' + r.sourceMap.sources.length + ' files)</summary>';
+      if (r.sourceMap.protoFileNames.length) {
+        html += '<div class="card-meta"><strong>Proto files:</strong></div>';
+        for (var sp = 0; sp < r.sourceMap.protoFileNames.length; sp++) {
+          html += `<div class="method-row text-muted-sm">${esc(r.sourceMap.protoFileNames[sp])}</div>`;
+        }
+      }
+      if (r.sourceMap.apiClientFiles.length) {
+        html += '<div class="card-meta"><strong>API client files:</strong></div>';
+        for (var sa = 0; sa < r.sourceMap.apiClientFiles.length; sa++) {
+          html += `<div class="method-row text-muted-sm">${esc(r.sourceMap.apiClientFiles[sa])}</div>`;
+        }
+      }
+      html += '</details>';
+    }
+    if (r.sourceMapTypes && r.sourceMapTypes.length) {
+      html += '<details class="discovery-inline"><summary class="discovery-summary">Types (' + r.sourceMapTypes.length + ')</summary>';
+      for (var st = 0; st < r.sourceMapTypes.length; st++) {
+        var typ = r.sourceMapTypes[st];
+        html += `<div class="method-row"><span class="badge badge-ast">${esc(typ.kind)}</span> <span class="field-name">${esc(typ.name)}</span>`;
+        if (typ.fields.length) {
+          html += ' <span class="text-muted-sm">{' + typ.fields.map(function(f) { return esc(f.name); }).join(", ") + '}</span>';
+        }
+        html += '</div>';
+      }
+      html += '</details>';
+    }
+    html += '</div>';
+  }
+
+  container.innerHTML += html;
+  container.classList.remove("hidden");
 }
 
 function pbTreeToMap(nodes) {
@@ -761,6 +914,24 @@ function createFieldInput(
     labelHtml += ` <span class="field-required">required</span>`;
   if (fieldDef.label === "repeated")
     labelHtml += ` <span class="field-repeated">repeated</span>`;
+
+  // Stats-derived badges
+  if (fieldDef._requiredConfidence != null && !fieldDef.required) {
+    labelHtml += ` <span class="field-stat badge-optional">seen ${Math.round(fieldDef._requiredConfidence * 100)}%</span>`;
+  }
+  if (fieldDef._detectedEnum && fieldDef.enum) {
+    labelHtml += ` <span class="field-stat badge-enum-detected">enum detected</span>`;
+  }
+  if (fieldDef._defaultValue != null) {
+    labelHtml += ` <span class="field-stat badge-default">default: ${esc(String(fieldDef._defaultValue))}</span>`;
+  }
+  if (fieldDef._range) {
+    labelHtml += ` <span class="field-stat badge-range">${fieldDef._range.min}\u2013${fieldDef._range.max}</span>`;
+  }
+  if (fieldDef.format && fieldDef.format !== fieldDef.type) {
+    labelHtml += ` <span class="field-stat badge-format">${esc(fieldDef.format)}</span>`;
+  }
+
   labelEl.innerHTML = labelHtml;
   wrapper.appendChild(labelEl);
 

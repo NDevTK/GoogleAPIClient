@@ -2,7 +2,7 @@
 // extracts API keys, endpoints, auth headers, and coordinates
 // discovery document fetching + req2proto fallback probing.
 
-importScripts("lib/protobuf.js", "lib/discovery.js", "lib/req2proto.js");
+importScripts("lib/protobuf.js", "lib/discovery.js", "lib/req2proto.js", "lib/stats.js", "lib/chains.js", "lib/acorn.min.js", "lib/acorn-walk.min.js", "lib/ast.js", "lib/sourcemap.js");
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -130,6 +130,7 @@ function getTab(tabId) {
       probeResults: new Map(), // endpointKey → probe result
       scopes: new Map(), // service → string[] of required scopes
       requestLog: [], // Array of { id, url, method, service, timestamp, status, headers, responseHeaders, ... }
+      _valueIndex: createValueIndex(), // Chain engine: response value → source tracking
     });
     captureTabMeta(tabId);
   }
@@ -1224,6 +1225,129 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
       } catch (e) {}
     }
   }
+
+  // ─── Statistics collection ───────────────────────────────────────────────
+  if (!m._stats) m._stats = { requestCount: 0, params: {}, bodyFields: {} };
+  m._stats.requestCount++;
+
+  // Track query param values
+  if (!url.pathname.includes("batchexecute")) {
+    url.searchParams.forEach((value, name) => {
+      if (name === "key" || name === "api_key") return;
+      if (!m._stats.params[name]) m._stats.params[name] = createParamStats();
+      updateParamStats(m._stats.params[name], value);
+    });
+  }
+
+  // Apply stats-derived metadata back to parameters
+  applyStatsToMethod(m);
+
+  // ─── Chain detection ────────────────────────────────────────────────────
+  if (tab._valueIndex) {
+    const requestParams = {};
+    url.searchParams.forEach((v, k) => { requestParams[k] = v; });
+    // Extract body values for chain matching: use JSON body if available
+    let chainBody = {};
+    if (entry.isJson && entry.decodedBody) {
+      chainBody = entry.decodedBody;
+    } else if (entry.rawBodyB64) {
+      try {
+        const _cbText = new TextDecoder().decode(base64ToUint8(entry.rawBodyB64));
+        chainBody = JSON.parse(_cbText);
+      } catch (_) {}
+    }
+    const bodyValues = flattenObjectValues(chainBody);
+    const links = findChainLinks(tab._valueIndex, requestParams, bodyValues, methodId);
+    if (links.length) {
+      m._chains = mergeChainLinks(m._chains, links);
+      // Update outgoing chains on source methods
+      for (var li = 0; li < links.length; li++) {
+        var srcMethod = findMethodInDoc(doc, links[li].sourceMethodId);
+        if (srcMethod) {
+          if (!srcMethod._chains) srcMethod._chains = { incoming: [], outgoing: [] };
+          var outLink = {
+            targetMethodId: methodId,
+            paramName: links[li].paramName,
+            sourceFieldPath: links[li].sourceFieldPath,
+            lastSeen: links[li].lastSeen,
+          };
+          var outDupe = false;
+          for (var oi = 0; oi < srcMethod._chains.outgoing.length; oi++) {
+            var o = srcMethod._chains.outgoing[oi];
+            if (o.targetMethodId === methodId && o.paramName === links[li].paramName && o.sourceFieldPath === links[li].sourceFieldPath) {
+              o.observedCount = (o.observedCount || 1) + 1;
+              o.lastSeen = links[li].lastSeen;
+              outDupe = true;
+              break;
+            }
+          }
+          if (!outDupe) {
+            outLink.observedCount = 1;
+            srcMethod._chains.outgoing.push(outLink);
+          }
+        }
+      }
+    }
+  }
+}
+
+function applyStatsToMethod(m) {
+  if (!m._stats || m._stats.requestCount < STATS_MIN_OBS_FOR_REQUIRED) return;
+  const stats = m._stats;
+
+  for (const [name, paramStats] of Object.entries(stats.params)) {
+    if (!m.parameters[name]) continue;
+    const param = m.parameters[name];
+
+    // Required detection
+    const reqAnalysis = analyzeRequired(paramStats, stats.requestCount);
+    if (!param.customRequired) {
+      param.required = reqAnalysis.required;
+      param._requiredConfidence = reqAnalysis.confidence;
+    }
+
+    // Enum detection
+    const enumAnalysis = analyzeEnum(paramStats);
+    if (enumAnalysis.isEnum && !param.customEnum) {
+      param.enum = enumAnalysis.values;
+      param._detectedEnum = true;
+    }
+
+    // Default detection
+    const defaultAnalysis = analyzeDefault(paramStats);
+    if (defaultAnalysis.hasDefault) {
+      param._defaultValue = defaultAnalysis.value;
+      param._defaultConfidence = defaultAnalysis.confidence;
+    }
+
+    // Type narrowing
+    const narrowedFormat = analyzeFormat(paramStats);
+    if (narrowedFormat && param.type === "string") {
+      param.format = narrowedFormat;
+    }
+
+    // Numeric range
+    const range = analyzeRange(paramStats);
+    if (range) {
+      param._range = range;
+    }
+  }
+
+  // Correlations
+  stats.correlations = detectCorrelations(stats);
+}
+
+function findMethodInDoc(doc, methodId) {
+  if (!doc || !doc.resources) return null;
+  for (const rKey of Object.keys(doc.resources)) {
+    var methods = doc.resources[rKey]?.methods;
+    if (methods) {
+      for (var mKey in methods) {
+        if (methods[mKey].id === methodId) return methods[mKey];
+      }
+    }
+  }
+  return null;
 }
 
 function learnFromResponse(tabId, interfaceName, entry) {
@@ -1483,6 +1607,21 @@ function learnFromResponse(tabId, interfaceName, entry) {
       const newSchema = generateSchemaFromPbTree(tree, schemaName, doc.schemas);
       mergeSchemaInto(doc, schemaName, newSchema);
     } catch (e) {}
+  }
+
+  // ─── Chain value indexing ─────────────────────────────────────────────────
+  // Index response values so subsequent requests can detect chains
+  if (tab._valueIndex && textBody) {
+    const methodId = targetM.id || `${interfaceName.replace(/\//g, ".")}.${methodName}`;
+    try {
+      const parsed = JSON.parse(textBody);
+      indexResponseValues(tab._valueIndex, parsed, methodId);
+    } catch (_) {
+      // Not JSON — index the raw text body if it looks like a useful value
+      if (textBody.length >= 4 && textBody.length <= 500) {
+        indexResponseValues(tab._valueIndex, textBody, methodId);
+      }
+    }
   }
 }
 
@@ -2098,6 +2237,12 @@ async function fetchDiscoveryForService(
           }
 
           notifyPopup(tabId);
+          // Auto-trigger AST analysis once per tab+host
+          const astKey = tabId + ":" + hostname;
+          if (!_astAnalyzed.has(astKey)) {
+            _astAnalyzed.add(astKey);
+            analyzeBundlesForTab(tabId).catch(function() {});
+          }
           return;
         }
       } catch (err) {
@@ -2487,6 +2632,153 @@ async function handleResponseBody(tabId, msg) {
   }
 }
 
+// ─── AST Bundle Analysis ─────────────────────────────────────────────────────
+
+const _astAnalyzed = new Set(); // tabId:hostname — avoid re-analyzing
+
+async function analyzeBundlesForTab(tabId) {
+  const tab = getTab(tabId);
+
+  // Get script URLs from content script
+  let scriptUrls;
+  try {
+    scriptUrls = await chrome.tabs.sendMessage(tabId, { type: "GET_SCRIPT_URLS" });
+  } catch (_) {
+    return { error: "content_script_unavailable" };
+  }
+  if (!Array.isArray(scriptUrls) || !scriptUrls.length) {
+    return { error: "no_scripts", count: 0 };
+  }
+
+  var results = [];
+  for (var i = 0; i < scriptUrls.length; i++) {
+    var scriptUrl = scriptUrls[i];
+    try {
+      var resp = await pageContextFetch(tabId, scriptUrl, { method: "GET" }, new URL(scriptUrl).origin);
+      if (resp.error || !resp.body) continue;
+      var analysis = analyzeJSBundle(resp.body, scriptUrl);
+      if (analysis.protoEnums.length || analysis.protoFieldMaps.length ||
+          analysis.fetchCallSites.length || analysis.enumConstants.length ||
+          analysis.stringLiterals.length || analysis.sourceMapUrl) {
+        results.push(analysis);
+      }
+
+      // Source map recovery
+      if (analysis.sourceMapUrl) {
+        try {
+          var smUrl = analysis.sourceMapUrl;
+          if (!/^https?:\/\//i.test(smUrl)) {
+            // Resolve relative URL
+            var base = new URL(scriptUrl);
+            smUrl = new URL(smUrl, base).href;
+          }
+          var smResp = await pageContextFetch(tabId, smUrl, { method: "GET" }, new URL(smUrl).origin);
+          if (smResp.body && !smResp.error) {
+            var smJson = JSON.parse(smResp.body);
+            var smData = parseSourceMap(smJson);
+            analysis.sourceMap = smData;
+            // Extract types from embedded sources
+            if (smData.sourcesContent && smData.sourcesContent.length) {
+              analysis.sourceMapTypes = extractTypesFromSources(smData.sourcesContent, smData.sources);
+            }
+          }
+        } catch (_sm) {}
+      }
+    } catch (_) {}
+  }
+
+  tab._astResults = results;
+  mergeASTResultsIntoVDD(tab, results);
+  mergeToGlobal(tab);
+  notifyPopup(tabId);
+
+  return { count: results.length, scripts: scriptUrls.length };
+}
+
+function mergeASTResultsIntoVDD(tab, results) {
+  for (var r = 0; r < results.length; r++) {
+    var analysis = results[r];
+    var sourceHost = "";
+    try { sourceHost = new URL(analysis.sourceUrl).hostname; } catch (_) {}
+
+    // Find matching discovery doc for this host
+    var doc = null;
+    tab.discoveryDocs.forEach(function(entry, svc) {
+      if (entry.doc && svc.includes(sourceHost)) doc = entry.doc;
+    });
+    if (!doc) {
+      // Try global store
+      globalStore.discoveryDocs.forEach(function(entry, svc) {
+        if (entry.doc && svc.includes(sourceHost)) doc = entry.doc;
+      });
+    }
+    if (!doc) continue;
+
+    // Merge proto field maps: match by field number to existing schema properties
+    if (analysis.protoFieldMaps.length && doc.schemas) {
+      for (var schemaName in doc.schemas) {
+        var schema = doc.schemas[schemaName];
+        if (!schema.properties) continue;
+        for (var propName in schema.properties) {
+          var prop = schema.properties[propName];
+          if (!prop["x-field-number"]) continue;
+          for (var fm = 0; fm < analysis.protoFieldMaps.length; fm++) {
+            var fieldMap = analysis.protoFieldMaps[fm];
+            if (fieldMap.fieldNumber === prop["x-field-number"] && !prop.customName) {
+              prop._astName = fieldMap.fieldName;
+              prop._astAccessor = fieldMap.accessorName;
+            }
+          }
+        }
+      }
+    }
+
+    // Merge proto enums: enrich existing enum-type fields
+    if (analysis.protoEnums.length && doc.schemas) {
+      for (var eName in doc.schemas) {
+        var eSchema = doc.schemas[eName];
+        if (!eSchema.properties) continue;
+        for (var ePropName in eSchema.properties) {
+          var eProp = eSchema.properties[ePropName];
+          if (eProp.enum && !eProp.customEnum) {
+            // Try to match enum by value count similarity
+            for (var pe = 0; pe < analysis.protoEnums.length; pe++) {
+              var protoEnum = analysis.protoEnums[pe];
+              if (!protoEnum.isReverseMap) {
+                var enumKeys = Object.keys(protoEnum.values);
+                if (enumKeys.length === eProp.enum.length) {
+                  eProp._astEnum = protoEnum.values;
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Register fetch call sites as discovered endpoints
+    for (var fc = 0; fc < analysis.fetchCallSites.length; fc++) {
+      var callSite = analysis.fetchCallSites[fc];
+      try {
+        var csUrl = new URL(callSite.url);
+        var epKey = "AST " + callSite.method + " " + csUrl.pathname;
+        if (!tab.endpoints.has(epKey)) {
+          tab.endpoints.set(epKey, {
+            url: callSite.url,
+            method: callSite.method,
+            host: csUrl.hostname,
+            path: csUrl.pathname,
+            service: extractInterfaceName(csUrl),
+            source: "ast_analysis",
+            firstSeen: Date.now(),
+          });
+        }
+      } catch (_) {}
+    }
+  }
+}
+
 // ─── Message Handling ────────────────────────────────────────────────────────
 
 // Content scripts handle CONTENT_KEYS, CONTENT_ENDPOINTS, and RESPONSE_BODY.
@@ -2689,6 +2981,18 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
         msg.methodId,
       );
       sendResponse(result);
+      return;
+    }
+
+    case "ANALYZE_BUNDLES": {
+      if (tabId == null) return;
+      analyzeBundlesForTab(tabId).then(sendResponse);
+      return true;
+    }
+
+    case "GET_AST_RESULTS": {
+      if (tabId == null) return;
+      sendResponse(getTab(tabId)._astResults || null);
       return;
     }
 
@@ -3075,14 +3379,20 @@ function resolveEndpointSchema(tabId, endpointKey, service, methodId) {
         parameters = {};
         for (const [pName, pDef] of Object.entries(match.method.parameters)) {
           parameters[pName] = {
-            name: pDef.name || pName, // Add name property!
-            customName: !!pDef.customName, // Add customName flag!
+            name: pDef.name || pName,
+            customName: !!pDef.customName,
             type: pDef.type || "string",
             location: pDef.location || "query",
             required: !!pDef.required,
             description: pDef.description || "",
             format: pDef.format || null,
             enum: pDef.enum || null,
+            // Stats-derived metadata
+            _requiredConfidence: pDef._requiredConfidence ?? null,
+            _detectedEnum: !!pDef._detectedEnum,
+            _defaultValue: pDef._defaultValue ?? null,
+            _defaultConfidence: pDef._defaultConfidence ?? null,
+            _range: pDef._range || null,
           };
         }
       }
@@ -3164,6 +3474,15 @@ function resolveEndpointSchema(tabId, endpointKey, service, methodId) {
     ];
   }
 
+  // 4. Collect chain data from the raw method object
+  let chains = null;
+  if (discoveryEntry?.doc && methodId) {
+    const rawMatch = findMethodById(discoveryEntry.doc, methodId);
+    if (rawMatch?.method?._chains) {
+      chains = rawMatch.method._chains;
+    }
+  }
+
   return {
     source,
     method: discoveryMethod,
@@ -3172,6 +3491,7 @@ function resolveEndpointSchema(tabId, endpointKey, service, methodId) {
       ? { schemaName: bodySchemaName, fields: bodyFields }
       : null,
     contentTypes,
+    chains,
     endpoint: ep
       ? {
           url: ep.url,
@@ -3787,13 +4107,19 @@ function mergeVirtualParts(newDoc, oldDoc) {
         if (!newRes[rName]) continue;
         for (const [mName, oldM] of Object.entries(r.methods || {})) {
           const newM = newRes[rName]?.methods?.[mName];
-          if (!newM || !oldM.parameters) continue;
-          for (const [pName, pVal] of Object.entries(oldM.parameters)) {
-            if (pVal.customName && newM.parameters?.[pName]) {
-              newM.parameters[pName].name = pVal.name;
-              newM.parameters[pName].customName = true;
+          if (!newM) continue;
+          // Carry parameter renames
+          if (oldM.parameters) {
+            for (const [pName, pVal] of Object.entries(oldM.parameters)) {
+              if (pVal.customName && newM.parameters?.[pName]) {
+                newM.parameters[pName].name = pVal.name;
+                newM.parameters[pName].customName = true;
+              }
             }
           }
+          // Carry stats and chains
+          if (oldM._stats && !newM._stats) newM._stats = oldM._stats;
+          if (oldM._chains && !newM._chains) newM._chains = oldM._chains;
         }
       }
     }

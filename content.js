@@ -190,6 +190,12 @@
       sendResponse({ ok: true });
       return;
     }
+    if (msg.type === "GET_SCRIPT_URLS") {
+      var scripts = [];
+      document.querySelectorAll("script[src]").forEach(function(s) { scripts.push(s.src); });
+      sendResponse(scripts);
+      return;
+    }
     if (msg.type !== "PAGE_FETCH") return;
     handlePageFetch(msg).then(sendResponse);
     return true; // async sendResponse
