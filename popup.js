@@ -366,6 +366,60 @@ async function populateTabFilter() {
 // ─── Render ──────────────────────────────────────────────────────────────────
 
 function render() {
+  // Debug: dump state on every render
+  if (tabData) {
+    var epKeys = tabData.endpoints ? Object.keys(tabData.endpoints) : [];
+    var svcNames = tabData.discoveryDocs ? Object.keys(tabData.discoveryDocs) : [];
+    var methods = [];
+    for (var i = 0; i < svcNames.length; i++) {
+      var sd = tabData.discoveryDocs[svcNames[i]];
+      if (sd.status === "found" && sd.summary && sd.summary.resources) {
+        var rKeys = Object.keys(sd.summary.resources);
+        for (var j = 0; j < rKeys.length; j++) {
+          var rMethods = sd.summary.resources[rKeys[j]];
+          for (var k = 0; k < rMethods.length; k++) {
+            methods.push(rMethods[k].httpMethod + " " + rMethods[k].id);
+          }
+        }
+      }
+    }
+    console.debug("[popup:render] tabId=%s | %d endpoints, %d services, %d methods",
+      currentTabId, epKeys.length, svcNames.length, methods.length);
+    for (var ei = 0; ei < epKeys.length; ei++) {
+      var ep = tabData.endpoints[epKeys[ei]];
+      console.debug("[popup:render]   EP: %s %s | source=%s host=%s service=%s | key=%s",
+        ep.method, ep.path || ep.url, ep.source, ep.host || "?", ep.service || "?", epKeys[ei]);
+    }
+    for (var i2 = 0; i2 < svcNames.length; i2++) {
+      var sd2 = tabData.discoveryDocs[svcNames[i2]];
+      if (sd2.status !== "found" || !sd2.doc || !sd2.doc.resources) continue;
+      var resKeys = Object.keys(sd2.doc.resources);
+      for (var j2 = 0; j2 < resKeys.length; j2++) {
+        var resMethods = sd2.doc.resources[resKeys[j2]].methods;
+        if (!resMethods) continue;
+        var mKeys = Object.keys(resMethods);
+        for (var k2 = 0; k2 < mKeys.length; k2++) {
+          var mObj = resMethods[mKeys[k2]];
+          var paramStr = "";
+          if (mObj.parameters) {
+            var pKeys = Object.keys(mObj.parameters);
+            for (var p2 = 0; p2 < pKeys.length; p2++) {
+              var pp = mObj.parameters[pKeys[p2]];
+              paramStr += (paramStr ? ", " : "") + pKeys[p2] + ":" + (pp.location || "?");
+              if (pp.enum) paramStr += " enum=[" + pp.enum.join(",") + "]";
+              if (pp.type) paramStr += " type=" + pp.type;
+            }
+          }
+          var reqStr = mObj.request ? JSON.stringify(mObj.request).slice(0, 120) : "null";
+          console.debug("[popup:render]   METHOD: %s %s | path=%s | params={%s} | req=%s",
+            mObj.httpMethod, mObj.id, mObj.path || "?", paramStr, reqStr);
+        }
+      }
+    }
+  } else {
+    console.debug("[popup:render] tabData is null — tabId=%s", currentTabId);
+  }
+
   renderDataPanel();
   renderSendPanel();
   renderResponsePanel();

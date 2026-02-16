@@ -9,9 +9,11 @@
 <pre id="log" style="background:#f4f4f4;padding:12px;max-height:400px;overflow:auto"></pre>
 
 <script>
-// --- All API code lives here for AST to analyze, but nothing executes until the button is clicked ---
+// ══════════════════════════════════════════════════════════════════════════════
+// BASIC — Direct fetch patterns
+// ══════════════════════════════════════════════════════════════════════════════
 
-// 1. Direct fetch with literal URL
+// 1. Direct literal URL
 function test1() {
   fetch("https://api.example.com/v1/users", {
     method: "GET",
@@ -28,20 +30,20 @@ function test2() {
   });
 }
 
-// 3. Variable URL construction
+// 3. Variable concatenation
 function test3() {
   var API_BASE = "https://api.example.com";
   var endpoint = API_BASE + "/v1/search";
   fetch(endpoint, { method: "GET" });
 }
 
-// 4. Template literal URL
+// 4. Template literal with interpolation
 function test4() {
   var userId = "user_42";
   fetch(`https://api.example.com/v1/users/${userId}/profile`);
 }
 
-// 5. Object property URL
+// 5. Object property as URL and method
 function test5() {
   var config = {
     apiUrl: "https://api.example.com/v1/settings",
@@ -50,7 +52,24 @@ function test5() {
   fetch(config.apiUrl, { method: config.method, headers: { "X-Custom": "value" } });
 }
 
-// 6. Wrapper function (inter-procedural)
+// 6. XHR
+function test6() {
+  var xhr = new XMLHttpRequest();
+  xhr.open("GET", "https://api.example.com/v1/status");
+  xhr.setRequestHeader("Accept", "application/json");
+  xhr.send();
+}
+
+// 7. window.fetch
+function test7() {
+  window.fetch("https://api.example.com/v1/health", { method: "HEAD" });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INTER-PROCEDURAL — Wrappers, closures, this-binding
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 8. Simple wrapper with method + path params
 function apiRequest(method, path, body) {
   return fetch("https://api.example.com" + path, {
     method: method,
@@ -58,13 +77,13 @@ function apiRequest(method, path, body) {
     body: body ? JSON.stringify(body) : undefined
   });
 }
-function test6() {
+function test8() {
   apiRequest("POST", "/v1/orders", { item: "widget", qty: 3 });
   apiRequest("DELETE", "/v1/orders/123");
   apiRequest("GET", "/v1/inventory");
 }
 
-// 7. Object method wrapper
+// 9. Object method with this.base
 var client = {
   base: "https://api.example.com/v2",
   get: function(path) {
@@ -74,29 +93,12 @@ var client = {
     return fetch(this.base + path, { method: "POST", body: JSON.stringify(data) });
   }
 };
-function test7() {
+function test9() {
   client.get("/products");
   client.post("/products", { name: "gadget", price: 9.99 });
 }
 
-// 8. XHR call
-function test8() {
-  var xhr = new XMLHttpRequest();
-  xhr.open("GET", "https://api.example.com/v1/status");
-  xhr.setRequestHeader("Accept", "application/json");
-  xhr.send();
-}
-
-// 9. Switch/value constraints
-function loadResource(type) {
-  switch(type) {
-    case "users": return fetch("https://api.example.com/v1/users");
-    case "posts": return fetch("https://api.example.com/v1/posts");
-    case "comments": return fetch("https://api.example.com/v1/comments");
-  }
-}
-
-// 10. Closure-style module with assigned method
+// 10. Closure-style assigned method
 var analytics = {};
 analytics.track = function(event) {
   return fetch("https://analytics.example.com/v1/events", {
@@ -109,8 +111,144 @@ function test10() {
   analytics.track("page_view");
 }
 
-// 11. Proto enum + field map patterns (no network call — structural detection only)
+// 11. Nested wrapper chain (2 levels: apiGet → makeRequest → fetch)
+function makeRequest(url, opts) {
+  return fetch(url, opts);
+}
+function apiGet(path) {
+  return makeRequest("https://api.example.com" + path, { method: "GET" });
+}
+function test11() {
+  apiGet("/v1/notifications");
+  apiGet("/v1/preferences");
+}
+
+// 12. Factory function returning a configured fetcher
+function createClient(baseUrl) {
+  return {
+    get: function(path) {
+      return fetch(baseUrl + path);
+    },
+    post: function(path, data) {
+      return fetch(baseUrl + path, { method: "POST", body: JSON.stringify(data) });
+    }
+  };
+}
+var paymentsApi = createClient("https://payments.example.com/v1");
+function test12() {
+  paymentsApi.get("/transactions");
+  paymentsApi.post("/charge", { amount: 1000, currency: "usd" });
+}
+
+// 13. Prototype-based class with methods
+function ApiService(base) {
+  this.base = base;
+}
+ApiService.prototype.fetch = function(path, method) {
+  return fetch(this.base + path, { method: method || "GET" });
+};
+var svc = new ApiService("https://api.example.com/v3");
+function test13() {
+  svc.fetch("/items", "GET");
+  svc.fetch("/items", "POST");
+}
+
+// 14. Multiple callers to one wrapper with different methods
+function rpc(service, method, payload) {
+  return fetch("https://api.example.com/rpc/" + service + "/" + method, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+function test14() {
+  rpc("auth", "login", { user: "admin", pass: "secret" });
+  rpc("auth", "refresh", { token: "abc" });
+  rpc("billing", "invoice", { id: 42 });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MINIFIED PATTERNS — Simulating Closure/webpack output
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 15. Single-letter variables (minified style)
+function test15() {
+  var a = "https://api.example.com/v1/minified";
+  var b = { method: "PATCH", headers: { "X-Request-Id": "r123" } };
+  fetch(a, b);
+}
+
+// 16. Chained ternary URL selection
+function test16() {
+  var env = "prod";
+  var base = env === "prod" ? "https://api.example.com" : "https://staging.example.com";
+  fetch(base + "/v1/config");
+}
+
+// 17. IIFE module pattern (common in bundles)
+var mod = (function() {
+  var BASE = "https://api.example.com/internal";
+  return {
+    ping: function() { return fetch(BASE + "/ping"); },
+    sync: function(data) {
+      return fetch(BASE + "/sync", {
+        method: "POST",
+        body: JSON.stringify(data)
+      });
+    }
+  };
+})();
+function test17() {
+  mod.ping();
+  mod.sync({ ts: Date.now() });
+}
+
+// 18. Reassigned variable URL
+function test18() {
+  var url = "https://api.example.com/v1/default";
+  var mode = "custom";
+  if (mode === "custom") {
+    url = "https://api.example.com/v1/custom";
+  }
+  fetch(url);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VALUE CONSTRAINTS — Switch, includes, equality chains
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 19. Switch/case constraints
+function loadResource(type) {
+  switch(type) {
+    case "users": return fetch("https://api.example.com/v1/users");
+    case "posts": return fetch("https://api.example.com/v1/posts");
+    case "comments": return fetch("https://api.example.com/v1/comments");
+  }
+}
+
+// 20. .includes() constraint
+var ALLOWED_FORMATS = ["json", "xml", "csv", "protobuf"];
+function exportData(format) {
+  if (ALLOWED_FORMATS.includes(format)) {
+    fetch("https://api.example.com/v1/export?format=" + format);
+  }
+}
+
+// 21. Equality chain constraint
+function processAction(action) {
+  if (action === "approve" || action === "reject" || action === "defer") {
+    fetch("https://api.example.com/v1/actions/" + action, { method: "POST" });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PROTO DETECTION — Enums and field maps
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 22. Proto enum
 var EventType = { UNKNOWN: 0, PAGE_VIEW: 1, CLICK: 2, SCROLL: 3, SUBMIT: 4 };
+
+// 23. Proto field map
 function EventMessage() {}
 EventMessage.prototype.getType = function() {
   return jspb.Message.getField(this, 1);
@@ -122,61 +260,441 @@ EventMessage.prototype.getTimestamp = function() {
   return jspb.Message.getField(this, 3);
 };
 
-// 12. Includes constraint
-var ALLOWED_FORMATS = ["json", "xml", "csv", "protobuf"];
-function exportData(format) {
-  if (ALLOWED_FORMATS.includes(format)) {
-    fetch("https://api.example.com/v1/export?format=" + format);
+// 24. Second proto message to test multiple detection
+var Priority = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
+
+function TaskMessage() {}
+TaskMessage.prototype.getTitle = function() {
+  return jspb.Message.getField(this, 1);
+};
+TaskMessage.prototype.getPriority = function() {
+  return jspb.Message.getField(this, 2);
+};
+TaskMessage.prototype.getAssignee = function() {
+  return jspb.Message.getField(this, 3);
+};
+TaskMessage.prototype.getDueDate = function() {
+  return jspb.Message.getField(this, 4);
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GOOGLE-STYLE — Patterns from real Closure-compiled bundles
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 25. Closure goog.module pattern — assigned from IIFE
+var goog$module$search = {};
+goog$module$search.execute = function(query, opts) {
+  return fetch("https://www.googleapis.com/search/v1/query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ q: query, options: opts })
+  });
+};
+function test25() {
+  goog$module$search.execute("hello world", { lang: "en" });
+}
+
+// 26. Nested config object
+function test26() {
+  var cfg = {
+    endpoints: {
+      upload: "https://storage.example.com/v1/upload",
+      download: "https://storage.example.com/v1/download"
+    }
+  };
+  fetch(cfg.endpoints.upload, { method: "POST", body: "file-data" });
+  fetch(cfg.endpoints.download);
+}
+
+// 27. URL built from multiple parts
+function test27() {
+  var proto = "https://";
+  var host = "api.example.com";
+  var version = "/v4";
+  var resource = "/metrics";
+  fetch(proto + host + version + resource);
+}
+
+// 28. Conditional method based on data presence
+function upsert(id, data) {
+  var method = id ? "PUT" : "POST";
+  var url = id
+    ? "https://api.example.com/v1/records/" + id
+    : "https://api.example.com/v1/records";
+  fetch(url, { method: method, body: JSON.stringify(data) });
+}
+function test28() {
+  upsert(null, { name: "new" });
+  upsert("rec_123", { name: "updated" });
+}
+
+// 29. Options spread from base config
+function test29() {
+  var baseOpts = { headers: { "X-App": "test", "Accept": "application/json" } };
+  fetch("https://api.example.com/v1/whoami", Object.assign({ method: "GET" }, baseOpts));
+}
+
+// 30. Multiple XHR patterns
+function test30() {
+  var x1 = new XMLHttpRequest();
+  x1.open("POST", "https://telemetry.example.com/v1/events");
+  x1.setRequestHeader("Content-Type", "application/json");
+  x1.send(JSON.stringify({ type: "load" }));
+
+  var x2 = new XMLHttpRequest();
+  x2.open("PUT", "https://telemetry.example.com/v1/session");
+  x2.send();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// JQUERY-STYLE — Mock jQuery wrapping fetch, tests $.ajax/$.get/$.post patterns
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Minimal jQuery mock that wraps fetch (real jQuery wraps XHR)
+var jQuery = (function() {
+  function ajax(settings) {
+    var url = typeof settings === "string" ? settings : settings.url;
+    var method = (settings.type || settings.method || "GET").toUpperCase();
+    var headers = settings.headers || {};
+    if (settings.contentType !== false) {
+      headers["Content-Type"] = settings.contentType || "application/x-www-form-urlencoded";
+    }
+    var body = undefined;
+    if (settings.data) {
+      body = typeof settings.data === "string" ? settings.data : JSON.stringify(settings.data);
+    }
+    return fetch(url, { method: method, headers: headers, body: body });
+  }
+  function get(url, data, callback) {
+    return ajax({ url: url, type: "GET", data: data, success: callback });
+  }
+  function post(url, data, callback) {
+    return ajax({ url: url, type: "POST", data: data, success: callback });
+  }
+  function getJSON(url, data, callback) {
+    return ajax({ url: url, type: "GET", dataType: "json", data: data, success: callback });
+  }
+  var $ = function(sel) { return document.querySelector(sel); };
+  $.ajax = ajax;
+  $.get = get;
+  $.post = post;
+  $.getJSON = getJSON;
+  return $;
+})();
+var $ = jQuery;
+
+// 31. $.ajax with full config
+function test31() {
+  $.ajax({
+    url: "https://api.example.com/v1/jquery/users",
+    type: "GET",
+    headers: { "X-Requested-With": "XMLHttpRequest" }
+  });
+}
+
+// 32. $.get shorthand
+function test32() {
+  $.get("https://api.example.com/v1/jquery/posts");
+}
+
+// 33. $.post with data
+function test33() {
+  $.post("https://api.example.com/v1/jquery/messages", { text: "hello", to: "user1" });
+}
+
+// 34. $.getJSON
+function test34() {
+  $.getJSON("https://api.example.com/v1/jquery/config");
+}
+
+// 35. jQuery IIFE module pattern — $ passed as closure parameter
+var jqModule = (function($) {
+  return {
+    load: function() {
+      return $.ajax({
+        url: "https://api.example.com/v1/jquery/dashboard",
+        type: "GET"
+      });
+    },
+    save: function(data) {
+      return $.post("https://api.example.com/v1/jquery/save", data);
+    }
+  };
+})(jQuery);
+function test35() {
+  jqModule.load();
+  jqModule.save({ key: "value" });
+}
+
+// 36. $.ajax with beforeSend and dynamic URL
+function test36() {
+  var resource = "comments";
+  $.ajax({
+    url: "https://api.example.com/v1/jquery/" + resource,
+    type: "DELETE",
+    beforeSend: function(xhr) { xhr.setRequestHeader("X-CSRF", "token"); }
+  });
+}
+
+// 37. jQuery-style XHR mock (real jQuery uses XHR internally, not fetch)
+var jQueryXHR = (function() {
+  function ajax(settings) {
+    var xhr = new XMLHttpRequest();
+    var method = (settings.type || settings.method || "GET").toUpperCase();
+    xhr.open(method, settings.url);
+    if (settings.headers) {
+      for (var h in settings.headers) xhr.setRequestHeader(h, settings.headers[h]);
+    }
+    if (settings.contentType !== false) {
+      xhr.setRequestHeader("Content-Type", settings.contentType || "application/x-www-form-urlencoded");
+    }
+    var body = null;
+    if (settings.data) {
+      body = typeof settings.data === "string" ? settings.data : JSON.stringify(settings.data);
+    }
+    xhr.send(body);
+    return xhr;
+  }
+  return { ajax: ajax };
+})();
+function test37() {
+  jQueryXHR.ajax({
+    url: "https://api.example.com/v1/jqxhr/search",
+    type: "POST",
+    contentType: "application/json",
+    data: { query: "test", page: 1 },
+    headers: { "X-Request-Id": "abc123" }
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// OTHER LIBRARIES — Axios-style, superagent-style, other browser APIs
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 38. Axios-style instance methods
+var axios = {
+  request: function(config) {
+    return fetch(config.url, {
+      method: (config.method || "GET").toUpperCase(),
+      headers: config.headers || {},
+      body: config.data ? JSON.stringify(config.data) : undefined
+    });
+  },
+  get: function(url, config) {
+    return this.request({ url: url, method: "GET", headers: config && config.headers || {} });
+  },
+  post: function(url, data, config) {
+    return this.request({ url: url, method: "POST", data: data, headers: config && config.headers || {} });
+  },
+  put: function(url, data) {
+    return this.request({ url: url, method: "PUT", data: data });
+  },
+  delete: function(url) {
+    return this.request({ url: url, method: "DELETE" });
+  }
+};
+function test38() {
+  axios.get("https://api.example.com/v1/axios/items", { headers: { "Accept": "application/json" } });
+  axios.post("https://api.example.com/v1/axios/items", { name: "widget", price: 42 });
+  axios.put("https://api.example.com/v1/axios/items/123", { name: "updated" });
+  axios.delete("https://api.example.com/v1/axios/items/456");
+}
+
+// 39. Superagent-style fluent chain — internally builds up config then calls fetch
+function Request(method, url) {
+  this._method = method;
+  this._url = url;
+  this._headers = {};
+  this._body = null;
+}
+Request.prototype.set = function(key, val) { this._headers[key] = val; return this; };
+Request.prototype.send = function(data) { this._body = data; return this; };
+Request.prototype.end = function(callback) {
+  var opts = { method: this._method, headers: this._headers };
+  if (this._body) opts.body = JSON.stringify(this._body);
+  return fetch(this._url, opts);
+};
+var superagent = {
+  get: function(url) { return new Request("GET", url); },
+  post: function(url) { return new Request("POST", url); }
+};
+function test39() {
+  superagent.get("https://api.example.com/v1/agent/tasks")
+    .set("Authorization", "Bearer tok123")
+    .end();
+  superagent.post("https://api.example.com/v1/agent/tasks")
+    .set("Content-Type", "application/json")
+    .send({ title: "New task", priority: "high" })
+    .end();
+}
+
+// 40. navigator.sendBeacon — browser API for analytics/telemetry
+function test40() {
+  navigator.sendBeacon(
+    "https://analytics.example.com/v1/beacon",
+    JSON.stringify({ event: "page_exit", duration: 30000 })
+  );
+}
+
+// 41. EventSource — Server-Sent Events
+function test41() {
+  var es = new EventSource("https://api.example.com/v1/stream/notifications");
+  es.onmessage = function(e) { /* handle */ };
+}
+
+// 42. Image pixel beacon (common in tracking)
+function test42() {
+  var img = new Image();
+  img.src = "https://analytics.example.com/v1/pixel?event=impression&campaign=summer";
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ADVANCED DATA FLOW — Loops, iteration, dynamic dispatch
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 43. Array of configs iterated with for loop
+function test43() {
+  var endpoints = [
+    { url: "https://api.example.com/v1/batch/users", method: "GET" },
+    { url: "https://api.example.com/v1/batch/roles", method: "GET" },
+    { url: "https://api.example.com/v1/batch/permissions", method: "POST" }
+  ];
+  for (var i = 0; i < endpoints.length; i++) {
+    fetch(endpoints[i].url, { method: endpoints[i].method });
   }
 }
 
-// 13. Equality chain constraint
-function processAction(action) {
-  if (action === "approve" || action === "reject" || action === "defer") {
-    fetch("https://api.example.com/v1/actions/" + action, { method: "POST" });
+// 44. URL map with Object.keys
+function test44() {
+  var urls = {
+    profile: "https://api.example.com/v1/map/profile",
+    settings: "https://api.example.com/v1/map/settings",
+    billing: "https://api.example.com/v1/map/billing"
+  };
+  var keys = Object.keys(urls);
+  for (var i = 0; i < keys.length; i++) {
+    fetch(urls[keys[i]]);
   }
 }
 
-// 14. Nested wrapper chain
-function makeRequest(url, opts) {
+// 45. Fetch wrapper that adds auth (middleware/interceptor pattern)
+function authFetch(url, options) {
+  var opts = options || {};
+  if (!opts.headers) opts.headers = {};
+  opts.headers["Authorization"] = "Bearer " + "globalToken123";
   return fetch(url, opts);
 }
-function apiGet(path) {
-  return makeRequest("https://api.example.com" + path, { method: "GET" });
-}
-function test14() {
-  apiGet("/v1/notifications");
-  apiGet("/v1/preferences");
+function test45() {
+  authFetch("https://api.example.com/v1/auth/me");
+  authFetch("https://api.example.com/v1/auth/permissions", { method: "POST", body: JSON.stringify({ scope: "admin" }) });
 }
 
-// 15. window.fetch
-function test15() {
-  window.fetch("https://api.example.com/v1/health", { method: "HEAD" });
+// 46. Retry wrapper — same fetch call repeated
+function fetchWithRetry(url, opts, maxRetries) {
+  return fetch(url, opts);
+}
+function test46() {
+  fetchWithRetry("https://api.example.com/v1/retry/data", { method: "GET" }, 3);
+}
+
+// 47. Config-driven API client — URLs from config object, method from call
+var apiConfig = {
+  usersUrl: "https://api.example.com/v1/cfg/users",
+  ordersUrl: "https://api.example.com/v1/cfg/orders",
+  productsUrl: "https://api.example.com/v1/cfg/products"
+};
+function apiCall(configKey, method, body) {
+  return fetch(apiConfig[configKey], {
+    method: method,
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined
+  });
+}
+function test47() {
+  apiCall("usersUrl", "GET");
+  apiCall("ordersUrl", "POST", { item: "thing" });
+  apiCall("productsUrl", "GET");
+}
+
+// 48. Higher-order function — returns a configured fetcher
+function createEndpoint(method, url) {
+  return function(data) {
+    return fetch(url, {
+      method: method,
+      headers: { "Content-Type": "application/json" },
+      body: data ? JSON.stringify(data) : undefined
+    });
+  };
+}
+var getUsers = createEndpoint("GET", "https://api.example.com/v1/hof/users");
+var createUser = createEndpoint("POST", "https://api.example.com/v1/hof/users");
+var deleteAccount = createEndpoint("DELETE", "https://api.example.com/v1/hof/account");
+function test48() {
+  getUsers();
+  createUser({ name: "Alice", email: "alice@example.com" });
+  deleteAccount();
 }
 
 // --- Button handler: fire everything ---
 document.getElementById("fire").onclick = function() {
   var log = document.getElementById("log");
   log.textContent = "Firing all requests...\n";
-  try {
-    test1(); log.textContent += "1. GET /v1/users\n";
-    test2(); log.textContent += "2. POST /v1/documents\n";
-    test3(); log.textContent += "3. GET /v1/search\n";
-    test4(); log.textContent += "4. GET /v1/users/user_42/profile\n";
-    test5(); log.textContent += "5. PUT /v1/settings\n";
-    test6(); log.textContent += "6. POST/DELETE/GET /v1/orders, /v1/inventory\n";
-    test7(); log.textContent += "7. GET/POST /v2/products\n";
-    test8(); log.textContent += "8. XHR GET /v1/status\n";
-    loadResource("users"); log.textContent += "9. Switch: GET /v1/users\n";
-    test10(); log.textContent += "10. POST analytics.example.com/v1/events\n";
-    exportData("json"); log.textContent += "12. GET /v1/export?format=json\n";
-    processAction("approve"); log.textContent += "13. POST /v1/actions/approve\n";
-    test14(); log.textContent += "14. GET /v1/notifications, /v1/preferences\n";
-    test15(); log.textContent += "15. HEAD /v1/health\n";
-    log.textContent += "\nDone! Check popup for network-learned endpoints.";
-  } catch(e) {
-    log.textContent += "Error: " + e.message + "\n";
+  var tests = [
+    ["1.  Direct GET", test1],
+    ["2.  POST + body", test2],
+    ["3.  Variable concat", test3],
+    ["4.  Template literal", test4],
+    ["5.  Object property", test5],
+    ["6.  XHR", test6],
+    ["7.  HEAD window.fetch", test7],
+    ["8.  Wrapper (inter-proc)", test8],
+    ["9.  this.base method", test9],
+    ["10. Closure assigned", test10],
+    ["11. Nested 2-level", test11],
+    ["12. Factory client", test12],
+    ["13. Prototype class", test13],
+    ["14. Multi-caller RPC", test14],
+    ["15. Minified vars", test15],
+    ["16. Ternary URL", test16],
+    ["17. IIFE module", test17],
+    ["18. Reassigned URL", test18],
+    ["19. Switch", function() { loadResource("users"); }],
+    ["20. Includes", function() { exportData("json"); }],
+    ["21. Equality chain", function() { processAction("approve"); }],
+    ["25. Closure module", test25],
+    ["26. Nested config", test26],
+    ["27. Multi-part URL", test27],
+    ["28. Conditional upsert", test28],
+    ["29. Options spread", test29],
+    ["30. Multi XHR", test30],
+    ["31. $.ajax config", test31],
+    ["32. $.get", test32],
+    ["33. $.post", test33],
+    ["34. $.getJSON", test34],
+    ["35. jQuery module", test35],
+    ["36. $.ajax dynamic", test36],
+    ["37. jQueryXHR mock", test37],
+    ["38. Axios-style", test38],
+    ["39. Superagent chain", test39],
+    ["40. sendBeacon", test40],
+    ["41. EventSource", test41],
+    ["42. Image pixel", test42],
+    ["43. Array loop", test43],
+    ["44. URL map", test44],
+    ["45. Auth wrapper", test45],
+    ["46. Retry wrapper", test46],
+    ["47. Config-driven", test47],
+    ["48. Higher-order fn", test48],
+  ];
+  for (var i = 0; i < tests.length; i++) {
+    try {
+      tests[i][1]();
+      log.textContent += "  OK: " + tests[i][0] + "\n";
+    } catch(e) {
+      log.textContent += "  ERR: " + tests[i][0] + " — " + e.message + "\n";
+    }
   }
+  log.textContent += "\nDone! Check popup for network-learned endpoints.";
 };
 </script>
 </body>

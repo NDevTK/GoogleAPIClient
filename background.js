@@ -1068,11 +1068,37 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
   const doc = docEntry.doc;
   if (!doc.resources.learned) doc.resources.learned = { methods: {} };
 
-  const { methodName, methodId } = calculateMethodMetadata(url, interfaceName);
-  entry.methodId = methodId;
+  const { methodName: baseMethodName } = calculateMethodMetadata(url, interfaceName);
+  const qualifiedName = method.toLowerCase() + "_" + baseMethodName;
 
   // If this method was already probed with richer schema, update it there instead
-  const probedMethod = doc.resources.probed?.methods?.[methodName];
+  const probedMethod = doc.resources.probed?.methods?.[baseMethodName];
+
+  // Resolve method name — disambiguate when different HTTP methods hit the same path
+  let methodName;
+  const existingBase = doc.resources.learned.methods[baseMethodName];
+  const existingQualified = doc.resources.learned.methods[qualifiedName];
+
+  if (existingQualified) {
+    // Already disambiguated from a prior collision — use qualified name
+    methodName = qualifiedName;
+  } else if (existingBase && existingBase.httpMethod !== method && !probedMethod) {
+    // Collision: different HTTP method to same path — rename existing, qualify new
+    const existQualName = existingBase.httpMethod.toLowerCase() + "_" + baseMethodName;
+    if (!doc.resources.learned.methods[existQualName]) {
+      existingBase.id = `${interfaceName.replace(/\//g, ".")}.${existQualName}`;
+      doc.resources.learned.methods[existQualName] = existingBase;
+    }
+    delete doc.resources.learned.methods[baseMethodName];
+    methodName = qualifiedName;
+  } else {
+    // No collision — use base name
+    methodName = baseMethodName;
+  }
+
+  const methodId = `${interfaceName.replace(/\//g, ".")}.${methodName}`;
+  entry.methodId = methodId;
+
   if (!doc.resources.learned.methods[methodName] && !probedMethod) {
     doc.resources.learned.methods[methodName] = {
       id: methodId,
@@ -1366,7 +1392,7 @@ function learnFromResponse(tabId, interfaceName, entry) {
 
   const tab = getTab(tabId);
   const url = new URL(entry.url);
-  const { methodName } = calculateMethodMetadata(url, interfaceName);
+  const { methodName: baseMethodName } = calculateMethodMetadata(url, interfaceName);
   // Check tab-level first, then fall back to globalStore (survives SW restarts)
   let docEntry = tab.discoveryDocs.get(interfaceName);
   if (!docEntry?.doc) {
@@ -1379,8 +1405,11 @@ function learnFromResponse(tabId, interfaceName, entry) {
   }
   if (!docEntry || !docEntry.doc) return;
   const doc = docEntry.doc;
-  const m = doc.resources.learned
-    ? doc.resources.learned.methods[methodName]
+  // Find method — try base name first, then HTTP-qualified name (from disambiguation)
+  const qualifiedName = entry.method ? entry.method.toLowerCase() + "_" + baseMethodName : null;
+  const learned = doc.resources.learned?.methods;
+  const m = learned
+    ? (learned[baseMethodName] || (qualifiedName ? learned[qualifiedName] : null))
     : null;
   // Also check probed methods
   const proM = doc.resources.probed
@@ -2916,8 +2945,11 @@ function mergeASTResultsIntoVDD(tab, results, tabId) {
         if (vddDocEntry && vddDocEntry.doc && callSite.params) {
           var vddUrl = new URL(syntheticUrl);
           var meta = calculateMethodMetadata(vddUrl, interfaceName);
-          var vddM = (vddDocEntry.doc.resources.probed && vddDocEntry.doc.resources.probed.methods && vddDocEntry.doc.resources.probed.methods[meta.methodName])
-            || (vddDocEntry.doc.resources.learned && vddDocEntry.doc.resources.learned.methods && vddDocEntry.doc.resources.learned.methods[meta.methodName]);
+          var qualName = callSite.method ? callSite.method.toLowerCase() + "_" + meta.methodName : null;
+          var vddLearned = vddDocEntry.doc.resources.learned;
+          var vddProbed = vddDocEntry.doc.resources.probed;
+          var vddM = (vddProbed && vddProbed.methods && vddProbed.methods[meta.methodName])
+            || (vddLearned && vddLearned.methods && (vddLearned.methods[meta.methodName] || (qualName ? vddLearned.methods[qualName] : null)));
           if (vddM) {
             for (var vi = 0; vi < callSite.params.length; vi++) {
               var vp = callSite.params[vi];

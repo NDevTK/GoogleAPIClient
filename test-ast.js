@@ -185,6 +185,37 @@ test("Nested object property", `
   return r.fetchCallSites.length === 1;
 });
 
+test("this.prop in object method", `
+  var client = {
+    base: "https://api.example.com/v2",
+    get: function(path) {
+      return fetch(this.base + path);
+    }
+  };
+  client.get("/products");
+`, function(r) {
+  return r.fetchCallSites.some(function(s) {
+    return s.url === "https://api.example.com/v2/products";
+  });
+});
+
+console.log("\n=== Param location detection ===\n");
+
+test("Wrapper params get correct locations", `
+  function apiCall(method, url, body) {
+    return fetch(url, { method: method, body: JSON.stringify(body) });
+  }
+  apiCall("POST", "https://api.example.com/action", { key: "val" });
+`, function(r) {
+  var site = r.fetchCallSites.find(function(s) { return s.url === "https://api.example.com/action"; });
+  if (!site || !site.params) return false;
+  var methodParam = site.params.find(function(p) { return p.name === "method"; });
+  var urlParam = site.params.find(function(p) { return p.name === "url"; });
+  // method param should not be location:unknown
+  return (!methodParam || methodParam.location !== "unknown") &&
+         (!urlParam || urlParam.location !== "unknown");
+});
+
 console.log("\n=== Value constraints ===\n");
 
 test("Switch statement constraints", `
