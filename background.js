@@ -2663,7 +2663,7 @@ function analyzeScript(tabId, scriptUrl, code) {
 
   if (!tab._astResults) tab._astResults = [];
   tab._astResults.push(analysis);
-  mergeASTResultsIntoVDD(tab, [analysis]);
+  mergeASTResultsIntoVDD(tab, [analysis], tabId);
   mergeToGlobal(tab);
   notifyPopup(tabId);
 
@@ -2705,7 +2705,7 @@ function analyzeScript(tabId, scriptUrl, code) {
                 analysis.sourceMapTypes.map(function(t) { return t.kind + " " + t.name; }).slice(0, 10).join(", "));
             }
           }
-          mergeASTResultsIntoVDD(tab, [analysis]);
+          mergeASTResultsIntoVDD(tab, [analysis], tabId);
           mergeToGlobal(tab);
           notifyPopup(tabId);
         } catch (e) {
@@ -2717,7 +2717,7 @@ function analyzeScript(tabId, scriptUrl, code) {
   }
 }
 
-function mergeASTResultsIntoVDD(tab, results) {
+function mergeASTResultsIntoVDD(tab, results, tabId) {
   for (var r = 0; r < results.length; r++) {
     var analysis = results[r];
     var sourceHost = "";
@@ -2843,7 +2843,7 @@ function mergeASTResultsIntoVDD(tab, results) {
       var callSite = analysis.fetchCallSites[fc];
       try {
         // --- Resolve URL ---
-        var isDynamic = /^\$\{|^\(dynamic\)/.test(callSite.url);
+        var isDynamic = /^\$\{|^\(dynamic\)|^\{[a-zA-Z]/.test(callSite.url);
         var csUrl = null;
         var interfaceName = null;
 
@@ -2932,8 +2932,9 @@ function mergeASTResultsIntoVDD(tab, results) {
         }
 
         // --- Register endpoint for popup display ---
+        var bundleId = analysis.sourceUrl ? analysis.sourceUrl.replace(/^https?:\/\//, "").slice(-60) : "";
         var epKey = isDynamic
-          ? "AST DYN " + (callSite.enclosingFunction || "anon") + " " + callSite.method + " " + fc
+          ? "AST DYN " + bundleId + " " + (callSite.enclosingFunction || "anon") + " " + callSite.method + " " + fc
           : "AST " + callSite.method + " " + csUrl.pathname;
         if (!tab.endpoints.has(epKey)) {
           tab.endpoints.set(epKey, {
@@ -2947,7 +2948,9 @@ function mergeASTResultsIntoVDD(tab, results) {
           });
           newEndpoints++;
         }
-      } catch (_) {}
+      } catch (mergeErr) {
+        console.debug("[AST:merge] Error processing fetch site %d (%s %s): %s", fc, callSite.method, callSite.url, mergeErr.message || mergeErr);
+      }
     }
     if (analysis.fetchCallSites.length) {
       console.debug("[AST:merge] Fetch sites: %d call sites processed, %d endpoints registered",

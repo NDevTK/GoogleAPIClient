@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head><title>AST Learning Test Page</title></head>
+<body>
+<h2>AST Learning Test Page</h2>
+<p>Open the extension popup to check endpoints learned by AST static analysis.</p>
+<p>The button below fires the actual requests — use it to compare network-learned vs AST-learned.</p>
+<button id="fire" style="font-size:1.2em;padding:8px 20px;margin:12px 0">Fire All Requests</button>
+<pre id="log" style="background:#f4f4f4;padding:12px;max-height:400px;overflow:auto"></pre>
+
+<script>
+// --- All API code lives here for AST to analyze, but nothing executes until the button is clicked ---
+
+// 1. Direct fetch with literal URL
+function test1() {
+  fetch("https://api.example.com/v1/users", {
+    method: "GET",
+    headers: { "Authorization": "Bearer token123" }
+  });
+}
+
+// 2. POST with JSON body
+function test2() {
+  fetch("https://api.example.com/v1/documents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "test", content: "hello" })
+  });
+}
+
+// 3. Variable URL construction
+function test3() {
+  var API_BASE = "https://api.example.com";
+  var endpoint = API_BASE + "/v1/search";
+  fetch(endpoint, { method: "GET" });
+}
+
+// 4. Template literal URL
+function test4() {
+  var userId = "user_42";
+  fetch(`https://api.example.com/v1/users/${userId}/profile`);
+}
+
+// 5. Object property URL
+function test5() {
+  var config = {
+    apiUrl: "https://api.example.com/v1/settings",
+    method: "PUT"
+  };
+  fetch(config.apiUrl, { method: config.method, headers: { "X-Custom": "value" } });
+}
+
+// 6. Wrapper function (inter-procedural)
+function apiRequest(method, path, body) {
+  return fetch("https://api.example.com" + path, {
+    method: method,
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined
+  });
+}
+function test6() {
+  apiRequest("POST", "/v1/orders", { item: "widget", qty: 3 });
+  apiRequest("DELETE", "/v1/orders/123");
+  apiRequest("GET", "/v1/inventory");
+}
+
+// 7. Object method wrapper
+var client = {
+  base: "https://api.example.com/v2",
+  get: function(path) {
+    return fetch(this.base + path);
+  },
+  post: function(path, data) {
+    return fetch(this.base + path, { method: "POST", body: JSON.stringify(data) });
+  }
+};
+function test7() {
+  client.get("/products");
+  client.post("/products", { name: "gadget", price: 9.99 });
+}
+
+// 8. XHR call
+function test8() {
+  var xhr = new XMLHttpRequest();
+  xhr.open("GET", "https://api.example.com/v1/status");
+  xhr.setRequestHeader("Accept", "application/json");
+  xhr.send();
+}
+
+// 9. Switch/value constraints
+function loadResource(type) {
+  switch(type) {
+    case "users": return fetch("https://api.example.com/v1/users");
+    case "posts": return fetch("https://api.example.com/v1/posts");
+    case "comments": return fetch("https://api.example.com/v1/comments");
+  }
+}
+
+// 10. Closure-style module with assigned method
+var analytics = {};
+analytics.track = function(event) {
+  return fetch("https://analytics.example.com/v1/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ event: event, ts: Date.now() })
+  });
+};
+function test10() {
+  analytics.track("page_view");
+}
+
+// 11. Proto enum + field map patterns (no network call — structural detection only)
+var EventType = { UNKNOWN: 0, PAGE_VIEW: 1, CLICK: 2, SCROLL: 3, SUBMIT: 4 };
+function EventMessage() {}
+EventMessage.prototype.getType = function() {
+  return jspb.Message.getField(this, 1);
+};
+EventMessage.prototype.getName = function() {
+  return jspb.Message.getField(this, 2);
+};
+EventMessage.prototype.getTimestamp = function() {
+  return jspb.Message.getField(this, 3);
+};
+
+// 12. Includes constraint
+var ALLOWED_FORMATS = ["json", "xml", "csv", "protobuf"];
+function exportData(format) {
+  if (ALLOWED_FORMATS.includes(format)) {
+    fetch("https://api.example.com/v1/export?format=" + format);
+  }
+}
+
+// 13. Equality chain constraint
+function processAction(action) {
+  if (action === "approve" || action === "reject" || action === "defer") {
+    fetch("https://api.example.com/v1/actions/" + action, { method: "POST" });
+  }
+}
+
+// 14. Nested wrapper chain
+function makeRequest(url, opts) {
+  return fetch(url, opts);
+}
+function apiGet(path) {
+  return makeRequest("https://api.example.com" + path, { method: "GET" });
+}
+function test14() {
+  apiGet("/v1/notifications");
+  apiGet("/v1/preferences");
+}
+
+// 15. window.fetch
+function test15() {
+  window.fetch("https://api.example.com/v1/health", { method: "HEAD" });
+}
+
+// --- Button handler: fire everything ---
+document.getElementById("fire").onclick = function() {
+  var log = document.getElementById("log");
+  log.textContent = "Firing all requests...\n";
+  try {
+    test1(); log.textContent += "1. GET /v1/users\n";
+    test2(); log.textContent += "2. POST /v1/documents\n";
+    test3(); log.textContent += "3. GET /v1/search\n";
+    test4(); log.textContent += "4. GET /v1/users/user_42/profile\n";
+    test5(); log.textContent += "5. PUT /v1/settings\n";
+    test6(); log.textContent += "6. POST/DELETE/GET /v1/orders, /v1/inventory\n";
+    test7(); log.textContent += "7. GET/POST /v2/products\n";
+    test8(); log.textContent += "8. XHR GET /v1/status\n";
+    loadResource("users"); log.textContent += "9. Switch: GET /v1/users\n";
+    test10(); log.textContent += "10. POST analytics.example.com/v1/events\n";
+    exportData("json"); log.textContent += "12. GET /v1/export?format=json\n";
+    processAction("approve"); log.textContent += "13. POST /v1/actions/approve\n";
+    test14(); log.textContent += "14. GET /v1/notifications, /v1/preferences\n";
+    test15(); log.textContent += "15. HEAD /v1/health\n";
+    log.textContent += "\nDone! Check popup for network-learned endpoints.";
+  } catch(e) {
+    log.textContent += "Error: " + e.message + "\n";
+  }
+};
+</script>
+</body>
+</html>
