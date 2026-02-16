@@ -2,7 +2,7 @@
 // extracts API keys, endpoints, auth headers, and coordinates
 // discovery document fetching + req2proto fallback probing.
 
-importScripts("lib/protobuf.js", "lib/discovery.js", "lib/req2proto.js", "lib/stats.js", "lib/chains.js", "lib/acorn.min.js", "lib/acorn-walk.min.js", "lib/ast.js", "lib/sourcemap.js");
+importScripts("lib/protobuf.js", "lib/discovery.js", "lib/req2proto.js", "lib/stats.js", "lib/chains.js", "lib/babel-bundle.js", "lib/ast.js", "lib/sourcemap.js");
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -2641,15 +2641,25 @@ async function handleResponseBody(tabId, msg) {
 
 function analyzeScript(tabId, scriptUrl, code) {
   var tab = getTab(tabId);
+  console.debug("[AST] Received script: %s (%d chars) tab=%d", scriptUrl || "(inline)", code.length, tabId);
   var analysis;
   try {
     analysis = analyzeJSBundle(code, scriptUrl);
-  } catch (_) { return; }
+  } catch (e) {
+    console.debug("[AST] analyzeJSBundle threw for %s: %s", scriptUrl, e.message);
+    return;
+  }
 
   var hasFindings = analysis.protoEnums.length || analysis.protoFieldMaps.length ||
-    analysis.fetchCallSites.length || analysis.enumConstants.length ||
-    analysis.stringLiterals.length || analysis.sourceMapUrl;
-  if (!hasFindings) return;
+    analysis.fetchCallSites.length || analysis.sourceMapUrl;
+  if (!hasFindings) {
+    console.debug("[AST] No findings for %s", scriptUrl || "(inline)");
+    return;
+  }
+
+  console.debug("[AST] Findings for %s: %d protoEnums, %d fieldMaps, %d fetchSites, sourceMap=%s",
+    scriptUrl || "(inline)", analysis.protoEnums.length, analysis.protoFieldMaps.length,
+    analysis.fetchCallSites.length, analysis.sourceMapUrl || "none");
 
   if (!tab._astResults) tab._astResults = [];
   tab._astResults.push(analysis);
@@ -2664,22 +2674,46 @@ function analyzeScript(tabId, scriptUrl, code) {
       if (!/^https?:\/\//i.test(smUrl)) {
         smUrl = new URL(smUrl, new URL(scriptUrl)).href;
       }
-    } catch (_) { return; }
+    } catch (_) {
+      console.debug("[AST:sourcemap] Failed to resolve URL: %s (base: %s)", analysis.sourceMapUrl, scriptUrl);
+      return;
+    }
+    console.debug("[AST:sourcemap] Fetching: %s", smUrl);
     pageContextFetch(tabId, smUrl, { method: "GET" }, new URL(smUrl).origin)
       .then(function(smResp) {
-        if (!smResp.body || smResp.error) return;
+        if (!smResp.body || smResp.error) {
+          console.debug("[AST:sourcemap] Fetch failed for %s: %s", smUrl, smResp.error || "empty body");
+          return;
+        }
         try {
           var smJson = JSON.parse(smResp.body);
           var smData = parseSourceMap(smJson);
           analysis.sourceMap = smData;
+          console.debug("[AST:sourcemap] Parsed: %d sources, %d names, %d proto files, %d API client files, %d sourcesContent",
+            smData.sources.length, smData.names.length, smData.protoFileNames.length,
+            smData.apiClientFiles.length, (smData.sourcesContent || []).length);
+          if (smData.protoFileNames.length) {
+            console.debug("[AST:sourcemap] Proto files: %s", smData.protoFileNames.join(", "));
+          }
+          if (smData.apiClientFiles.length) {
+            console.debug("[AST:sourcemap] API client files: %s", smData.apiClientFiles.join(", "));
+          }
           if (smData.sourcesContent && smData.sourcesContent.length) {
             analysis.sourceMapTypes = extractTypesFromSources(smData.sourcesContent, smData.sources);
+            if (analysis.sourceMapTypes.length) {
+              console.debug("[AST:sourcemap] Extracted %d types: %s", analysis.sourceMapTypes.length,
+                analysis.sourceMapTypes.map(function(t) { return t.kind + " " + t.name; }).slice(0, 10).join(", "));
+            }
           }
           mergeASTResultsIntoVDD(tab, [analysis]);
           mergeToGlobal(tab);
           notifyPopup(tabId);
-        } catch (_) {}
-      }).catch(function() {});
+        } catch (e) {
+          console.debug("[AST:sourcemap] Parse error for %s: %s", smUrl, e.message);
+        }
+      }).catch(function(e) {
+        console.debug("[AST:sourcemap] Network error for %s: %s", smUrl, e.message || e);
+      });
   }
 }
 
@@ -2689,80 +2723,235 @@ function mergeASTResultsIntoVDD(tab, results) {
     var sourceHost = "";
     try { sourceHost = new URL(analysis.sourceUrl).hostname; } catch (_) {}
 
-    // Find matching discovery doc for this host
+    // Find matching discovery doc for this host (optional — endpoint registration works without it)
     var doc = null;
+    var matchedSvc = null;
     tab.discoveryDocs.forEach(function(entry, svc) {
-      if (entry.doc && svc.includes(sourceHost)) doc = entry.doc;
+      if (entry.doc && svc.includes(sourceHost)) { doc = entry.doc; matchedSvc = svc; }
     });
     if (!doc) {
-      // Try global store
       globalStore.discoveryDocs.forEach(function(entry, svc) {
-        if (entry.doc && svc.includes(sourceHost)) doc = entry.doc;
+        if (entry.doc && svc.includes(sourceHost)) { doc = entry.doc; matchedSvc = svc; }
       });
     }
-    if (!doc) continue;
 
-    // Merge proto field maps: match by field number to existing schema properties
-    if (analysis.protoFieldMaps.length && doc.schemas) {
-      for (var schemaName in doc.schemas) {
-        var schema = doc.schemas[schemaName];
-        if (!schema.properties) continue;
-        for (var propName in schema.properties) {
-          var prop = schema.properties[propName];
-          if (!prop["x-field-number"]) continue;
-          for (var fm = 0; fm < analysis.protoFieldMaps.length; fm++) {
-            var fieldMap = analysis.protoFieldMaps[fm];
-            if (fieldMap.fieldNumber === prop["x-field-number"] && !prop.customName) {
-              prop._astName = fieldMap.fieldName;
-              prop._astAccessor = fieldMap.accessorName;
+    // Proto field/enum merge — requires a matching doc
+    if (doc) {
+      console.debug("[AST:merge] Matched doc %s for host=%s", matchedSvc, sourceHost);
+
+      // Merge proto field maps: match by field number to existing schema properties
+      if (analysis.protoFieldMaps.length && doc.schemas) {
+        var fieldMapMatches = 0;
+        var fieldMapUnmatched = [];
+        var matchedFieldNums = new Set();
+        for (var schemaName in doc.schemas) {
+          var schema = doc.schemas[schemaName];
+          if (!schema.properties) continue;
+          for (var propName in schema.properties) {
+            var prop = schema.properties[propName];
+            if (!prop["x-field-number"]) continue;
+            for (var fm = 0; fm < analysis.protoFieldMaps.length; fm++) {
+              var fieldMap = analysis.protoFieldMaps[fm];
+              if (fieldMap.fieldNumber === prop["x-field-number"] && !prop.customName) {
+                prop._astName = fieldMap.fieldName;
+                prop._astAccessor = fieldMap.accessorName;
+                fieldMapMatches++;
+                matchedFieldNums.add(fieldMap.fieldNumber);
+                console.debug("[AST:merge] Field #%d → %s.%s renamed to '%s'", fieldMap.fieldNumber, schemaName, propName, fieldMap.fieldName);
+              }
             }
           }
         }
+        for (var fmu = 0; fmu < analysis.protoFieldMaps.length; fmu++) {
+          if (!matchedFieldNums.has(analysis.protoFieldMaps[fmu].fieldNumber)) {
+            fieldMapUnmatched.push("#" + analysis.protoFieldMaps[fmu].fieldNumber + "=" + analysis.protoFieldMaps[fmu].fieldName);
+          }
+        }
+        console.debug("[AST:merge] Field maps: %d matched, %d unmatched [%s]", fieldMapMatches, fieldMapUnmatched.length,
+          fieldMapUnmatched.slice(0, 10).join(", ") + (fieldMapUnmatched.length > 10 ? ", ..." : ""));
       }
-    }
 
-    // Merge proto enums: enrich existing enum-type fields
-    if (analysis.protoEnums.length && doc.schemas) {
-      for (var eName in doc.schemas) {
-        var eSchema = doc.schemas[eName];
-        if (!eSchema.properties) continue;
-        for (var ePropName in eSchema.properties) {
-          var eProp = eSchema.properties[ePropName];
-          if (eProp.enum && !eProp.customEnum) {
-            // Try to match enum by value count similarity
-            for (var pe = 0; pe < analysis.protoEnums.length; pe++) {
-              var protoEnum = analysis.protoEnums[pe];
-              if (!protoEnum.isReverseMap) {
-                var enumKeys = Object.keys(protoEnum.values);
-                if (enumKeys.length === eProp.enum.length) {
-                  eProp._astEnum = protoEnum.values;
-                  break;
+      // Merge proto enums: enrich existing enum-type fields
+      if (analysis.protoEnums.length && doc.schemas) {
+        var enumMatches = 0;
+        for (var eName in doc.schemas) {
+          var eSchema = doc.schemas[eName];
+          if (!eSchema.properties) continue;
+          for (var ePropName in eSchema.properties) {
+            var eProp = eSchema.properties[ePropName];
+            if (eProp.enum && !eProp.customEnum) {
+              for (var pe = 0; pe < analysis.protoEnums.length; pe++) {
+                var protoEnum = analysis.protoEnums[pe];
+                if (!protoEnum.isReverseMap) {
+                  var enumKeys = Object.keys(protoEnum.values);
+                  if (enumKeys.length === eProp.enum.length) {
+                    eProp._astEnum = protoEnum.values;
+                    enumMatches++;
+                    console.debug("[AST:merge] Enum matched: %s.%s ← {%s} (%d values)", eName, ePropName,
+                      enumKeys.slice(0, 5).join(", ") + (enumKeys.length > 5 ? ", ..." : ""), enumKeys.length);
+                    break;
+                  }
                 }
               }
             }
           }
         }
+        if (analysis.protoEnums.length > enumMatches) {
+          console.debug("[AST:merge] %d/%d proto enums unmatched (no schema field with same value count)", analysis.protoEnums.length - enumMatches, analysis.protoEnums.length);
+        }
       }
+      // Merge value constraints: enrich VDD method parameters with AST-discovered valid values
+      if (analysis.valueConstraints && analysis.valueConstraints.length && doc.resources && doc.resources.learned) {
+        var vcMatches = 0;
+        var methods = doc.resources.learned.methods || {};
+        for (var mName in methods) {
+          var method = methods[mName];
+          if (!method.parameters) continue;
+          for (var pName in method.parameters) {
+            var param = method.parameters[pName];
+            if (param.customEnum) continue; // don't override manual enums
+            for (var vci = 0; vci < analysis.valueConstraints.length; vci++) {
+              var vc = analysis.valueConstraints[vci];
+              // Match by parameter name or constraint variable name
+              if (vc.variable === pName && vc.values.length >= 2 && vc.values.length <= 50) {
+                param._astValidValues = vc.values;
+                param._astValueSource = vc.sources.join(",");
+                if (!param.enum || !param.customEnum) {
+                  param.enum = vc.values.map(String);
+                  param._detectedEnum = true;
+                }
+                vcMatches++;
+                console.debug("[AST:merge] Value constraint: %s.%s ← [%s] (%d values, source: %s)",
+                  mName, pName, vc.values.slice(0, 5).join(", ") + (vc.values.length > 5 ? ", ..." : ""),
+                  vc.values.length, vc.sources.join(","));
+                break;
+              }
+            }
+          }
+        }
+        if (vcMatches > 0) {
+          console.debug("[AST:merge] Value constraints: %d matched to VDD parameters", vcMatches);
+        }
+      }
+    } else {
+      console.debug("[AST:merge] No doc for host=%s — registering endpoints only (script: %s)", sourceHost, analysis.sourceUrl);
     }
 
-    // Register fetch call sites as discovered endpoints
+    // Feed fetch call sites through the same learning pipeline as network requests
+    var newEndpoints = 0;
     for (var fc = 0; fc < analysis.fetchCallSites.length; fc++) {
       var callSite = analysis.fetchCallSites[fc];
       try {
-        var csUrl = new URL(callSite.url);
-        var epKey = "AST " + callSite.method + " " + csUrl.pathname;
+        // --- Resolve URL ---
+        var isDynamic = /^\$\{|^\(dynamic\)/.test(callSite.url);
+        var csUrl = null;
+        var interfaceName = null;
+
+        if (isDynamic) {
+          if (!sourceHost) continue;
+          interfaceName = sourceHost;
+        } else if (/^https?:\/\//i.test(callSite.url)) {
+          csUrl = new URL(callSite.url);
+          interfaceName = extractInterfaceName(csUrl);
+        } else {
+          csUrl = new URL(callSite.url, analysis.sourceUrl);
+          interfaceName = extractInterfaceName(csUrl);
+        }
+
+        // --- Build synthetic URL with query params from AST ---
+        var syntheticUrl = csUrl ? csUrl.href : "https://" + sourceHost + "/dynamic_" + fc;
+        if (callSite.params) {
+          var urlObj = new URL(syntheticUrl);
+          for (var pi = 0; pi < callSite.params.length; pi++) {
+            var p = callSite.params[pi];
+            if ((p.location || "query") === "query") {
+              urlObj.searchParams.set(p.name, p.defaultValue !== undefined ? String(p.defaultValue) : "");
+            }
+          }
+          syntheticUrl = urlObj.href;
+        }
+
+        // --- Build synthetic body from body params ---
+        var syntheticHeaders = {};
+        if (callSite.headers) {
+          for (var hk in callSite.headers) {
+            syntheticHeaders[hk.toLowerCase()] = callSite.headers[hk];
+          }
+        }
+        var syntheticBody = null;
+        if (callSite.params) {
+          var bodyJson = {};
+          var hasBody = false;
+          for (var bi = 0; bi < callSite.params.length; bi++) {
+            var bp = callSite.params[bi];
+            if ((bp.location || "query") === "body") {
+              bodyJson[bp.name] = bp.defaultValue !== undefined ? bp.defaultValue : "";
+              hasBody = true;
+            }
+          }
+          if (hasBody) {
+            var bodyStr = JSON.stringify(bodyJson);
+            syntheticBody = btoa(bodyStr);
+            if (!syntheticHeaders["content-type"]) {
+              syntheticHeaders["content-type"] = "application/json";
+            }
+          }
+        }
+
+        // --- Build entry matching what learnFromRequest expects ---
+        var syntheticEntry = {
+          url: syntheticUrl,
+          method: callSite.method,
+          source: isDynamic ? "ast_dynamic" : "ast_analysis",
+        };
+        if (syntheticBody) {
+          syntheticEntry.rawBodyB64 = syntheticBody;
+        }
+
+        // --- Call the same learning function used for real network traffic ---
+        learnFromRequest(tabId, interfaceName, syntheticEntry, syntheticHeaders);
+
+        // --- Layer on AST-only extras: value constraints as enums ---
+        var vddDocEntry = tab.discoveryDocs.get(interfaceName);
+        if (vddDocEntry && vddDocEntry.doc && callSite.params) {
+          var vddUrl = new URL(syntheticUrl);
+          var meta = calculateMethodMetadata(vddUrl, interfaceName);
+          var vddM = (vddDocEntry.doc.resources.probed && vddDocEntry.doc.resources.probed.methods && vddDocEntry.doc.resources.probed.methods[meta.methodName])
+            || (vddDocEntry.doc.resources.learned && vddDocEntry.doc.resources.learned.methods && vddDocEntry.doc.resources.learned.methods[meta.methodName]);
+          if (vddM) {
+            for (var vi = 0; vi < callSite.params.length; vi++) {
+              var vp = callSite.params[vi];
+              if (vp.validValues && vp.validValues.length > 0 && vddM.parameters[vp.name]) {
+                var ep = vddM.parameters[vp.name];
+                if (!ep.customEnum && !ep.enum) {
+                  ep.enum = vp.validValues.map(String);
+                }
+              }
+            }
+          }
+        }
+
+        // --- Register endpoint for popup display ---
+        var epKey = isDynamic
+          ? "AST DYN " + (callSite.enclosingFunction || "anon") + " " + callSite.method + " " + fc
+          : "AST " + callSite.method + " " + csUrl.pathname;
         if (!tab.endpoints.has(epKey)) {
           tab.endpoints.set(epKey, {
-            url: callSite.url,
+            url: isDynamic ? callSite.url : csUrl.href,
             method: callSite.method,
-            host: csUrl.hostname,
-            path: csUrl.pathname,
-            service: extractInterfaceName(csUrl),
-            source: "ast_analysis",
+            host: isDynamic ? sourceHost : csUrl.hostname,
+            path: isDynamic ? callSite.url : csUrl.pathname,
+            service: interfaceName,
+            source: isDynamic ? "ast_dynamic" : "ast_analysis",
             firstSeen: Date.now(),
           });
+          newEndpoints++;
         }
       } catch (_) {}
+    }
+    if (analysis.fetchCallSites.length) {
+      console.debug("[AST:merge] Fetch sites: %d call sites processed, %d endpoints registered",
+        analysis.fetchCallSites.length, newEndpoints);
     }
   }
 }

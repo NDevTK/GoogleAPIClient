@@ -1,0 +1,32 @@
+{
+  "name": "APIClient",
+  "version": "1.0.0",
+  "description": "A Chrome Extension for reverse-engineering and security testing APIs across any website. It passively discovers, maps, and learns the structure, protocols, and authentication of APIs as you browse.",
+  "main": "background.js",
+  "directories": {
+    "lib": "lib"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NDevTK/APIClient.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/NDevTK/APIClient/issues"
+  },
+  "homepage": "https://github.com/NDevTK/APIClient#readme",
+  "dependencies": {
+    "@babel/parser": "^7.29.0",
+    "@babel/traverse": "^7.29.0",
+    "@babel/types": "^7.29.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.3"
+  }
+}

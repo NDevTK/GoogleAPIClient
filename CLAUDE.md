@@ -40,6 +40,16 @@ A Chrome Extension (MV3) for API discovery, protocol reverse-engineering (Protob
 | `lib/discovery.js` | Protocol parsers (batchexecute, async chunked, gRPC-Web, GraphQL, SSE, NDJSON, multipart), OpenAPI bidirectional conversion. |
 | `lib/protobuf.js` | Protobuf wire-format codec, JSPB decoder, recursive base64 key scanning. |
 | `lib/req2proto.js` | Error-based schema probing engine. |
+| `lib/ast.js` | AST-based JS bundle analysis. Parses page JS with acorn to extract fetch call sites, proto field maps, enums, value constraints, and source maps. |
+
+## AST Analysis Policy
+
+`lib/ast.js` does low-level structural tracing on parsed AST. No regex, no string pattern matching, no name-based lookups (code is minified — names are meaningless). No scoring or heuristics.
+
+- **Trace to network sinks**: The browser has two network primitives — `fetch()` and `XMLHttpRequest`. All JS network calls flow through them. AST identifies these global sinks and traces backward to extract URLs, methods, headers, body structure, and query params.
+- **Resolve values**: Trace variables through `_varScope` to resolve concrete values. Collect value constraints from switch/case, `.includes()`, equality chains within the enclosing function scope.
+- **Feed into the learning pipeline**: AST call sites are converted to synthetic requests and passed through `learnFromRequest()` — the same function that learns from real network traffic. AST learns APIs before they happen; network traffic confirms and enriches them.
+- **No protocol classification**: AST does not classify calls as gRPC/REST/RPC. Protocol detection is the network monitoring code's job.
 
 ## Development Standards
 

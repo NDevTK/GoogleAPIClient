@@ -239,6 +239,12 @@
   }
 
   function extractScriptSource(scriptEl) {
+    // Skip non-JavaScript script types (JSON config, importmaps, templates, etc.)
+    var sType = scriptEl.type;
+    if (sType && sType !== "text/javascript" && sType !== "module" &&
+        !/^(application\/javascript|text\/ecmascript)$/i.test(sType)) {
+      return;
+    }
     if (scriptEl.src) {
       // External script — fetch from page context
       var src = scriptEl.src;
