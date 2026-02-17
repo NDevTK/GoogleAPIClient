@@ -2485,6 +2485,1124 @@ test("Taint flows through function parameter", `
   });
 });
 
+console.log("\n=== Security: Complex XSS Patterns ===\n");
+
+test("innerHTML via template literal with tainted interpolation", `
+  var userInput = location.hash;
+  document.getElementById("out").innerHTML = \`<div class="msg">\${userInput}</div>\`;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("innerHTML via multi-hop variable chain (a → b → c → sink)", `
+  var a = location.search;
+  var b = a;
+  var c = b;
+  document.body.innerHTML = c;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("innerHTML via method chaining on tainted object (.slice().toLowerCase())", `
+  var fragment = location.hash.slice(1).toLowerCase();
+  document.getElementById("target").innerHTML = fragment;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("outerHTML with user-controlled source → high severity XSS", `
+  var payload = location.hash.slice(1);
+  document.getElementById("widget").outerHTML = payload;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "outerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("document.writeln with user-controlled value → XSS", `
+  var content = location.search.slice(1);
+  document.writeln(content);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "document.writeln" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("innerHTML via decodeURIComponent preserving taint", `
+  var raw = location.hash;
+  var decoded = decodeURIComponent(raw);
+  document.body.innerHTML = decoded;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("innerHTML via conditional with tainted branch", `
+  var useCustom = true;
+  var markup = useCustom ? location.hash : "<p>default</p>";
+  document.body.innerHTML = markup;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("innerHTML via complex HTML string concatenation", `
+  var src = location.hash.slice(1);
+  var html = '<img src="' + src + '" onerror="alert(1)">';
+  document.body.innerHTML = html;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("setAttribute onmouseover with user-controlled value → XSS", `
+  var handler = location.hash.slice(1);
+  document.getElementById("el").setAttribute("onmouseover", handler);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "setAttribute:onmouseover" && s.severity === "high";
+  });
+});
+
+test("setTimeout with user-controlled string → eval sink", `
+  var code = location.search.slice(1);
+  setTimeout(code, 0);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "setTimeout" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("setInterval with user-controlled string → eval sink", `
+  var expr = location.hash.slice(1);
+  setInterval(expr, 1000);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "setInterval" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("new Function with user-controlled code → eval sink", `
+  var body = location.search.slice(1);
+  var fn = new Function("x", body);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "new Function" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("innerHTML via window.name taint source", `
+  var name = window.name;
+  document.body.innerHTML = name;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "window.name";
+  });
+});
+
+test("eval with document.cookie taint source", `
+  var data = document.cookie;
+  eval(data);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval" && s.severity === "high" && s.source === "document.cookie";
+  });
+});
+
+test("location.href redirect via document.referrer taint", `
+  var ref = document.referrer;
+  location.href = ref;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "href" && s.severity === "high" && s.source === "document.referrer";
+  });
+});
+
+test("innerHTML via atob() preserving taint", `
+  var encoded = location.hash.slice(1);
+  var decoded = atob(encoded);
+  document.body.innerHTML = decoded;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("eval via unescape() preserving taint", `
+  var raw = location.search.slice(1);
+  var unescaped = unescape(raw);
+  eval(unescaped);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("insertAdjacentHTML afterbegin with tainted value", `
+  var markup = location.hash.slice(1);
+  document.getElementById("container").insertAdjacentHTML("afterbegin", markup);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "insertAdjacentHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("innerHTML via document.URL taint source", `
+  var url = document.URL;
+  document.body.innerHTML = url;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "document.URL";
+  });
+});
+
+test("innerHTML via document.documentURI taint source", `
+  var uri = document.documentURI;
+  document.body.innerHTML = uri;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "document.documentURI";
+  });
+});
+
+test("Multiple taint sources in concat — first tainted wins", `
+  var a = location.hash;
+  var b = document.referrer;
+  var html = a + " from " + b;
+  document.body.innerHTML = html;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high";
+  });
+});
+
+test("Nested function calls: wrapper(wrapper(tainted)) → innerHTML", `
+  function inner(x) { return x; }
+  function outer(y) { return inner(y); }
+  var val = outer(location.hash);
+  document.body.innerHTML = val;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+console.log("\n=== Security: Expected Non-Findings (True Negatives) ===\n");
+
+test("textContent assignment with tainted value → not flagged (safe sink)", `
+  var userInput = location.hash;
+  document.getElementById("out").textContent = userInput;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.sink === "textContent";
+  });
+});
+
+test("innerText assignment with tainted value → not flagged (safe sink)", `
+  var userInput = location.hash;
+  document.getElementById("out").innerText = userInput;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.sink === "innerText";
+  });
+});
+
+test("innerHTML with empty string → not flagged (literal)", `
+  document.body.innerHTML = "";
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("innerHTML with value from DOM element (not taint source) → not flagged", `
+  var content = document.getElementById("source").textContent;
+  document.getElementById("target").innerHTML = content;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("innerHTML with static template literal (no expressions) → not flagged", `
+  document.body.innerHTML = \`<div>static content</div>\`;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("innerHTML with locally-computed value (no taint) → not flagged", `
+  var count = 42;
+  var html = "<span>" + count + " items</span>";
+  document.body.innerHTML = html;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("eval with locally-defined string constant → not flagged", `
+  var code = "return 42";
+  eval(code);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval";
+  });
+});
+
+test("setTimeout with function reference → not flagged", `
+  function doWork() { console.log("done"); }
+  setTimeout(doWork, 1000);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "setTimeout";
+  });
+});
+
+test("setTimeout with arrow function → not flagged", `
+  setTimeout(() => console.log("tick"), 100);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "setTimeout";
+  });
+});
+
+test("setInterval with function expression → not flagged", `
+  setInterval(function() { console.log("interval"); }, 500);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "setInterval";
+  });
+});
+
+test("location.href with hardcoded URL → not flagged", `
+  location.href = "https://example.com/login";
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "href";
+  });
+});
+
+test("location.assign with string literal → not flagged", `
+  location.assign("/dashboard");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "location.assign";
+  });
+});
+
+test("location.replace with string literal → not flagged", `
+  location.replace("https://example.com/new-page");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "location.replace";
+  });
+});
+
+test("setAttribute with non-event attribute (class) → not flagged", `
+  var cls = location.hash.slice(1);
+  document.getElementById("el").setAttribute("class", cls);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink && s.sink.startsWith("setAttribute");
+  });
+});
+
+test("setAttribute with data attribute → not flagged", `
+  var val = location.hash.slice(1);
+  document.getElementById("el").setAttribute("data-value", val);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink && s.sink.startsWith("setAttribute");
+  });
+});
+
+test("new Function with string literal body → not flagged", `
+  var fn = new Function("a", "b", "return a + b");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "new Function";
+  });
+});
+
+test("new RegExp with string literal pattern → not flagged", `
+  var re = new RegExp("^[a-z]+$", "i");
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "regex-dynamic";
+  });
+});
+
+test("Prototype pollution with string literal key → not flagged", `
+  var obj = {};
+  obj["knownKey"] = "value";
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution";
+  });
+});
+
+test("Prototype pollution with numeric key → not flagged", `
+  var arr = [];
+  arr[0] = "first";
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution";
+  });
+});
+
+test("Dynamic property in for-in loop (not user-controlled) → not flagged", `
+  var src = { a: 1, b: 2 };
+  var dst = {};
+  for (var k in src) {
+    dst[k] = src[k];
+  }
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution";
+  });
+});
+
+test("Shadowed location variable → not flagged (not global location)", `
+  function route(location) {
+    document.body.innerHTML = location.hash;
+  }
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Shadowed eval identifier → not flagged (not global eval)", `
+  function sandbox(eval) {
+    eval("safe code");
+  }
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval";
+  });
+});
+
+test("postMessage listener with origin === check → not flagged", `
+  window.addEventListener("message", function(e) {
+    if (e.origin === "https://allowed.com") {
+      document.body.innerHTML = e.data;
+    }
+  });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin";
+  });
+});
+
+test("postMessage listener with origin == check → not flagged", `
+  window.addEventListener("message", function(ev) {
+    if (ev.origin == "https://partner.com") {
+      processData(ev.data);
+    }
+  });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin";
+  });
+});
+
+test("postMessage listener with source check → not flagged", `
+  window.addEventListener("message", function(event) {
+    if (event.source !== parent) return;
+    handleMessage(event.data);
+  });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin";
+  });
+});
+
+test("document.write with string literal → not flagged", `
+  document.write("<p>Loading...</p>");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "document.write";
+  });
+});
+
+test("insertAdjacentHTML with string literal → not flagged", `
+  document.body.insertAdjacentHTML("beforeend", "<hr>");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "insertAdjacentHTML";
+  });
+});
+
+test("innerHTML set from JSON.stringify (not user-controlled) → not flagged", `
+  var data = { count: 5, label: "test" };
+  document.body.innerHTML = JSON.stringify(data);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("RegExp with dynamic but non-user-controlled pattern → not flagged", `
+  function search(field) {
+    var re = new RegExp(field, "i");
+    return re.test("input");
+  }
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "regex-dynamic";
+  });
+});
+
+test("new Function with dynamic but non-user-controlled arg → not flagged", `
+  function makeGetter(prop) {
+    return new Function("obj", "return obj." + prop);
+  }
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "new Function";
+  });
+});
+
+console.log("\n=== Security: Realistic Vulnerability Patterns ===\n");
+
+test("URL parameter extraction via split → innerHTML", `
+  var param = location.search.split("=")[1];
+  document.getElementById("greeting").innerHTML = "Hello, " + param;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("Hash-based router injects route content into DOM", `
+  var route = location.hash.slice(1);
+  var content = "<h1>" + route + "</h1>";
+  document.getElementById("app").innerHTML = content;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("document.write with template literal containing tainted value", `
+  var name = location.search.slice(6);
+  document.write(\`<h1>Welcome \${name}</h1>\`);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "document.write" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("Multiple sinks in same code — both detected", `
+  var input = location.hash.slice(1);
+  document.getElementById("a").innerHTML = input;
+  document.getElementById("b").outerHTML = input;
+`, function(r) {
+  var hasInner = r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high";
+  });
+  var hasOuter = r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "outerHTML" && s.severity === "high";
+  });
+  return hasInner && hasOuter;
+});
+
+test("Taint through assignment expression (x = tainted) used in sink", `
+  var x;
+  document.body.innerHTML = (x = location.hash);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("setAttribute onerror with user-controlled value", `
+  var code = location.hash.slice(1);
+  document.querySelector("img").setAttribute("onerror", code);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "setAttribute:onerror" && s.severity === "high";
+  });
+});
+
+test("setAttribute onload with user-controlled value", `
+  var handler = location.search.slice(1);
+  document.querySelector("iframe").setAttribute("onload", handler);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "setAttribute:onload" && s.severity === "high";
+  });
+});
+
+test("location.pathname as taint source → innerHTML", `
+  var path = location.pathname;
+  document.body.innerHTML = "<pre>" + path + "</pre>";
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.pathname";
+  });
+});
+
+test("document.domain as taint source → eval", `
+  var domain = document.domain;
+  eval("loadScript('" + domain + "')");
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval" && s.severity === "high" && s.source === "document.domain";
+  });
+});
+
+test("XSS and redirect in same code block — both types detected", `
+  var input = location.hash.slice(1);
+  document.body.innerHTML = input;
+  location.href = input;
+`, function(r) {
+  var hasXss = r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+  var hasRedirect = r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "href";
+  });
+  return hasXss && hasRedirect;
+});
+
+test("Taint through String() wrapper call", `
+  var raw = location.hash;
+  var str = String(raw);
+  document.body.innerHTML = str;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("Taint through .toString() on tainted object", `
+  var raw = location.search;
+  var str = raw.toString();
+  document.body.innerHTML = str;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("Taint through .trim() on tainted value", `
+  var input = location.hash.trim();
+  document.body.innerHTML = input;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("Taint through .replace() on tainted string", `
+  var raw = location.search.slice(1);
+  var cleaned = raw.replace(/</g, "");
+  eval(cleaned);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("Prototype pollution with nested bracket access obj[tainted][prop]", `
+  var key = location.hash.slice(1);
+  var target = {};
+  target[key] = {};
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution" && p.severity === "high";
+  });
+});
+
+test("location.href self-assignment from tainted source → redirect", `
+  location.href = location.search.slice(5);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "href" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("Taint preserved through decodeURI wrapper", `
+  var encoded = location.hash.slice(1);
+  var decoded = decodeURI(encoded);
+  document.body.innerHTML = decoded;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("innerHTML via location.origin taint source", `
+  var origin = location.origin;
+  document.body.innerHTML = "<a href='" + origin + "'>Link</a>";
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.origin";
+  });
+});
+
+test("location.hostname as taint source → redirect via assign", `
+  var host = location.hostname;
+  location.assign("https://" + host + "/callback");
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "location.assign" && s.severity === "high" && s.source === "location.hostname";
+  });
+});
+
+test("innerHTML with tainted value inside IIFE", `
+  (function() {
+    var x = location.hash;
+    document.body.innerHTML = x;
+  })();
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("Taint through arrow function parameter", `
+  var render = (html) => { document.body.innerHTML = html; };
+  render(location.hash);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+console.log("\n=== Security: Advanced True Negatives ===\n");
+
+test("createElement + textContent (safe DOM construction) → not flagged", `
+  var el = document.createElement("div");
+  el.textContent = location.hash;
+  document.body.appendChild(el);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss";
+  });
+});
+
+test("console.log with tainted value → not flagged (not a sink)", `
+  var data = location.hash;
+  console.log(data);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" || s.type === "eval";
+  });
+});
+
+test("Tainted value sent via fetch body → not flagged (not client-side XSS)", `
+  var input = location.search.slice(1);
+  fetch("/api/log", { method: "POST", body: input });
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" || s.type === "eval";
+  });
+});
+
+test("RegExp.test with tainted input string (not pattern) → not flagged", `
+  var input = location.search.slice(1);
+  var re = /^[a-z]+$/;
+  var result = re.test(input);
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "regex-dynamic";
+  });
+});
+
+test("Array push with tainted value → not flagged", `
+  var items = [];
+  items.push(location.hash);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" || s.type === "eval";
+  });
+});
+
+test("addEventListener for non-message event → not flagged as postMessage", `
+  window.addEventListener("click", function(event) {
+    document.body.innerHTML = event.target.id;
+  });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin";
+  });
+});
+
+test("Shadowed document AND location → not flagged (both are local params)", `
+  function render(document, location) {
+    document.body.innerHTML = location.hash;
+  }
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("innerHTML with boolean value → not flagged", `
+  var flag = true;
+  document.body.innerHTML = flag;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("innerHTML with null value → not flagged", `
+  document.body.innerHTML = null;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("innerHTML with numeric value → not flagged", `
+  var count = 42;
+  document.body.innerHTML = count;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("setTimeout with numeric argument → not flagged", `
+  setTimeout(0, 100);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "setTimeout";
+  });
+});
+
+test("innerHTML assignment in loop with literal array → not flagged", `
+  var items = ["<li>A</li>", "<li>B</li>", "<li>C</li>"];
+  var html = "";
+  for (var i = 0; i < items.length; i++) {
+    html += items[i];
+  }
+  document.body.innerHTML = html;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Prototype pollution: Object.keys iteration (not user-controlled) → not flagged", `
+  var src = { a: 1, b: 2 };
+  var dst = {};
+  Object.keys(src).forEach(function(key) {
+    dst[key] = src[key];
+  });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution";
+  });
+});
+
+test("Shadowed window variable → not flagged", `
+  function init(window) {
+    document.body.innerHTML = window.name;
+  }
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.source === "window.name";
+  });
+});
+
+test("postMessage handler with named function having origin check → not flagged", `
+  function handleMsg(event) {
+    if (event.origin !== "https://trusted.com") return;
+    console.log(event.data);
+  }
+  window.addEventListener("message", handleMsg);
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin";
+  });
+});
+
+test("location.href = concat of two literals → not flagged", `
+  var base = "https://example.com";
+  var path = "/login";
+  location.href = base + path;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "redirect";
+  });
+});
+
+test("eval inside try-catch with literal string → not flagged", `
+  try {
+    eval("JSON.parse('{}')");
+  } catch(e) {}
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval";
+  });
+});
+
+test("insertAdjacentHTML with locally-built safe markup → not flagged", `
+  var count = 5;
+  var html = "<span class='badge'>" + count + "</span>";
+  document.body.insertAdjacentHTML("beforeend", html);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "insertAdjacentHTML";
+  });
+});
+
+test("document.write with string literal → not flagged (closing tag)", `
+  document.write("</div><div class='footer'>");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "document.write";
+  });
+});
+
+test("setAttribute with href (not event handler) → not flagged", `
+  var url = location.hash.slice(1);
+  document.querySelector("a").setAttribute("href", url);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink && s.sink.startsWith("setAttribute");
+  });
+});
+
+test("new RegExp with variable from function param (not user-controlled) → not flagged", `
+  function matchField(fieldName) {
+    return new RegExp("^" + fieldName + "$");
+  }
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "regex-dynamic";
+  });
+});
+
+console.log("\n=== Security: Detection Gap Coverage ===\n");
+
+// -- Computed property sinks: el["innerHTML"] --
+
+test("el[\"innerHTML\"] = tainted → detected (computed string literal property)", `
+  var payload = location.hash.slice(1);
+  document.getElementById("out")["innerHTML"] = payload;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("el[\"outerHTML\"] = tainted → detected (computed string literal property)", `
+  var payload = location.hash.slice(1);
+  document.getElementById("out")["outerHTML"] = payload;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "outerHTML" && s.severity === "high";
+  });
+});
+
+test("el[variable] = tainted → not flagged (unknown computed property)", `
+  var prop = "textContent";
+  var val = location.hash;
+  document.body[prop] = val;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss";
+  });
+});
+
+// -- window.location / self.location redirect sinks --
+
+test("window.location.href = tainted → redirect detected", `
+  var url = location.hash.slice(1);
+  window.location.href = url;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "href" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("self.location.href = tainted → redirect detected", `
+  var url = location.search.slice(1);
+  self.location.href = url;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "href" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("window.location.assign(tainted) → redirect detected", `
+  var dest = location.hash.slice(1);
+  window.location.assign(dest);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "location.assign" && s.severity === "high";
+  });
+});
+
+test("window.location.replace(tainted) → redirect detected", `
+  var dest = location.search.slice(1);
+  window.location.replace(dest);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "location.replace" && s.severity === "high";
+  });
+});
+
+test("window.location.href = literal → not flagged", `
+  window.location.href = "/dashboard";
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "redirect";
+  });
+});
+
+test("self.location.assign(literal) → not flagged", `
+  self.location.assign("https://example.com");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "redirect";
+  });
+});
+
+// -- Untested redirect assignment sinks --
+
+test("location.pathname = tainted → redirect detected", `
+  var path = location.hash.slice(1);
+  location.pathname = path;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "pathname" && s.severity === "high";
+  });
+});
+
+test("location.search = tainted → redirect detected", `
+  var qs = document.referrer;
+  location.search = qs;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "search" && s.severity === "high" && s.source === "document.referrer";
+  });
+});
+
+// -- Untested taint source --
+
+test("location.protocol as taint source → innerHTML", `
+  var proto = location.protocol;
+  document.body.innerHTML = proto;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.protocol";
+  });
+});
+
+console.log("\n=== Security: Taint Tracer Edge Cases ===\n");
+
+test("Taint through conditional where both branches are tainted", `
+  var x = true ? location.hash : location.search;
+  document.body.innerHTML = x;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high";
+  });
+});
+
+test("Taint through conditional where only alternate is tainted", `
+  var x = false ? "safe" : location.hash;
+  document.body.innerHTML = x;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.hash";
+  });
+});
+
+test("Depth limit: 4+ variable hops → treated as dynamic, not flagged", `
+  var a = location.hash;
+  var b = a;
+  var c = b;
+  var d = c;
+  var e = d;
+  document.body.innerHTML = e;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Taint through nested computed access: tainted.split('&')[0].split('=')[1]", `
+  var parts = location.search.slice(1).split("&");
+  var val = parts[0];
+  document.body.innerHTML = val;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high" && s.source === "location.search";
+  });
+});
+
+test("Taint through template literal with multiple tainted expressions", `
+  var a = location.hash;
+  var b = location.search;
+  document.body.innerHTML = \`\${a} and \${b}\`;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "high";
+  });
+});
+
+test("setTimeout with variable resolving to arrow function → not flagged", `
+  var handler = () => console.log("tick");
+  setTimeout(handler, 100);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "setTimeout";
+  });
+});
+
+test("setInterval with variable resolving to function expression → not flagged", `
+  var tick = function() { console.log("tock"); };
+  setInterval(tick, 500);
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "setInterval";
+  });
+});
+
+test("Taint through += concatenation on innerHTML (augmented assignment)", `
+  document.body.innerHTML += location.hash;
+`, function(r) {
+  // += is not operator "=", so _processSecurityAssignSink skips it.
+  // This is a known limitation — only direct assignment is detected.
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Multiple postMessage listeners — only the one without origin check flagged", `
+  window.addEventListener("message", function(e) {
+    if (e.origin === "https://trusted.com") {
+      safe(e.data);
+    }
+  });
+  window.addEventListener("message", function(e) {
+    dangerous(e.data);
+  });
+`, function(r) {
+  var patterns = r.dangerousPatterns.filter(function(p) {
+    return p.type === "postmessage-no-origin";
+  });
+  return patterns.length === 1;
+});
+
 // ── Summary ──
 console.log("\n" + "=".repeat(50));
 console.log("Results: " + passed + "/" + total + " passed, " + failed + " failed");
