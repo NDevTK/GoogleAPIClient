@@ -1998,11 +1998,12 @@ function mergeSchemaInto(doc, schemaName, newSchema) {
 // ─── Page-Context Fetch Bridge ───────────────────────────────────────────────
 // Routes fetch requests through the content script so they execute with the
 // page's cookie jar and Origin. The content script shares the page's cookies,
-// so the browser attaches them automatically.
+// so the browser attaches them automatically. Targets a specific frameId when
+// the request originated from an iframe (e.g. proxy.html).
 //
-// If the original tab is closed, a temporary background tab is opened to the
-// request initiator origin so the content script loads and carries the right
-// cookies + Origin.
+// If the original tab/frame is unreachable, a minimized background window is
+// opened to the initiator origin so the content script loads and carries the
+// right cookies + Origin.
 
 /**
  * Send a PAGE_FETCH message to a tab's content script.
@@ -2031,7 +2032,7 @@ async function sendPageFetch(tabId, url, opts, frameId = 0) {
 // during burst requests (like discovery). Keeps tab open for a short time
 // after use to handle subsequent requests.
 
-const tempTabPool = new Map(); // origin -> { tabId, promise, refCount, closeTimer }
+const tempTabPool = new Map(); // origin -> { tabId, windowId, promise, refCount, closeTimer }
 
 async function acquireTempTab(origin) {
   let entry = tempTabPool.get(origin);
@@ -2046,30 +2047,36 @@ async function acquireTempTab(origin) {
     return entry.promise;
   }
 
-  // Create new entry
+  // Create new entry — use a minimized background window (invisible to user)
 
   const promise = (async () => {
     try {
-      const tab = await chrome.tabs.create({ url: origin, active: false });
+      const win = await chrome.windows.create({
+        url: origin,
+        state: "minimized",
+        focused: false,
+      });
+
+      const tabId = win.tabs[0].id;
 
       // Wait for content script (max 15s)
       const deadline = Date.now() + 15000;
       while (Date.now() < deadline) {
         try {
           await chrome.tabs.sendMessage(
-            tab.id,
+            tabId,
             { type: "PING" },
             { frameId: 0 },
           );
 
-          return tab.id;
+          return { tabId, windowId: win.id };
         } catch (_) {
           await new Promise((r) => setTimeout(r, 500));
         }
       }
 
       // Timeout
-      chrome.tabs.remove(tab.id).catch(() => {});
+      chrome.windows.remove(win.id).catch(() => {});
       throw new Error("Temp tab timeout");
     } catch (err) {
       // Clean up pool if creation failed
@@ -2078,13 +2085,14 @@ async function acquireTempTab(origin) {
     }
   })();
 
-  entry = { tabId: null, promise, refCount: 1, closeTimer: null };
+  entry = { tabId: null, windowId: null, promise, refCount: 1, closeTimer: null };
   tempTabPool.set(origin, entry);
 
   try {
-    const tabId = await promise;
-    entry.tabId = tabId;
-    return tabId;
+    const result = await promise;
+    entry.tabId = result.tabId;
+    entry.windowId = result.windowId;
+    return result.tabId;
   } catch (err) {
     throw err;
   }
@@ -2100,19 +2108,51 @@ function releaseTempTab(origin) {
     if (entry.closeTimer) clearTimeout(entry.closeTimer);
     entry.closeTimer = setTimeout(() => {
       tempTabPool.delete(origin);
-      if (entry.tabId) {
+      if (entry.windowId) {
+        chrome.windows.remove(entry.windowId).catch(() => {});
+      } else if (entry.tabId) {
         chrome.tabs.remove(entry.tabId).catch(() => {});
-        state.tabs.delete(entry.tabId);
       }
+      if (entry.tabId) state.tabs.delete(entry.tabId);
     }, 10000);
   }
 }
 
 /**
- * Fetch through a content script, with temp tab fallback.
+ * Resolve the best frameId for a given initiatorOrigin on a tab.
+ * Uses webNavigation.getAllFrames to find a frame matching the origin.
+ * Returns 0 (main frame) if no match or if initiatorOrigin is null.
  */
-async function pageContextFetch(tabId, url, opts, initiatorOrigin, frameId = 0) {
-  // Validate URL is a valid API-like host
+async function _resolveFrameForOrigin(tabId, initiatorOrigin) {
+  if (!initiatorOrigin) return 0;
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId });
+    if (!frames) return 0;
+    // Prefer non-main frames matching the origin (iframe proxy scenario)
+    for (const f of frames) {
+      if (f.frameId === 0) continue; // check sub-frames first
+      try {
+        if (new URL(f.url).origin === initiatorOrigin) return f.frameId;
+      } catch (_) {}
+    }
+    // Fall back to main frame if its origin matches
+    for (const f of frames) {
+      if (f.frameId !== 0) continue;
+      try {
+        if (new URL(f.url).origin === initiatorOrigin) return 0;
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return 0;
+}
+
+/**
+ * Fetch through a content script, with temp window fallback.
+ * Dynamically resolves the correct frame by matching initiatorOrigin
+ * against the tab's current frames (frameIds are ephemeral).
+ */
+async function pageContextFetch(tabId, url, opts, initiatorOrigin) {
+  // Validate URL
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
@@ -2122,25 +2162,20 @@ async function pageContextFetch(tabId, url, opts, initiatorOrigin, frameId = 0) 
     return { error: "blocked: invalid URL" };
   }
 
-  // Try the original tab first
+  // Try the original tab — resolve the right frame dynamically
   if (tabId != null) {
-    // 1. Try the targeted frame (or main frame if frameId=0)
+    const frameId = await _resolveFrameForOrigin(tabId, initiatorOrigin);
     try {
-      const result = await sendPageFetch(tabId, url, opts, frameId);
-      return result;
+      return await sendPageFetch(tabId, url, opts, frameId);
     } catch (_) {
-      // 2. If targeted frame failed and it wasn't the main frame, fall back to main frame
+      // If we targeted a sub-frame and it failed, fall back to main frame
       if (frameId !== 0) {
         try {
-          // Frame unreachable, fall back to main frame
-          const result = await sendPageFetch(tabId, url, opts, 0);
-          return result;
-        } catch (__) {
-          // Main frame also failed, fall through to loading check/temp tab
-        }
+          return await sendPageFetch(tabId, url, opts, 0);
+        } catch (__) {}
       }
 
-      // Check if the tab is actually on the correct origin (just loading?)
+      // Tab might still be loading — poll briefly if origin matches
       try {
         const tab = await chrome.tabs.get(tabId);
         if (tab && tab.url) {
@@ -2150,33 +2185,28 @@ async function pageContextFetch(tabId, url, opts, initiatorOrigin, frameId = 0) 
             while (Date.now() < deadline) {
               try {
                 await new Promise((r) => setTimeout(r, 500));
-                // Target main frame during polling for stability
-                const res = await sendPageFetch(tabId, url, opts, 0);
-                return res; 
-              } catch (___) {
-                // Keep waiting
-              }
+                return await sendPageFetch(tabId, url, opts, 0);
+              } catch (___) {}
             }
           }
         }
-      } catch (e) {}
+      } catch (_) {}
     }
   }
 
-  // Fall back: use pooled temp tab
+  // Fall back: use pooled minimized background window
   if (initiatorOrigin) {
     try {
       const tempTabId = await acquireTempTab(initiatorOrigin);
-      const result = await sendPageFetch(tempTabId, url, opts);
-      return result;
+      return await sendPageFetch(tempTabId, url, opts);
     } catch (err) {
-      console.warn(`Relay failed for ${url} (temp tab error: ${err.message})`);
+      console.warn(`Relay failed for ${url} (temp window error: ${err.message})`);
     } finally {
       releaseTempTab(initiatorOrigin);
     }
   }
 
-  // Last resort: fail if relaying is impossible
+  // Last resort
   console.warn(
     `Relay failed for ${url} (no responsive content script and no initiatorOrigin)`,
   );
@@ -4357,7 +4387,6 @@ async function executeSendRequest(tabId, msg) {
         bodyEncoding,
       },
       initiatorOrigin,
-      msg.body?.frameId,
     );
   } catch (err) {
     return { error: `fetch_exception: ${err.message}`, timing: Date.now() - startTime };
