@@ -721,5 +721,97 @@ document.getElementById("fire").onclick = function() {
   log.textContent += "\nDone! Check popup for network-learned endpoints.";
 };
 </script>
+
+<!-- ════════════════════════════════════════════════════════════════════════════
+     CROSS-FILE SCANNING TESTS
+     These test patterns where taint sources and sinks span separate <script> tags.
+     The extension's combined analysis (forceScript=true) concatenates all scripts
+     into a shared global scope, so cross-file data flow should be detected.
+     ════════════════════════════════════════════════════════════════════════════ -->
+
+<!-- Script A: defines tainted globals (simulates a config/init script) -->
+<script>
+// 66. Cross-file: taint source in one script, sink in another
+var crossFilePayload = location.hash.substring(1);
+
+// 67. Cross-file: tainted utility function defined here, called from another script
+function renderUnsafe(html) {
+  document.getElementById("xss-target").innerHTML = html;
+}
+
+// 68. Cross-file: global config object with tainted values
+var appConfig = {
+  redirectUrl: location.search.split("next=")[1],
+  userName: location.hash.substring(1),
+  debugCode: location.hash.substring(1),
+};
+
+// 69. Cross-file: tainted class method
+function UnsafeRenderer() {}
+UnsafeRenderer.prototype.render = function(content) {
+  document.getElementById("xss-target").outerHTML = content;
+};
+
+// 70. Cross-file: API URL builder with tainted base
+var apiBase = location.hash.substring(1);
+function buildApiUrl(path) {
+  return apiBase + "/api/" + path;
+}
+</script>
+
+<!-- Script B: uses tainted globals from Script A (simulates app code) -->
+<script>
+// 66b. Sink using cross-file tainted variable
+document.getElementById("xss-target").innerHTML = crossFilePayload;
+
+// 67b. Calling cross-file tainted utility
+var userInput = location.search.substring(1);
+renderUnsafe(userInput);
+
+// 68b. Cross-file: config object property → redirect
+location.assign(appConfig.redirectUrl);
+
+// 68c. Cross-file: config object property → eval
+eval(appConfig.debugCode);
+
+// 69b. Cross-file: instantiate class from Script A, pass tainted data
+var renderer = new UnsafeRenderer();
+renderer.render(location.hash.substring(1));
+
+// 70b. Cross-file: use builder with tainted base → setAttribute href
+var link = document.createElement("a");
+link.setAttribute("href", buildApiUrl("users"));
+
+// 71. Cross-file: postMessage handler in separate script from listener setup
+function handleCrossMessage(data) {
+  document.getElementById("xss-target").innerHTML = data;
+}
+</script>
+
+<!-- Script C: more cross-file patterns (simulates a third-party widget) -->
+<script>
+// 71b. Cross-file: window.addEventListener dispatching to handler in Script B
+window.addEventListener("message", function(e) {
+  handleCrossMessage(e.data);
+});
+
+// 72. Cross-file: document.write with tainted value from Script A's config
+document.write("<div>" + appConfig.userName + "</div>");
+
+// 73. Cross-file: setTimeout with tainted string from Script A's config
+setTimeout(appConfig.debugCode, 100);
+
+// 74. Cross-file: new Function with cross-file tainted var
+var fn = new Function("return " + crossFilePayload);
+
+// 75. Cross-file: createContextualFragment with tainted input
+var range = document.createRange();
+range.selectNode(document.body);
+var frag = range.createContextualFragment(crossFilePayload);
+document.body.appendChild(frag);
+
+// 76. Cross-file: fetch URL built from tainted base in Script A
+fetch(buildApiUrl("admin/delete"));
+</script>
 </body>
 </html>
