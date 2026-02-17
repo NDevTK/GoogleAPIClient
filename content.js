@@ -225,7 +225,7 @@
     _sentScripts.add(key);
     chrome.runtime.sendMessage({
       type: "SCRIPT_SOURCE",
-      url: url || location.href,
+      url: url || null,
       code: code,
     });
   }

@@ -760,27 +760,40 @@ function buildApiUrl(path) {
 </script>
 
 <!-- Script B: uses tainted globals from Script A (simulates app code) -->
+<!-- All sinks wrapped in functions so AST analyzes them without auto-executing -->
 <script>
 // 66b. Sink using cross-file tainted variable
-document.getElementById("xss-target").innerHTML = crossFilePayload;
+function vuln_crossFileInnerHTML() {
+  document.getElementById("xss-target").innerHTML = crossFilePayload;
+}
 
 // 67b. Calling cross-file tainted utility
-var userInput = location.search.substring(1);
-renderUnsafe(userInput);
+function vuln_crossFileUtility() {
+  var userInput = location.search.substring(1);
+  renderUnsafe(userInput);
+}
 
 // 68b. Cross-file: config object property → redirect
-location.assign(appConfig.redirectUrl);
+function vuln_crossFileRedirect() {
+  location.assign(appConfig.redirectUrl);
+}
 
 // 68c. Cross-file: config object property → eval
-eval(appConfig.debugCode);
+function vuln_crossFileEval() {
+  eval(appConfig.debugCode);
+}
 
 // 69b. Cross-file: instantiate class from Script A, pass tainted data
-var renderer = new UnsafeRenderer();
-renderer.render(location.hash.substring(1));
+function vuln_crossFileClass() {
+  var renderer = new UnsafeRenderer();
+  renderer.render(location.hash.substring(1));
+}
 
 // 70b. Cross-file: use builder with tainted base → setAttribute href
-var link = document.createElement("a");
-link.setAttribute("href", buildApiUrl("users"));
+function vuln_crossFileSetAttr() {
+  var link = document.createElement("a");
+  link.setAttribute("href", buildApiUrl("users"));
+}
 
 // 71. Cross-file: postMessage handler in separate script from listener setup
 function handleCrossMessage(data) {
@@ -789,6 +802,7 @@ function handleCrossMessage(data) {
 </script>
 
 <!-- Script C: more cross-file patterns (simulates a third-party widget) -->
+<!-- All sinks wrapped in functions so AST analyzes them without auto-executing -->
 <script>
 // 71b. Cross-file: window.addEventListener dispatching to handler in Script B
 window.addEventListener("message", function(e) {
@@ -796,22 +810,32 @@ window.addEventListener("message", function(e) {
 });
 
 // 72. Cross-file: document.write with tainted value from Script A's config
-document.write("<div>" + appConfig.userName + "</div>");
+function vuln_crossFileDocWrite() {
+  document.write("<div>" + appConfig.userName + "</div>");
+}
 
 // 73. Cross-file: setTimeout with tainted string from Script A's config
-setTimeout(appConfig.debugCode, 100);
+function vuln_crossFileSetTimeout() {
+  setTimeout(appConfig.debugCode, 100);
+}
 
 // 74. Cross-file: new Function with cross-file tainted var
-var fn = new Function("return " + crossFilePayload);
+function vuln_crossFileNewFunction() {
+  var fn = new Function("return " + crossFilePayload);
+}
 
 // 75. Cross-file: createContextualFragment with tainted input
-var range = document.createRange();
-range.selectNode(document.body);
-var frag = range.createContextualFragment(crossFilePayload);
-document.body.appendChild(frag);
+function vuln_crossFileFragment() {
+  var range = document.createRange();
+  range.selectNode(document.body);
+  var frag = range.createContextualFragment(crossFilePayload);
+  document.body.appendChild(frag);
+}
 
 // 76. Cross-file: fetch URL built from tainted base in Script A
-fetch(buildApiUrl("admin/delete"));
+function vuln_crossFileFetch() {
+  fetch(buildApiUrl("admin/delete"));
+}
 </script>
 </body>
 </html>

@@ -515,6 +515,10 @@ function renderSecurityPanel() {
       ? '<div class="code-context">' + esc(item.codeContext) + '</div>'
       : '';
 
+    var srcLink = entry.sourceUrl
+      ? '<a href="' + esc(entry.sourceUrl) + '" target="_blank" title="' + esc(entry.sourceUrl) + '">' + esc(entry.srcLabel) + '</a>'
+      : esc(entry.srcLabel);
+
     if (entry.kind === "sink") {
       var typeBadge = "";
       if (item.type === "xss") typeBadge = '<span class="badge badge-xss">XSS</span>';
@@ -530,7 +534,7 @@ function renderSecurityPanel() {
         + '<div class="card-label">' + typeBadge + ' ' + sevBadge + ' ' + esc(item.sink) + '</div>'
         + '<div class="card-value">' + esc(sourceDesc) + '</div>'
         + codeHtml
-        + '<div class="card-meta">' + esc(entry.srcLabel) + (loc ? " " + esc(loc) : "") + '</div>'
+        + '<div class="card-meta">' + srcLink + (loc ? " " + esc(loc) : "") + '</div>'
         + '</div>';
     } else {
       var patBadge = '<span class="badge badge-danger">' + esc((item.type || "pattern").toUpperCase().replace(/-/g, " ")) + '</span>';
@@ -539,7 +543,7 @@ function renderSecurityPanel() {
         + '<div class="card-label">' + patBadge + ' ' + sevBadge + '</div>'
         + '<div class="card-value">' + esc(item.description || item.type) + '</div>'
         + codeHtml
-        + '<div class="card-meta">' + esc(entry.srcLabel) + (loc ? " " + esc(loc) : "") + '</div>'
+        + '<div class="card-meta">' + srcLink + (loc ? " " + esc(loc) : "") + '</div>'
         + '</div>';
     }
   }

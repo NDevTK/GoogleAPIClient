@@ -157,6 +157,13 @@ nav {
   border-radius: 3px;
   color: #79c0ff;
 }
+.card-meta a {
+  color: #58a6ff;
+  text-decoration: none;
+}
+.card-meta a:hover {
+  text-decoration: underline;
+}
 
 .code-context {
   font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
