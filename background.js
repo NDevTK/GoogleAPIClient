@@ -1072,6 +1072,8 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
         kind: "discovery#restDescription",
         name: interfaceName,
         title: `${interfaceName} (Learned)`,
+        rootUrl: url.origin + "/",
+        baseUrl: url.origin + "/",
         resources: {
           learned: { methods: {} },
         },
