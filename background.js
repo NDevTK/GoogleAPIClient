@@ -2820,6 +2820,7 @@ function _analyzeCombinedScripts(tabId) {
     tab.endpoints.delete(keysToDelete[di]);
   }
   tab._astResults = [];
+  tab._securityFindings = [];
 
   // Concatenate all scripts with semicolons (safe delimiter for script mode)
   var combined = "";
@@ -2832,6 +2833,7 @@ function _analyzeCombinedScripts(tabId) {
   var tabUrl = "";
   var meta = _tabMeta.get(tabId);
   if (meta && meta.url) tabUrl = meta.url;
+  else if (buf.pageUrl) tabUrl = buf.pageUrl;
   else if (scripts[0].url) tabUrl = scripts[0].url;
 
   // Analyze combined as a single script (forceScript=true for shared global scope)
