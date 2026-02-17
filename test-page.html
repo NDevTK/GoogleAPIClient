@@ -7,6 +7,7 @@
 <p>The button below fires the actual requests — use it to compare network-learned vs AST-learned.</p>
 <button id="fire" style="font-size:1.2em;padding:8px 20px;margin:12px 0">Fire All Requests</button>
 <pre id="log" style="background:#f4f4f4;padding:12px;max-height:400px;overflow:auto"></pre>
+<div id="xss-target" style="border:2px dashed #c00;padding:8px;margin:12px 0;min-height:20px;color:#c00;font-size:11px">XSS target element</div>
 
 <!-- Real libraries — AST must parse these actual minified bundles -->
 <script src="jquery.min.js"></script>
@@ -544,6 +545,118 @@ function test48() {
   getUsers();
   createUser({ name: "Alice", email: "alice@example.com" });
   deleteAccount();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECURITY — Intentional XSS sinks, open redirects, dangerous patterns
+// These should trigger findings in the Security tab.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 49. DOM XSS: location.hash → innerHTML
+function vuln_hashXSS() {
+  var payload = location.hash.substring(1);
+  document.getElementById("xss-target").innerHTML = payload;
+}
+
+// 50. DOM XSS: location.search → document.write
+function vuln_searchWrite() {
+  var params = location.search;
+  document.write("<div>" + params + "</div>");
+}
+
+// 51. DOM XSS: document.referrer → outerHTML
+function vuln_referrerOuter() {
+  var ref = document.referrer;
+  document.getElementById("xss-target").outerHTML = "<span>" + ref + "</span>";
+}
+
+// 52. Eval injection: location.hash → eval
+function vuln_evalHash() {
+  var code = decodeURIComponent(location.hash.slice(1));
+  eval(code);
+}
+
+// 53. DOM XSS: URL search param → insertAdjacentHTML
+function vuln_insertAdjacent() {
+  var q = location.search.substring(1);
+  document.getElementById("xss-target").insertAdjacentHTML("beforeend", q);
+}
+
+// 54. DOM XSS: window.name → innerHTML (cross-window taint)
+function vuln_windowName() {
+  var data = window.name;
+  document.getElementById("xss-target").innerHTML = data;
+}
+
+// 55. DOM XSS: document.cookie → innerHTML
+function vuln_cookieXSS() {
+  var cookies = document.cookie;
+  document.getElementById("xss-target").innerHTML = "<pre>" + cookies + "</pre>";
+}
+
+// 56. Open redirect: location.hash → location.href
+function vuln_openRedirect() {
+  var url = location.hash.substring(1);
+  location.href = url;
+}
+
+// 57. Open redirect: search param → location.assign
+function vuln_redirectAssign() {
+  var next = location.search.split("next=")[1];
+  location.assign(next);
+}
+
+// 58. DOM XSS: setAttribute with event handler
+function vuln_setAttributeOnError() {
+  var handler = location.hash.substring(1);
+  document.getElementById("xss-target").setAttribute("onerror", handler);
+}
+
+// 59. Eval via setTimeout with string argument
+function vuln_setTimeoutEval() {
+  var action = location.search.substring(1);
+  setTimeout(action, 0);
+}
+
+// 60. Eval via new Function
+function vuln_newFunction() {
+  var body = location.hash.substring(1);
+  var fn = new Function("x", body);
+  fn(42);
+}
+
+// 61. postMessage listener without origin check
+window.addEventListener("message", function(e) {
+  document.getElementById("xss-target").innerHTML = e.data;
+});
+
+// 62. Prototype pollution with user-controlled key
+function vuln_protoPollution() {
+  var key = location.hash.substring(1);
+  var obj = {};
+  obj[key] = true;
+}
+
+// 63. Multi-hop taint: location.search → variable → function → innerHTML
+function vuln_multiHop() {
+  var raw = location.search;
+  var decoded = decodeURIComponent(raw);
+  renderContent(decoded);
+}
+function renderContent(html) {
+  document.getElementById("xss-target").innerHTML = html;
+}
+
+// 64. Template literal XSS: location.hash → template → innerHTML
+function vuln_templateXSS() {
+  var tag = location.hash.substring(1);
+  document.getElementById("xss-target").innerHTML = `<b class="${tag}">styled</b>`;
+}
+
+// 65. Open redirect via window.location.replace
+function vuln_locationReplace() {
+  var dest = location.search.split("url=")[1];
+  window.location.replace(dest);
 }
 
 // --- Button handler: fire everything ---

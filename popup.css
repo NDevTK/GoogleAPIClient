@@ -163,13 +163,16 @@ nav {
   font-size: 11px;
   background: #161b22;
   color: #e6edf3;
-  padding: 4px 8px;
+  padding: 6px 8px;
   margin-top: 4px;
   border-radius: 4px;
   border-left: 3px solid #f85149;
   overflow-x: auto;
   white-space: pre;
   max-width: 100%;
+  max-height: 120px;
+  overflow-y: auto;
+  line-height: 1.5;
 }
 
 .badge {
