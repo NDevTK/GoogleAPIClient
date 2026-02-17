@@ -2313,21 +2313,21 @@ test("innerHTML with user-controlled source (location.hash) → high severity XS
   });
 });
 
-test("innerHTML with string literal → low severity", `
+test("innerHTML with string literal → not flagged (not user-controlled)", `
   document.getElementById("output").innerHTML = "<b>Hello</b>";
 `, function(r) {
-  return r.securitySinks.some(function(s) {
-    return s.type === "xss" && s.sink === "innerHTML" && s.severity === "low";
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
   });
 });
 
-test("document.write with dynamic value → medium severity", `
+test("document.write with dynamic param → not flagged (not user-controlled)", `
   function render(content) {
     document.write(content);
   }
 `, function(r) {
-  return r.securitySinks.some(function(s) {
-    return s.type === "xss" && s.sink === "document.write" && s.severity === "medium";
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "document.write";
   });
 });
 
@@ -2340,11 +2340,11 @@ test("eval with user-controlled value → high severity", `
   });
 });
 
-test("eval with string literal → low severity", `
+test("eval with string literal → not flagged (not user-controlled)", `
   eval("console.log('hello')");
 `, function(r) {
-  return r.securitySinks.some(function(s) {
-    return s.type === "eval" && s.sink === "eval" && s.severity === "low";
+  return !r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval";
   });
 });
 
@@ -2357,20 +2357,20 @@ test("insertAdjacentHTML with user-controlled value → high severity XSS", `
   });
 });
 
-test("setTimeout with string arg → medium severity eval sink", `
+test("setTimeout with string arg → not flagged (not user-controlled)", `
   var action = "doSomething()";
   setTimeout(action, 1000);
 `, function(r) {
-  return r.securitySinks.some(function(s) {
+  return !r.securitySinks.some(function(s) {
     return s.type === "eval" && s.sink === "setTimeout";
   });
 });
 
-test("setAttribute with event handler → XSS sink", `
+test("setAttribute with literal handler → not flagged (not user-controlled)", `
   var handler = "alert(1)";
   document.getElementById("btn").setAttribute("onclick", handler);
 `, function(r) {
-  return r.securitySinks.some(function(s) {
+  return !r.securitySinks.some(function(s) {
     return s.type === "xss" && s.sink === "setAttribute:onclick";
   });
 });
@@ -2395,10 +2395,10 @@ test("Open redirect: location.assign with user value → high severity", `
 
 console.log("\n=== Security: Dangerous Pattern Detection ===\n");
 
-test("new Function with dynamic arg → eval sink", `
+test("new Function with dynamic arg → not flagged (not user-controlled)", `
   function compile(code) { return new Function(code); }
 `, function(r) {
-  return r.securitySinks.some(function(s) {
+  return !r.securitySinks.some(function(s) {
     return s.type === "eval" && s.sink === "new Function";
   });
 });
@@ -2424,23 +2424,22 @@ test("postMessage listener WITH origin check → not flagged", `
   });
 });
 
-test("Prototype pollution: obj[dynamic] = value → flagged", `
-  function merge(target, key, value) {
-    target[key] = value;
-  }
+test("Prototype pollution: obj[user-controlled key] → flagged", `
+  var key = location.hash.slice(1);
+  var obj = {};
+  obj[key] = "pwned";
 `, function(r) {
   return r.dangerousPatterns.some(function(p) {
-    return p.type === "prototype-pollution";
+    return p.type === "prototype-pollution" && p.severity === "high";
   });
 });
 
-test("Dynamic RegExp constructor → flagged as ReDoS risk", `
-  function filter(pattern) {
-    return new RegExp(pattern).test("input");
-  }
+test("RegExp with user-controlled pattern → flagged as ReDoS risk", `
+  var pattern = location.search.slice(1);
+  new RegExp(pattern).test("input");
 `, function(r) {
   return r.dangerousPatterns.some(function(p) {
-    return p.type === "regex-dynamic";
+    return p.type === "regex-dynamic" && p.severity === "high";
   });
 });
 

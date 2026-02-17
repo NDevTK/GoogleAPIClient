@@ -25,6 +25,7 @@ const globalStore = {
   discoveryDocs: new Map(), // service → { status, url, method, apiKey, fetchedAt, summary }
   probeResults: new Map(), // endpointKey → probe result
   scopes: new Map(), // service → string[]
+  securityFindings: new Map(), // sourceUrl → { sourceUrl, securitySinks[], dangerousPatterns[] }
 };
 
 // ─── Key Extraction ──────────────────────────────────────────────────────────
@@ -270,6 +271,7 @@ function _serializeGlobalStore() {
     ),
     probeResults: Object.fromEntries(globalStore.probeResults),
     scopes: Object.fromEntries(globalStore.scopes),
+    securityFindings: Object.fromEntries(globalStore.securityFindings),
     savedAt: Date.now(),
   };
 }
@@ -300,6 +302,10 @@ function _deserializeIntoGlobalStore(s) {
   if (s.scopes) {
     for (const [k, v] of Object.entries(s.scopes))
       globalStore.scopes.set(k, v);
+  }
+  if (s.securityFindings) {
+    for (const [k, v] of Object.entries(s.securityFindings))
+      globalStore.securityFindings.set(k, v);
   }
 }
 
@@ -389,6 +395,12 @@ function mergeToGlobal(tab) {
   for (const [k, v] of tab.scopes) {
     globalStore.scopes.set(k, v);
   }
+  if (tab._securityFindings) {
+    for (var sf = 0; sf < tab._securityFindings.length; sf++) {
+      var finding = tab._securityFindings[sf];
+      globalStore.securityFindings.set(finding.sourceUrl || ("unknown_" + sf), finding);
+    }
+  }
   scheduleSave();
 }
 
@@ -398,6 +410,7 @@ async function clearGlobalStore() {
   globalStore.discoveryDocs.clear();
   globalStore.probeResults.clear();
   globalStore.scopes.clear();
+  globalStore.securityFindings.clear();
   try {
     await _idbClear();
   } catch (_) {
@@ -4588,6 +4601,21 @@ function serializeApiKeyEntry(v) {
   };
 }
 
+function mergedSecurityFindings(tab) {
+  // Global base (keyed by sourceUrl), tab overwrites
+  var merged = new Map();
+  for (const [k, v] of globalStore.securityFindings) {
+    merged.set(k, v);
+  }
+  if (tab._securityFindings) {
+    for (var i = 0; i < tab._securityFindings.length; i++) {
+      var f = tab._securityFindings[i];
+      merged.set(f.sourceUrl || ("unknown_" + i), f);
+    }
+  }
+  return [...merged.values()];
+}
+
 function serializeTabData(tab) {
   // Merge global store (base) with tab data (tab wins on conflict)
 
@@ -4668,7 +4696,7 @@ function serializeTabData(tab) {
     discoveryDocs: mergedDiscovery,
     probeResults: mergedProbe,
     requestLog: tab.requestLog || [],
-    securityFindings: tab._securityFindings || [],
+    securityFindings: mergedSecurityFindings(tab),
   };
 }
 
