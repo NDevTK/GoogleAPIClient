@@ -3848,6 +3848,9 @@ function resolveEndpointSchema(tabId, endpointKey, service, methodId) {
             _defaultValue: pDef._defaultValue ?? null,
             _defaultConfidence: pDef._defaultConfidence ?? null,
             _range: pDef._range || null,
+            // AST-discovered valid values
+            _astValidValues: pDef._astValidValues || null,
+            _astValueSource: pDef._astValueSource || null,
           };
         }
       }

@@ -158,6 +158,20 @@ nav {
   color: #79c0ff;
 }
 
+.code-context {
+  font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+  font-size: 11px;
+  background: #161b22;
+  color: #e6edf3;
+  padding: 4px 8px;
+  margin-top: 4px;
+  border-radius: 4px;
+  border-left: 3px solid #f85149;
+  overflow-x: auto;
+  white-space: pre;
+  max-width: 100%;
+}
+
 .badge {
   display: inline-block;
   font-size: 10px;
@@ -760,6 +774,32 @@ details summary:hover {
   margin-bottom: 2px;
   max-height: 2.4em;
   overflow: hidden;
+}
+
+.field-ast-values {
+  font-size: 10px;
+  color: #8b949e;
+  margin: 2px 0;
+  line-height: 1.6;
+}
+.ast-values-label {
+  color: #58a6ff;
+  font-weight: 500;
+}
+.ast-value-chip {
+  display: inline-block;
+  background: #1c2536;
+  color: #79c0ff;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+  font-size: 10px;
+  cursor: pointer;
+  border: 1px solid #30363d;
+}
+.ast-value-chip:hover {
+  background: #263445;
+  border-color: #58a6ff;
 }
 
 .form-input {

@@ -511,6 +511,10 @@ function renderSecurityPanel() {
     var sevBadge = '<span class="badge badge-' + esc(sev) + '">' + esc(sev.toUpperCase()) + '</span>';
     var loc = item.location ? "L" + item.location.line + ":" + item.location.column : "";
 
+    var codeHtml = item.codeContext
+      ? '<div class="code-context">' + esc(item.codeContext) + '</div>'
+      : '';
+
     if (entry.kind === "sink") {
       var typeBadge = "";
       if (item.type === "xss") typeBadge = '<span class="badge badge-xss">XSS</span>';
@@ -525,6 +529,7 @@ function renderSecurityPanel() {
       html += '<div class="card">'
         + '<div class="card-label">' + typeBadge + ' ' + sevBadge + ' ' + esc(item.sink) + '</div>'
         + '<div class="card-value">' + esc(sourceDesc) + '</div>'
+        + codeHtml
         + '<div class="card-meta">' + esc(entry.srcLabel) + (loc ? " " + esc(loc) : "") + '</div>'
         + '</div>';
     } else {
@@ -533,6 +538,7 @@ function renderSecurityPanel() {
       html += '<div class="card">'
         + '<div class="card-label">' + patBadge + ' ' + sevBadge + '</div>'
         + '<div class="card-value">' + esc(item.description || item.type) + '</div>'
+        + codeHtml
         + '<div class="card-meta">' + esc(entry.srcLabel) + (loc ? " " + esc(loc) : "") + '</div>'
         + '</div>';
     }
@@ -851,6 +857,13 @@ function buildFormFields(schema, initialData = null) {
             enum: param.enum || null,
             location: param.location,
             parentSchema: "params",
+            _astValidValues: param._astValidValues || null,
+            _astValueSource: param._astValueSource || null,
+            _detectedEnum: param._detectedEnum || false,
+            _defaultValue: param._defaultValue ?? null,
+            _defaultConfidence: param._defaultConfidence ?? null,
+            _requiredConfidence: param._requiredConfidence ?? null,
+            _range: param._range || null,
           },
           "param",
           0,
@@ -959,6 +972,19 @@ function createFieldInput(
     const desc = el("div", "field-description");
     desc.textContent = fieldDef.description;
     wrapper.appendChild(desc);
+  }
+
+  // Show AST-discovered valid values as clickable chips
+  if (fieldDef._astValidValues && fieldDef._astValidValues.length > 0 && !fieldDef.enum) {
+    const valHint = el("div", "field-ast-values");
+    valHint.innerHTML = '<span class="ast-values-label">Values found in JS:</span> '
+      + fieldDef._astValidValues.map(v => '<span class="ast-value-chip">' + esc(String(v)) + '</span>').join(' ');
+    valHint.addEventListener("click", function(e) {
+      if (!e.target.classList.contains("ast-value-chip")) return;
+      var input = wrapper.querySelector(".form-input");
+      if (input) { input.value = e.target.textContent; input.dispatchEvent(new Event("input")); }
+    });
+    wrapper.appendChild(valHint);
   }
 
   if (fieldDef.type === "message" && fieldDef.children?.length) {
