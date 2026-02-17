@@ -1,6 +1,6 @@
 # API Security Researcher
 
-A Chrome Extension for reverse-engineering and security testing APIs across any website. It passively discovers, maps, and learns the structure, protocols, and authentication of APIs as you browse.
+A Chrome Extension for reverse-engineering, security testing, and JavaScript security code review across any website. It passively discovers, maps, and learns the structure, protocols, and authentication of APIs as you browse, while analyzing JavaScript bundles for security vulnerabilities.
 
 ## Key Features
 
@@ -32,7 +32,16 @@ A Chrome Extension for reverse-engineering and security testing APIs across any 
 - **OpenAPI Spec Import**: Import OpenAPI/Swagger specs to pre-populate schemas. Imported data merges with locally-learned data without overwriting.
 - **Unified Inspection Workflow**: Click any request in the log to inspect decoded Protobuf, JSON, headers, and historical response data directly in the Send tab.
 
-### 4. Cross-Tab Request Log
+### 4. JavaScript Security Code Review
+
+- **AST-Based Analysis**: Babel parser + traverse with scope-aware inter-procedural tracing analyzes JavaScript bundles for security vulnerabilities — no regex or pattern matching against minified code.
+- **DOM XSS Sink Detection**: Detects dangerous sinks (`innerHTML`, `outerHTML`, `document.write`, `eval`, `new Function`, `insertAdjacentHTML`, `setTimeout`/`setInterval` with string arg, `setAttribute("on*")`).
+- **Taint Source Tracking**: Traces value origins through scope bindings, function parameters, string concatenation, and method calls. Classifies sources as user-controlled (`location.*`, `document.referrer`, `document.cookie`, `window.name`, `event.data`), dynamic, or literal.
+- **Dangerous Pattern Detection**: Flags `postMessage` listeners without `event.origin` checks, prototype pollution (`obj[dynamicKey] = value`), dynamic `RegExp` construction, and open redirects (`location.href`/`location.assign`/`location.replace`).
+- **Severity Classification**: Findings are rated high (user-controlled source), medium (dynamic/unresolvable), or low (literal) based on taint tracking results.
+- **Security Panel**: Dedicated popup tab displays all findings sorted by severity with type badges, source descriptions, and script locations.
+
+### 5. Cross-Tab Request Log
 
 - **Multi-Tab Viewing**: Filter the request log by active tab, all tabs, or a specific tab via the dropdown selector.
 - **Format Badges**: Request log cards show protocol badges (PROTO, JSPB, BATCH, gRPC-WEB, SSE, NDJSON, GRAPHQL, MULTIPART, ASYNC).
@@ -48,26 +57,30 @@ A Chrome Extension for reverse-engineering and security testing APIs across any 
 
 ## Usage
 
-1. **Browse**: Visit any website. The extension passively maps APIs and searches for documentation in the background.
+1. **Browse**: Visit any website. The extension passively maps APIs, searches for documentation, and analyzes JavaScript bundles for security vulnerabilities in the background.
 2. **Inspect**: Open the popup to see discovered keys, mapped interfaces, and request traffic.
-3. **Analyze**: Click a request in the log to view decoded Protobuf, JSON, gRPC-Web, GraphQL, or batchexecute traffic and historical responses in the Send tab.
-4. **Map**: Click the **pencil** icon next to any field to give it a descriptive name.
-5. **Test**: Load any method into the Send tab to replay it, or export as curl/fetch/Python for use in external tools.
-6. **Share**: Export a service as an OpenAPI spec, or import a spec from another researcher.
+3. **Review**: Check the **Security** tab for DOM XSS sinks, dangerous patterns, and open redirects found in the page's JavaScript bundles, sorted by severity.
+4. **Analyze**: Click a request in the log to view decoded Protobuf, JSON, gRPC-Web, GraphQL, or batchexecute traffic and historical responses in the Send tab.
+5. **Map**: Click the **pencil** icon next to any field to give it a descriptive name.
+6. **Test**: Load any method into the Send tab to replay it, or export as curl/fetch/Python for use in external tools.
+7. **Share**: Export a service as an OpenAPI spec, or import a spec from another researcher.
 
 ## Architecture
 
 ```
 intercept.js   Main-world fetch/XHR interceptor (response body capture)
 content.js     Isolated-world content script (DOM key scanning, fetch relay, intercept relay)
-background.js  Service worker (request interception, schema learning, export, storage)
-popup.js       Popup controller (UI rendering, cross-tab filtering, replay)
+background.js  Service worker (request interception, schema learning, export, security findings storage)
+popup.js       Popup controller (UI rendering, security findings, cross-tab filtering, replay)
 popup.html     Popup markup
 popup.css      Popup styles
 lib/
+  ast.js         AST-based JS bundle analysis (API discovery + security code review)
+  sourcemap.js   Source map recovery (TypeScript interfaces, enums, type aliases)
   discovery.js   Protocol parsers, OpenAPI conversion (both directions)
   protobuf.js    Wire-format codec, JSPB decoder, recursive base64 scanning
   req2proto.js   Error-based schema probing (Google + generic)
+  babel-bundle.js  Bundled Babel runtime (parser, traverse, types)
 ```
 
 ## Security & Privacy

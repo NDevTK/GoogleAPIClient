@@ -1,4 +1,4 @@
-// Popup controller: renders captured data and sends requests.
+// Popup controller: renders captured data, security findings, and sends requests.
 
 let currentTabId = null;
 let tabData = null;
@@ -421,6 +421,7 @@ function render() {
   }
 
   renderDataPanel();
+  renderSecurityPanel();
   renderSendPanel();
   renderResponsePanel();
   populateTabFilter();
@@ -462,6 +463,82 @@ function renderDataPanel() {
     }
     keysContainer.innerHTML = html;
   }
+}
+
+// ─── Security Panel ──────────────────────────────────────────────────────────
+
+function renderSecurityPanel() {
+  const container = document.getElementById("security-findings");
+  const empty = document.getElementById("security-empty");
+  container.innerHTML = "";
+
+  const findings = tabData?.securityFindings || [];
+
+  // Flatten all sinks and patterns with their source URL
+  var allItems = [];
+  for (var fi = 0; fi < findings.length; fi++) {
+    var f = findings[fi];
+    var srcLabel = f.sourceUrl || "(unknown)";
+    try { srcLabel = new URL(f.sourceUrl).pathname.split("/").pop() || srcLabel; } catch (_) {}
+    for (var si = 0; si < (f.securitySinks || []).length; si++) {
+      var s = f.securitySinks[si];
+      allItems.push({ kind: "sink", item: s, sourceUrl: f.sourceUrl, srcLabel: srcLabel });
+    }
+    for (var di = 0; di < (f.dangerousPatterns || []).length; di++) {
+      var d = f.dangerousPatterns[di];
+      allItems.push({ kind: "pattern", item: d, sourceUrl: f.sourceUrl, srcLabel: srcLabel });
+    }
+  }
+
+  if (!allItems.length) {
+    empty.style.display = "block";
+    return;
+  }
+  empty.style.display = "none";
+
+  // Sort: high first, then medium, then low
+  var sevOrder = { high: 0, medium: 1, low: 2 };
+  allItems.sort(function(a, b) {
+    return (sevOrder[a.item.severity] || 2) - (sevOrder[b.item.severity] || 2);
+  });
+
+  var html = '<div class="section-header">Security Findings <span class="badge badge-status">' + allItems.length + '</span></div>';
+
+  for (var i = 0; i < allItems.length; i++) {
+    var entry = allItems[i];
+    var item = entry.item;
+    var sev = item.severity || "low";
+    var sevBadge = '<span class="badge badge-' + esc(sev) + '">' + esc(sev.toUpperCase()) + '</span>';
+    var loc = item.location ? "L" + item.location.line + ":" + item.location.column : "";
+
+    if (entry.kind === "sink") {
+      var typeBadge = "";
+      if (item.type === "xss") typeBadge = '<span class="badge badge-xss">XSS</span>';
+      else if (item.type === "eval") typeBadge = '<span class="badge badge-eval">EVAL</span>';
+      else if (item.type === "redirect") typeBadge = '<span class="badge badge-redirect">REDIRECT</span>';
+      else typeBadge = '<span class="badge badge-danger">' + esc(item.type.toUpperCase()) + '</span>';
+
+      var sourceDesc = item.sourceType === "user-controlled"
+        ? "user-controlled" + (item.source ? ": " + esc(item.source) : "")
+        : item.sourceType === "dynamic" ? "dynamic value" : "literal value";
+
+      html += '<div class="card">'
+        + '<div class="card-label">' + typeBadge + ' ' + sevBadge + ' ' + esc(item.sink) + '</div>'
+        + '<div class="card-value">' + esc(sourceDesc) + '</div>'
+        + '<div class="card-meta">' + esc(entry.srcLabel) + (loc ? " " + esc(loc) : "") + '</div>'
+        + '</div>';
+    } else {
+      var patBadge = '<span class="badge badge-danger">' + esc((item.type || "pattern").toUpperCase().replace(/-/g, " ")) + '</span>';
+
+      html += '<div class="card">'
+        + '<div class="card-label">' + patBadge + ' ' + sevBadge + '</div>'
+        + '<div class="card-value">' + esc(item.description || item.type) + '</div>'
+        + '<div class="card-meta">' + esc(entry.srcLabel) + (loc ? " " + esc(loc) : "") + '</div>'
+        + '</div>';
+    }
+  }
+
+  container.innerHTML = html;
 }
 
 // ─── Send Panel ──────────────────────────────────────────────────────────────

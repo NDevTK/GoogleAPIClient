@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A Chrome Extension (MV3) for API discovery, protocol reverse-engineering (Protobuf/JSPB/JSON/gRPC-Web/GraphQL/SSE/NDJSON), and security testing across all websites.
+A Chrome Extension (MV3) for API discovery, protocol reverse-engineering (Protobuf/JSPB/JSON/gRPC-Web/GraphQL/SSE/NDJSON), JavaScript security code review, and security testing across all websites.
 
 ## Core Architecture
 
@@ -40,7 +40,7 @@ A Chrome Extension (MV3) for API discovery, protocol reverse-engineering (Protob
 | `lib/discovery.js` | Protocol parsers (batchexecute, async chunked, gRPC-Web, GraphQL, SSE, NDJSON, multipart), OpenAPI bidirectional conversion. |
 | `lib/protobuf.js` | Protobuf wire-format codec, JSPB decoder, recursive base64 key scanning. |
 | `lib/req2proto.js` | Error-based schema probing engine. |
-| `lib/ast.js` | AST-based JS bundle analysis. Babel parser + traverse with scope-aware inter-procedural tracing. Extracts fetch call sites, proto field maps, enums, value constraints. |
+| `lib/ast.js` | AST-based JS bundle analysis. Babel parser + traverse with scope-aware inter-procedural tracing. Extracts fetch call sites, proto field maps, enums, value constraints. Security code review: DOM XSS sinks, dangerous patterns (eval, postMessage, prototype pollution, open redirect), taint source tracking. |
 | `lib/sourcemap.js` | Source map recovery. Babel parser with TypeScript plugin extracts interfaces, enums, type aliases from original sources. |
 | `lib/babel-bundle.js` | Bundled Babel runtime (parser, traverse, types). Built by `node build.js` via esbuild. |
 | `build.js` | esbuild config for bundling Babel into an IIFE for the service worker. |
@@ -54,6 +54,10 @@ All AST analysis uses Babel's scope system (`path.scope.getBinding()`) for varia
 - **Resolve values**: Use `path.scope.getBinding()` to follow variable references through proper scope chains. Collect value constraints from switch/case, `.includes()`, equality chains scoped by `scope.uid`.
 - **Feed into the learning pipeline**: AST call sites are converted to synthetic requests and passed through `learnFromRequest()` — the same function that learns from real network traffic. AST learns APIs before they happen; network traffic confirms and enriches them.
 - **No protocol classification**: AST does not classify calls as gRPC/REST/RPC. Protocol detection is the network monitoring code's job.
+- **Security sink detection**: Detect DOM XSS sinks (`innerHTML`, `outerHTML`, `document.write`, `eval`, `new Function`, `insertAdjacentHTML`, `setTimeout`/`setInterval` with string arg, `setAttribute("on*")`). Trace dangerous values via `_traceValueSource()` to classify severity (high = user-controlled, medium = dynamic, low = literal).
+- **Taint source tracking**: `_traceValueSource()` classifies value origins by tracing through scope bindings, function params, string concatenation, and method calls. Known user-controlled sources: `location.*`, `document.referrer`, `document.URL`, `document.cookie`, `window.name`, `event.data`. Propagates taint through variable assignment chains and method calls on tainted objects.
+- **Dangerous pattern detection**: Detect `postMessage` listeners without `event.origin` checks, prototype pollution (`obj[dynamicKey] = value`), dynamic `RegExp` construction, open redirects (`location.href`/`location.assign`/`location.replace` with user-controlled values).
+- **No sensitive data scanning**: API key and token extraction is handled by `KEY_PATTERNS` in `background.js` — AST does not duplicate this.
 
 ## Development Standards
 
@@ -95,3 +99,4 @@ All AST analysis uses Babel's scope system (`path.scope.getBinding()`) for varia
 - **UI Changes**: Ensure new components maintain scroll position in their respective panels. The Send panel includes export buttons (curl, fetch, Python).
 - **Cross-Tab Features**: Tab metadata tracked in `_tabMeta` Map. Filter logic in popup controlled by `logFilter` state variable. New message types: `GET_TAB_LIST`, `GET_ALL_LOGS`.
 - **OpenAPI Export/Import**: Service-level via `EXPORT_OPENAPI`/`IMPORT_OPENAPI` messages. `convertDiscoveryToOpenApi()` / `convertOpenApiToDiscovery()` in `lib/discovery.js`. Service selector in popup filters methods and controls export scope.
+- **Add Security Pattern**: For new DOM XSS sinks, add detection to `_processSecurityCallSink` (call-based) or `_processSecurityAssignSink` (assignment-based) in `lib/ast.js`. For new dangerous patterns, add to `_processDangerousPattern` (call-based) or `_processDangerousAssignment` (assignment-based). Use `_traceValueSource()` to classify severity. New taint sources go in `_TAINT_SOURCES`. Add tests in `test-ast.js` in the "Security:" test sections.

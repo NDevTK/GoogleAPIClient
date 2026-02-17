@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "API Security Researcher",
   "version": "2.0.0",
-  "description": "API discovery, passive response capture, smart schema learning, and request export.",
+  "description": "API discovery, protocol reverse-engineering, JavaScript security code review, and request export.",
   "permissions": [
     "webRequest",
     "storage",
@@ -43,7 +43,7 @@
     "128": "icons/icon128.png"
   },
   "content_security_policy": {
-    "extension_pages": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; form-action 'none'; upgrade-insecure-requests; block-all-mixed-content"
+    "extension_pages": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src http: https: data:; frame-ancestors 'none'; form-action 'none'"
   },
   "cross_origin_embedder_policy": {
     "value": "require-corp"

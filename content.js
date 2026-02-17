@@ -246,15 +246,15 @@
       return;
     }
     if (scriptEl.src) {
-      // External script — fetch from page context
+      // External script — send URL to background (it has host_permissions, no CORS issues)
       var src = scriptEl.src;
       if (_sentScripts.has(src)) return;
-      fetch(src, { credentials: "same-origin" }).then(function(r) {
-        if (r.ok) return r.text();
-        return null;
-      }).then(function(code) {
-        if (code) sendScriptSource(src, code);
-      }).catch(function() {});
+      _sentScripts.add(src);
+      chrome.runtime.sendMessage({
+        type: "SCRIPT_SOURCE",
+        url: src,
+        code: null,  // background will fetch the source
+      });
     } else {
       // Inline script
       var code = scriptEl.textContent;

@@ -16,8 +16,15 @@
     <nav>
       <button class="tab active" data-panel="response">Requests</button>
       <button class="tab" data-panel="send">Send</button>
+      <button class="tab" data-panel="security">Security</button>
       <button class="tab" data-panel="data">Keys</button>
     </nav>
+
+    <!-- Security Panel -->
+    <section id="panel-security" class="panel">
+      <div class="empty" id="security-empty">No security findings yet.</div>
+      <div id="security-findings"></div>
+    </section>
 
     <!-- Data Panel -->
     <section id="panel-data" class="panel">

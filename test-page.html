@@ -8,6 +8,10 @@
 <button id="fire" style="font-size:1.2em;padding:8px 20px;margin:12px 0">Fire All Requests</button>
 <pre id="log" style="background:#f4f4f4;padding:12px;max-height:400px;overflow:auto"></pre>
 
+<!-- Real libraries — AST must parse these actual minified bundles -->
+<script src="jquery.min.js"></script>
+<script src="axios.min.js"></script>
+
 <script>
 // ══════════════════════════════════════════════════════════════════════════════
 // BASIC — Direct fetch patterns
@@ -347,41 +351,9 @@ function test30() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// JQUERY-STYLE — Mock jQuery wrapping fetch, tests $.ajax/$.get/$.post patterns
+// JQUERY — Real jQuery 3.7.1 loaded via <script src="jquery.min.js">
+// jQuery internally uses XMLHttpRequest — AST must trace through its internals
 // ══════════════════════════════════════════════════════════════════════════════
-
-// Minimal jQuery mock that wraps fetch (real jQuery wraps XHR)
-var jQuery = (function() {
-  function ajax(settings) {
-    var url = typeof settings === "string" ? settings : settings.url;
-    var method = (settings.type || settings.method || "GET").toUpperCase();
-    var headers = settings.headers || {};
-    if (settings.contentType !== false) {
-      headers["Content-Type"] = settings.contentType || "application/x-www-form-urlencoded";
-    }
-    var body = undefined;
-    if (settings.data) {
-      body = typeof settings.data === "string" ? settings.data : JSON.stringify(settings.data);
-    }
-    return fetch(url, { method: method, headers: headers, body: body });
-  }
-  function get(url, data, callback) {
-    return ajax({ url: url, type: "GET", data: data, success: callback });
-  }
-  function post(url, data, callback) {
-    return ajax({ url: url, type: "POST", data: data, success: callback });
-  }
-  function getJSON(url, data, callback) {
-    return ajax({ url: url, type: "GET", dataType: "json", data: data, success: callback });
-  }
-  var $ = function(sel) { return document.querySelector(sel); };
-  $.ajax = ajax;
-  $.get = get;
-  $.post = post;
-  $.getJSON = getJSON;
-  return $;
-})();
-var $ = jQuery;
 
 // 31. $.ajax with full config
 function test31() {
@@ -436,33 +408,13 @@ function test36() {
   });
 }
 
-// 37. jQuery-style XHR mock (real jQuery uses XHR internally, not fetch)
-var jQueryXHR = (function() {
-  function ajax(settings) {
-    var xhr = new XMLHttpRequest();
-    var method = (settings.type || settings.method || "GET").toUpperCase();
-    xhr.open(method, settings.url);
-    if (settings.headers) {
-      for (var h in settings.headers) xhr.setRequestHeader(h, settings.headers[h]);
-    }
-    if (settings.contentType !== false) {
-      xhr.setRequestHeader("Content-Type", settings.contentType || "application/x-www-form-urlencoded");
-    }
-    var body = null;
-    if (settings.data) {
-      body = typeof settings.data === "string" ? settings.data : JSON.stringify(settings.data);
-    }
-    xhr.send(body);
-    return xhr;
-  }
-  return { ajax: ajax };
-})();
+// 37. jQuery $.ajax with JSON body and contentType
 function test37() {
-  jQueryXHR.ajax({
-    url: "https://api.example.com/v1/jqxhr/search",
+  $.ajax({
+    url: "https://api.example.com/v1/jquery/search",
     type: "POST",
     contentType: "application/json",
-    data: { query: "test", page: 1 },
+    data: JSON.stringify({ query: "test", page: 1 }),
     headers: { "X-Request-Id": "abc123" }
   });
 }
@@ -471,28 +423,8 @@ function test37() {
 // OTHER LIBRARIES — Axios-style, superagent-style, other browser APIs
 // ══════════════════════════════════════════════════════════════════════════════
 
-// 38. Axios-style instance methods
-var axios = {
-  request: function(config) {
-    return fetch(config.url, {
-      method: (config.method || "GET").toUpperCase(),
-      headers: config.headers || {},
-      body: config.data ? JSON.stringify(config.data) : undefined
-    });
-  },
-  get: function(url, config) {
-    return this.request({ url: url, method: "GET", headers: config && config.headers || {} });
-  },
-  post: function(url, data, config) {
-    return this.request({ url: url, method: "POST", data: data, headers: config && config.headers || {} });
-  },
-  put: function(url, data) {
-    return this.request({ url: url, method: "PUT", data: data });
-  },
-  delete: function(url) {
-    return this.request({ url: url, method: "DELETE" });
-  }
-};
+// 38. Real Axios — loaded via <script src="axios.min.js">
+// Axios internally uses XMLHttpRequest — AST must trace through its internals
 function test38() {
   axios.get("https://api.example.com/v1/axios/items", { headers: { "Accept": "application/json" } });
   axios.post("https://api.example.com/v1/axios/items", { name: "widget", price: 42 });
@@ -500,32 +432,11 @@ function test38() {
   axios.delete("https://api.example.com/v1/axios/items/456");
 }
 
-// 39. Superagent-style fluent chain — internally builds up config then calls fetch
-function Request(method, url) {
-  this._method = method;
-  this._url = url;
-  this._headers = {};
-  this._body = null;
-}
-Request.prototype.set = function(key, val) { this._headers[key] = val; return this; };
-Request.prototype.send = function(data) { this._body = data; return this; };
-Request.prototype.end = function(callback) {
-  var opts = { method: this._method, headers: this._headers };
-  if (this._body) opts.body = JSON.stringify(this._body);
-  return fetch(this._url, opts);
-};
-var superagent = {
-  get: function(url) { return new Request("GET", url); },
-  post: function(url) { return new Request("POST", url); }
-};
+// 39. Axios instance with baseURL
 function test39() {
-  superagent.get("https://api.example.com/v1/agent/tasks")
-    .set("Authorization", "Bearer tok123")
-    .end();
-  superagent.post("https://api.example.com/v1/agent/tasks")
-    .set("Content-Type", "application/json")
-    .send({ title: "New task", priority: "high" })
-    .end();
+  var api = axios.create({ baseURL: "https://api.example.com/v1/axinst" });
+  api.get("/tasks", { headers: { "Authorization": "Bearer tok123" } });
+  api.post("/tasks", { title: "New task", priority: "high" });
 }
 
 // 40. navigator.sendBeacon — browser API for analytics/telemetry
@@ -673,9 +584,9 @@ document.getElementById("fire").onclick = function() {
     ["34. $.getJSON", test34],
     ["35. jQuery module", test35],
     ["36. $.ajax dynamic", test36],
-    ["37. jQueryXHR mock", test37],
-    ["38. Axios-style", test38],
-    ["39. Superagent chain", test39],
+    ["37. $.ajax JSON POST", test37],
+    ["38. Real Axios", test38],
+    ["39. Axios instance", test39],
     ["40. sendBeacon", test40],
     ["41. EventSource", test41],
     ["42. Image pixel", test42],

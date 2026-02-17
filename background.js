@@ -1,6 +1,6 @@
-// Service worker: intercepts network requests to Google APIs,
-// extracts API keys, endpoints, auth headers, and coordinates
-// discovery document fetching + req2proto fallback probing.
+// Service worker: intercepts network requests, extracts API keys,
+// endpoints, auth headers, coordinates discovery document fetching,
+// req2proto fallback probing, and stores AST security findings.
 
 importScripts("lib/protobuf.js", "lib/discovery.js", "lib/req2proto.js", "lib/stats.js", "lib/chains.js", "lib/babel-bundle.js", "lib/ast.js", "lib/sourcemap.js");
 
@@ -14,6 +14,9 @@ const state = {
 // Session storage for request logs — survives SW restarts, clears on browser close
 const _sessionSaveTimers = new Map(); // tabId → timeoutId
 const _tabMeta = new Map(); // tabId → { title, url, closed? }
+
+// Cross-script AST analysis: buffer scripts per tab, debounce, concatenate + analyze
+const _scriptBuffers = new Map(); // tabId → { scripts: [{url, code}], timer: null }
 
 // Global persistent store — survives tab closes and SW restarts
 const globalStore = {
@@ -2666,6 +2669,205 @@ async function handleResponseBody(tabId, msg) {
   }
 }
 
+// ─── Cross-Script AST Buffering ──────────────────────────────────────────────
+
+function _bufferScript(tabId, scriptUrl, code, pageUrl) {
+  var buf = _scriptBuffers.get(tabId);
+  if (!buf) {
+    buf = { scripts: [], timer: null, pageUrl: pageUrl };
+    _scriptBuffers.set(tabId, buf);
+  }
+
+  // Detect navigation: if page URL changed, clear old buffer
+  if (pageUrl && buf.pageUrl && pageUrl !== buf.pageUrl) {
+    if (buf.timer) clearTimeout(buf.timer);
+    buf.scripts = [];
+    buf.pageUrl = pageUrl;
+    console.debug("[AST:buffer] Navigation detected, cleared buffer for tab=%d", tabId);
+  }
+  if (pageUrl) buf.pageUrl = pageUrl;
+
+  // Deduplicate by URL or content hash
+  var key = scriptUrl || _hashScriptCode(code);
+  for (var i = 0; i < buf.scripts.length; i++) {
+    if (buf.scripts[i].key === key) return; // already buffered
+  }
+
+  buf.scripts.push({ url: scriptUrl, code: code, key: key });
+  console.debug("[AST:buffer] Buffered script %s (%d chars) tab=%d — %d scripts pending",
+    scriptUrl || "(inline)", code.length, tabId, buf.scripts.length);
+
+  // Reset debounce timer — wait for more scripts before combined analysis
+  if (buf.timer) clearTimeout(buf.timer);
+  buf.timer = setTimeout(function() {
+    buf.timer = null;
+    _analyzeCombinedScripts(tabId);
+  }, 1500);
+}
+
+function _fetchAndBufferScript(tabId, scriptUrl, pageUrl) {
+  // Check if already buffered
+  var buf = _scriptBuffers.get(tabId);
+  if (buf) {
+    for (var i = 0; i < buf.scripts.length; i++) {
+      if (buf.scripts[i].key === scriptUrl) return;
+    }
+  }
+
+  fetch(scriptUrl).then(function(resp) {
+    if (!resp.ok) {
+      console.debug("[AST:buffer] Fetch failed for %s: %d %s", scriptUrl, resp.status, resp.statusText);
+      return;
+    }
+    var ct = resp.headers.get("content-type") || "";
+    // Skip non-JS responses (images, CSS, etc. that might share .open() URLs)
+    if (ct && !ct.includes("javascript") && !ct.includes("ecmascript") && !ct.includes("text/plain") && !ct.includes("application/x-javascript")) {
+      console.debug("[AST:buffer] Skipping non-JS content-type for %s: %s", scriptUrl, ct);
+      return;
+    }
+    return resp.text();
+  }).then(function(code) {
+    if (code && code.length >= 50) {
+      _bufferScript(tabId, scriptUrl, code, pageUrl);
+    }
+  }).catch(function(err) {
+    console.debug("[AST:buffer] Fetch error for %s: %s", scriptUrl, err.message || err);
+  });
+}
+
+function _hashScriptCode(code) {
+  var h = 0;
+  for (var i = 0; i < Math.min(code.length, 500); i++) {
+    h = ((h << 5) - h + code.charCodeAt(i)) | 0;
+  }
+  return "inline:" + h;
+}
+
+function _analyzeCombinedScripts(tabId) {
+  var buf = _scriptBuffers.get(tabId);
+  if (!buf || buf.scripts.length === 0) return;
+
+  var tab = getTab(tabId);
+  var scripts = buf.scripts;
+  var totalChars = 0;
+  for (var i = 0; i < scripts.length; i++) totalChars += scripts[i].code.length;
+
+  console.debug("[AST:combined] Analyzing %d scripts (%d total chars) for tab=%d",
+    scripts.length, totalChars, tabId);
+
+  // Extract source map URLs from individual scripts before concatenation
+  var sourceMapScripts = []; // [{url, smUrl}]
+  for (var si = 0; si < scripts.length; si++) {
+    var smUrl = extractSourceMapUrl(scripts[si].code);
+    if (smUrl) {
+      sourceMapScripts.push({ scriptUrl: scripts[si].url, smUrl: smUrl });
+    }
+  }
+
+  // Clear previous AST-derived endpoints (in case of re-analysis due to late scripts)
+  var keysToDelete = [];
+  tab.endpoints.forEach(function(val, key) {
+    if (key.startsWith("AST ") || key.startsWith("AST DYN ")) {
+      keysToDelete.push(key);
+    }
+  });
+  for (var di = 0; di < keysToDelete.length; di++) {
+    tab.endpoints.delete(keysToDelete[di]);
+  }
+  tab._astResults = [];
+
+  // Concatenate all scripts with semicolons (safe delimiter for script mode)
+  var combined = "";
+  for (var ci = 0; ci < scripts.length; ci++) {
+    if (ci > 0) combined += ";\n";
+    combined += scripts[ci].code;
+  }
+
+  // Determine source URL for the combined analysis (use tab URL or first script URL)
+  var tabUrl = "";
+  var meta = _tabMeta.get(tabId);
+  if (meta && meta.url) tabUrl = meta.url;
+  else if (scripts[0].url) tabUrl = scripts[0].url;
+
+  // Analyze combined as a single script (forceScript=true for shared global scope)
+  var analysis;
+  try {
+    analysis = analyzeJSBundle(combined, tabUrl, true);
+  } catch (e) {
+    console.debug("[AST:combined] analyzeJSBundle threw for tab=%d: %s", tabId, e.message);
+    // Fallback: analyze scripts individually
+    for (var fi = 0; fi < scripts.length; fi++) {
+      analyzeScript(tabId, scripts[fi].url, scripts[fi].code);
+    }
+    return;
+  }
+
+  var hasFindings = analysis.protoEnums.length || analysis.protoFieldMaps.length ||
+    analysis.fetchCallSites.length || analysis.sourceMapUrl ||
+    (analysis.securitySinks && analysis.securitySinks.length) ||
+    (analysis.dangerousPatterns && analysis.dangerousPatterns.length);
+  if (!hasFindings && sourceMapScripts.length === 0) {
+    console.debug("[AST:combined] No findings for tab=%d", tabId);
+    return;
+  }
+
+  if (hasFindings) {
+    console.debug("[AST:combined] Findings for tab=%d: %d protoEnums, %d fieldMaps, %d fetchSites, %d secSinks, %d dangerousPatterns",
+      tabId, analysis.protoEnums.length, analysis.protoFieldMaps.length, analysis.fetchCallSites.length,
+      (analysis.securitySinks ? analysis.securitySinks.length : 0),
+      (analysis.dangerousPatterns ? analysis.dangerousPatterns.length : 0));
+
+    tab._astResults.push(analysis);
+    mergeASTResultsIntoVDD(tab, [analysis], tabId);
+    mergeToGlobal(tab);
+    notifyPopup(tabId);
+  }
+
+  // Fetch source maps for individual scripts (each has its own source map)
+  for (var smi = 0; smi < sourceMapScripts.length; smi++) {
+    _fetchSourceMapForScript(tabId, tab, analysis, sourceMapScripts[smi].scriptUrl, sourceMapScripts[smi].smUrl);
+  }
+}
+
+function _fetchSourceMapForScript(tabId, tab, analysis, scriptUrl, smUrl) {
+  try {
+    if (!/^https?:\/\//i.test(smUrl)) {
+      smUrl = new URL(smUrl, new URL(scriptUrl)).href;
+    }
+  } catch (_) {
+    console.debug("[AST:sourcemap] Failed to resolve URL: %s (base: %s)", smUrl, scriptUrl);
+    return;
+  }
+  console.debug("[AST:sourcemap] Fetching: %s (from %s)", smUrl, scriptUrl);
+  pageContextFetch(tabId, smUrl, { method: "GET" }, new URL(smUrl).origin)
+    .then(function(smResp) {
+      if (!smResp.body || smResp.error) {
+        console.debug("[AST:sourcemap] Fetch failed for %s: %s", smUrl, smResp.error || "empty body");
+        return;
+      }
+      try {
+        var smJson = JSON.parse(smResp.body);
+        var smData = parseSourceMap(smJson);
+        analysis.sourceMap = smData;
+        console.debug("[AST:sourcemap] Parsed: %d sources, %d names, %d proto files, %d API client files",
+          smData.sources.length, smData.names.length, smData.protoFileNames.length, smData.apiClientFiles.length);
+        if (smData.sourcesContent && smData.sourcesContent.length) {
+          analysis.sourceMapTypes = extractTypesFromSources(smData.sourcesContent, smData.sources);
+          if (analysis.sourceMapTypes.length) {
+            console.debug("[AST:sourcemap] Extracted %d types", analysis.sourceMapTypes.length);
+          }
+        }
+        mergeASTResultsIntoVDD(tab, [analysis], tabId);
+        mergeToGlobal(tab);
+        notifyPopup(tabId);
+      } catch (e) {
+        console.debug("[AST:sourcemap] Parse error for %s: %s", smUrl, e.message);
+      }
+    }).catch(function(e) {
+      console.debug("[AST:sourcemap] Network error for %s: %s", smUrl, e.message || e);
+    });
+}
+
 // ─── AST Bundle Analysis ─────────────────────────────────────────────────────
 
 function analyzeScript(tabId, scriptUrl, code) {
@@ -2680,15 +2882,20 @@ function analyzeScript(tabId, scriptUrl, code) {
   }
 
   var hasFindings = analysis.protoEnums.length || analysis.protoFieldMaps.length ||
-    analysis.fetchCallSites.length || analysis.sourceMapUrl;
+    analysis.fetchCallSites.length || analysis.sourceMapUrl ||
+    (analysis.securitySinks && analysis.securitySinks.length) ||
+    (analysis.dangerousPatterns && analysis.dangerousPatterns.length);
   if (!hasFindings) {
     console.debug("[AST] No findings for %s", scriptUrl || "(inline)");
     return;
   }
 
-  console.debug("[AST] Findings for %s: %d protoEnums, %d fieldMaps, %d fetchSites, sourceMap=%s",
+  console.debug("[AST] Findings for %s: %d protoEnums, %d fieldMaps, %d fetchSites, %d secSinks, %d dangerousPatterns, sourceMap=%s",
     scriptUrl || "(inline)", analysis.protoEnums.length, analysis.protoFieldMaps.length,
-    analysis.fetchCallSites.length, analysis.sourceMapUrl || "none");
+    analysis.fetchCallSites.length,
+    (analysis.securitySinks ? analysis.securitySinks.length : 0),
+    (analysis.dangerousPatterns ? analysis.dangerousPatterns.length : 0),
+    analysis.sourceMapUrl || "none");
 
   if (!tab._astResults) tab._astResults = [];
   tab._astResults.push(analysis);
@@ -2894,7 +3101,8 @@ function mergeASTResultsIntoVDD(tab, results, tabId) {
           for (var pi = 0; pi < callSite.params.length; pi++) {
             var p = callSite.params[pi];
             if ((p.location || "query") === "query") {
-              urlObj.searchParams.set(p.name, p.defaultValue !== undefined ? String(p.defaultValue) : "");
+              urlObj.searchParams.set(p.name, p.defaultValue !== undefined ? String(p.defaultValue)
+                : (p.validValues && p.validValues.length > 0 ? String(p.validValues[0]) : ""));
             }
           }
           syntheticUrl = urlObj.href;
@@ -2914,7 +3122,8 @@ function mergeASTResultsIntoVDD(tab, results, tabId) {
           for (var bi = 0; bi < callSite.params.length; bi++) {
             var bp = callSite.params[bi];
             if ((bp.location || "query") === "body") {
-              bodyJson[bp.name] = bp.defaultValue !== undefined ? bp.defaultValue : "";
+              bodyJson[bp.name] = bp.defaultValue !== undefined ? bp.defaultValue
+                : (bp.validValues && bp.validValues.length > 0 ? bp.validValues[0] : "");
               hasBody = true;
             }
           }
@@ -2988,6 +3197,20 @@ function mergeASTResultsIntoVDD(tab, results, tabId) {
       console.debug("[AST:merge] Fetch sites: %d call sites processed, %d endpoints registered",
         analysis.fetchCallSites.length, newEndpoints);
     }
+
+    // Store security findings on tab state
+    var secSinks = analysis.securitySinks || [];
+    var dangerousPats = analysis.dangerousPatterns || [];
+    if (secSinks.length || dangerousPats.length) {
+      if (!tab._securityFindings) tab._securityFindings = [];
+      tab._securityFindings.push({
+        sourceUrl: analysis.sourceUrl,
+        securitySinks: secSinks,
+        dangerousPatterns: dangerousPats,
+      });
+      console.debug("[AST:merge] Security findings for %s: %d sinks, %d dangerous patterns",
+        analysis.sourceUrl, secSinks.length, dangerousPats.length);
+    }
   }
 }
 
@@ -3005,10 +3228,16 @@ function handleContentMessage(msg, sender) {
     return;
   }
 
-  // SCRIPT_SOURCE comes from content.js script extraction
+  // SCRIPT_SOURCE comes from content.js script extraction — buffer for cross-script analysis
   if (msg.type === "SCRIPT_SOURCE") {
+    var pageUrl = (sender.tab && sender.tab.url) || "";
     if (msg.code && typeof msg.code === "string") {
-      analyzeScript(tabId, msg.url || "", msg.code);
+      // Inline script — code sent directly
+      _bufferScript(tabId, msg.url || "", msg.code, pageUrl);
+    } else if (msg.url && !msg.code) {
+      // External script — content script sent URL only (avoids CORS issues)
+      // Background has host_permissions: <all_urls>, so fetch is unrestricted
+      _fetchAndBufferScript(tabId, msg.url, pageUrl);
     }
     return;
   }
@@ -3519,6 +3748,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     meta.count = tab ? tab.requestLog.length : meta.count || 0;
   }
   state.tabs.delete(tabId);
+  // Clean up script buffer and cancel pending analysis
+  var buf = _scriptBuffers.get(tabId);
+  if (buf && buf.timer) clearTimeout(buf.timer);
+  _scriptBuffers.delete(tabId);
   saveSessionIndex();
 });
 
@@ -4435,6 +4668,7 @@ function serializeTabData(tab) {
     discoveryDocs: mergedDiscovery,
     probeResults: mergedProbe,
     requestLog: tab.requestLog || [],
+    securityFindings: tab._securityFindings || [],
   };
 }
 

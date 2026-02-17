@@ -214,6 +214,34 @@ nav {
   background: #1b2d3a;
   color: #58b0d5;
 }
+.badge-high {
+  background: #3d1418;
+  color: #f85149;
+}
+.badge-medium {
+  background: #2d1b00;
+  color: #f0883e;
+}
+.badge-low {
+  background: #1c2536;
+  color: #79c0ff;
+}
+.badge-xss {
+  background: #3d1418;
+  color: #f85149;
+}
+.badge-eval {
+  background: #3c2257;
+  color: #d2a8ff;
+}
+.badge-redirect {
+  background: #2d1b00;
+  color: #f0883e;
+}
+.badge-danger {
+  background: #3d1418;
+  color: #f85149;
+}
 
 /* Endpoint row */
 .ep-row {
