@@ -1439,7 +1439,7 @@ function learnFromResponse(tabId, interfaceName, entry) {
 
   const tab = getTab(tabId);
   const url = new URL(entry.url);
-  const { methodName: baseMethodName } = calculateMethodMetadata(url, interfaceName);
+  const { methodName } = calculateMethodMetadata(url, interfaceName);
   // Check tab-level first, then fall back to globalStore (survives SW restarts)
   let docEntry = tab.discoveryDocs.get(interfaceName);
   if (!docEntry?.doc) {
@@ -1453,10 +1453,10 @@ function learnFromResponse(tabId, interfaceName, entry) {
   if (!docEntry || !docEntry.doc) return;
   const doc = docEntry.doc;
   // Find method — try base name first, then HTTP-qualified name (from disambiguation)
-  const qualifiedName = entry.method ? entry.method.toLowerCase() + "_" + baseMethodName : null;
+  const qualifiedName = entry.method ? entry.method.toLowerCase() + "_" + methodName : null;
   const learned = doc.resources.learned?.methods;
   const m = learned
-    ? (learned[baseMethodName] || (qualifiedName ? learned[qualifiedName] : null))
+    ? (learned[methodName] || (qualifiedName ? learned[qualifiedName] : null))
     : null;
   // Also check probed methods
   const proM = doc.resources.probed
