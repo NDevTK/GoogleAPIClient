@@ -1267,6 +1267,126 @@ test("Multiple independent constraints for different params", `
 });
 
 // ═══════════════════════════════════════════════════════════════════════
+// ██  VALUE CONSTRAINTS → VDD CONTRACT (shapes expected by background.js)
+// ═══════════════════════════════════════════════════════════════════════
+
+console.log("\n=== Value constraints → VDD contract ===\n");
+
+test("URL-concatenated param with validValues: values survive for VDD merge", `
+  var FORMATS = ["json", "xml", "csv"];
+  function getReport(format) {
+    if (FORMATS.includes(format)) {
+      return fetch("/api/report?format=" + format);
+    }
+  }
+  getReport("json");
+`, function(r) {
+  var site = r.fetchCallSites.find(function(s) { return s.url && s.url.indexOf("/api/report") === 0; });
+  if (!site || !site.params) return false;
+  var fmtP = site.params.find(function(p) { return p.name === "format"; });
+  // AST reports location=path for concatenated params — background.js learnFromRequest
+  // later parses the full URL and correctly classifies as query param in the VDD
+  return fmtP && fmtP.location === "path" &&
+    fmtP.validValues && fmtP.validValues.length === 3 &&
+    fmtP.validValues.indexOf("json") >= 0 &&
+    fmtP.validValues.indexOf("xml") >= 0 &&
+    fmtP.validValues.indexOf("csv") >= 0;
+});
+
+test("Body param with validValues: location=body and values present", `
+  function updateStatus(id, status) {
+    if (status === "active" || status === "paused" || status === "archived") {
+      return fetch("/api/items/" + id, {
+        method: "PUT",
+        body: JSON.stringify({ status: status })
+      });
+    }
+  }
+  updateStatus("1", "active");
+`, function(r) {
+  var site = r.fetchCallSites.find(function(s) { return s.url && s.url.indexOf("/api/items/") === 0; });
+  if (!site || !site.params) return false;
+  var statusP = site.params.find(function(p) { return p.name === "status"; });
+  return statusP && statusP.location === "body" &&
+    statusP.validValues && statusP.validValues.length === 3 &&
+    statusP.validValues.indexOf("active") >= 0 &&
+    statusP.validValues.indexOf("paused") >= 0 &&
+    statusP.validValues.indexOf("archived") >= 0;
+});
+
+test("Path param with validValues: location=path and values present", `
+  function getResource(type) {
+    switch(type) {
+      case "users": case "teams": case "orgs":
+        return fetch("/api/" + type + "/list");
+    }
+  }
+  getResource("users");
+`, function(r) {
+  var site = r.fetchCallSites.find(function(s) { return s.url && s.url.indexOf("/api/users") === 0; });
+  if (!site || !site.params) return false;
+  var typeP = site.params.find(function(p) { return p.name === "type"; });
+  return typeP && typeP.location === "path" &&
+    typeP.validValues && typeP.validValues.length === 3 &&
+    typeP.validValues.indexOf("users") >= 0 &&
+    typeP.validValues.indexOf("teams") >= 0 &&
+    typeP.validValues.indexOf("orgs") >= 0;
+});
+
+test("Default value AND validValues on same param", `
+  var ROLES = ["admin", "editor", "viewer"];
+  function setRole(userId, role) {
+    if (ROLES.includes(role)) {
+      return fetch("/api/users/" + userId + "/role", {
+        method: "POST",
+        body: JSON.stringify({ role: role || "viewer" })
+      });
+    }
+  }
+  setRole("42", "admin");
+`, function(r) {
+  var site = r.fetchCallSites.find(function(s) { return s.url && s.url.indexOf("/api/users/") === 0; });
+  if (!site || !site.params) return false;
+  var roleP = site.params.find(function(p) { return p.name === "role"; });
+  // Must have both defaultValue and validValues
+  return roleP && roleP.location === "body" &&
+    roleP.defaultValue === "viewer" &&
+    roleP.validValues && roleP.validValues.length === 3;
+});
+
+test("validValues are strings (VDD merge expects .map(String))", `
+  function setPage(page) {
+    switch(page) {
+      case 1: case 2: case 3: case 4: case 5:
+        return fetch("/api/data?page=" + page);
+    }
+  }
+  setPage(1);
+`, function(r) {
+  var constraint = r.valueConstraints.find(function(c) { return c.variable === "page"; });
+  if (!constraint) return false;
+  // Values should be numbers from switch-case — background.js will .map(String) them
+  return constraint.values.length === 5 &&
+    constraint.values.indexOf(1) >= 0 &&
+    constraint.values.indexOf(5) >= 0;
+});
+
+test("Constraint source metadata tracks origin (switch vs includes vs equality)", `
+  var TYPES = ["a", "b", "c"];
+  function fn1(x) { if (TYPES.includes(x)) fetch("/api/" + x); }
+  function fn2(y) { switch(y) { case "p": case "q": fetch("/api2/" + y); } }
+  function fn3(z) { if (z === "m" || z === "n") fetch("/api3/" + z); }
+`, function(r) {
+  var c1 = r.valueConstraints.find(function(c) { return c.variable === "x"; });
+  var c2 = r.valueConstraints.find(function(c) { return c.variable === "y"; });
+  var c3 = r.valueConstraints.find(function(c) { return c.variable === "z"; });
+  // Each constraint should have a sources array (background.js reads it for _astValueSource)
+  return c1 && Array.isArray(c1.sources) && c1.values.length === 3 &&
+         c2 && Array.isArray(c2.sources) && c2.values.length === 2 &&
+         c3 && Array.isArray(c3.sources) && c3.values.length === 2;
+});
+
+// ═══════════════════════════════════════════════════════════════════════
 // ██  REAL LIBRARY: jQuery (unminified) — Parameter extraction
 // ═══════════════════════════════════════════════════════════════════════
 
