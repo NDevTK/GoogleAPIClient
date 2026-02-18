@@ -14,11 +14,24 @@ _worker.onmessage = function(e) {
   }
 };
 
+_worker.onerror = function(e) {
+  // Worker crashed — reject all pending callbacks
+  _pending.forEach(function(cb) {
+    cb({ success: false, error: "Worker error: " + (e.message || "unknown") });
+  });
+  _pending.clear();
+};
+
 chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
-  if (!msg || !msg.type || !msg.type.startsWith("AST_")) return;
+  if (!msg || typeof msg.type !== "string" || !msg.type.startsWith("AST_")) return;
 
   var id = _nextId++;
   _pending.set(id, sendResponse);
-  _worker.postMessage({ _id: id, msg: msg });
+  try {
+    _worker.postMessage({ _id: id, msg: msg });
+  } catch (err) {
+    _pending.delete(id);
+    sendResponse({ success: false, error: "postMessage failed: " + err.message });
+  }
   return true; // keep sendResponse alive for async Worker response
 });

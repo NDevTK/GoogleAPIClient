@@ -144,6 +144,8 @@
   };
 
   XMLHttpRequest.prototype.send = function () {
+    if (this.__uasr_hooked) return _xhrSend.apply(this, arguments);
+    this.__uasr_hooked = true;
     this.addEventListener("load", function () {
       try {
         const url = new URL(

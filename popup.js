@@ -1452,13 +1452,13 @@ function renderResponse(result) {
 
   const dlBtn = document.getElementById("btn-download-response");
   if (dlBtn) {
-    dlBtn.addEventListener("click", () => {
+    dlBtn.onclick = () => {
       saveBinaryResponse(
         result.body.raw,
         result.body.bodyEncoding,
         result.body.contentType,
       ).catch(() => {});
-    });
+    };
   }
 }
 
