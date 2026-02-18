@@ -519,7 +519,6 @@ function renderSecurityPanel() {
   for (var fi = 0; fi < findings.length; fi++) {
     var f = findings[fi];
     var srcLabel = f.sourceUrl || "(unknown)";
-    try { srcLabel = new URL(f.sourceUrl).pathname.split("/").pop() || srcLabel; } catch (_) {}
     for (var si = 0; si < (f.securitySinks || []).length; si++) {
       var s = f.securitySinks[si];
       allItems.push({ kind: "sink", item: s, sourceUrl: f.sourceUrl, srcLabel: srcLabel });
