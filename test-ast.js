@@ -5603,6 +5603,419 @@ test("Security: await + destructuring + LogicalExpression combined", `
   });
 });
 
+// ── Real-World CVE Validation (regression tests for fixed gaps) ──
+
+console.log("\n--- IIFE taint propagation ---");
+
+test("Security: IIFE (function(a) { document.write(a) })(location.hash) → xss", `
+  (function(a) {
+    document.write(a);
+  })(location.hash.slice(1));
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "document.write";
+  });
+});
+
+test("Security: IIFE with multiple params → taint traces to correct param", `
+  (function(safe, tainted) {
+    document.body.innerHTML = tainted;
+  })("hello", location.search);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: nested IIFE → eval", `
+  (function(x) {
+    (function(y) {
+      eval(y);
+    })(x);
+  })(location.hash.slice(1));
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval";
+  });
+});
+
+console.log("\n--- jQuery $() selector injection ---");
+
+test("Security: $(location.hash) → jQuery XSS (CVE-2011-4969 pattern)", `
+  $(window).on("hashchange", function() {
+    var element = $(location.hash);
+    element[0].scrollIntoView();
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "jQuery";
+  });
+});
+
+test("Security: jQuery(location.search) → jQuery XSS", `
+  var html = location.search.slice(1);
+  jQuery(html).appendTo("body");
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "jQuery";
+  });
+});
+
+test("Security: locally-bound $ → NOT flagged", `
+  var $ = function(sel) { return document.querySelector(sel); };
+  $(".safe-selector");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "jQuery";
+  });
+});
+
+console.log("\n--- Object.assign taint propagation ---");
+
+test("Security: Object.assign({}, tainted) → innerHTML (direct)", `
+  var tainted = location.hash;
+  document.body.innerHTML = Object.assign({}, tainted);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+console.log("\n--- Real-world CVE patterns ---");
+
+test("Security: Zoho postMessage → JSON.parse → iframe.src (no origin check)", `
+  window.addEventListener("message", function(event) {
+    var data = JSON.parse(event.data);
+    if (data.type === "banner") {
+      var iframe = document.createElement("iframe");
+      iframe.src = data.url;
+      document.body.appendChild(iframe);
+    }
+  });
+`, function(r) {
+  var hasPostMsg = r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin";
+  });
+  var hasSrc = r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "src";
+  });
+  return hasPostMsg && hasSrc;
+});
+
+test("Security: AddThis postMessage → script.src injection", `
+  window.addEventListener("message", function(event) {
+    var data = event.data;
+    if (typeof data === "string") {
+      var script = document.createElement("script");
+      script.src = data;
+      document.head.appendChild(script);
+    }
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin";
+  }) && r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "src";
+  });
+});
+
+test("Security: Trusted Types bypass via import(tainted)", `
+  var moduleUrl = location.hash.slice(1);
+  import(moduleUrl);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "import";
+  });
+});
+
+test("Security: multi-hop location.search → URLSearchParams → JSON.parse → innerHTML", `
+  var params = new URLSearchParams(location.search);
+  var raw = params.get("data");
+  var obj = JSON.parse(raw);
+  document.body.innerHTML = obj.html;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: postMessage → function param → innerHTML (inter-procedural)", `
+  window.addEventListener("message", function(e) {
+    renderContent(e.data);
+  });
+  function renderContent(html) {
+    document.getElementById("app").innerHTML = html;
+  }
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+// ── For-in taint propagation ──
+
+test("Security: for-in key from tainted object is user-controlled (prototype pollution)", `
+  function mergeDeep(target, source) {
+    for (var key in source) {
+      if (typeof source[key] === "object") {
+        if (!target[key]) target[key] = {};
+        mergeDeep(target[key], source[key]);
+      } else {
+        target[key] = source[key];
+      }
+    }
+  }
+  var userInput = JSON.parse(location.hash.slice(1));
+  mergeDeep({}, userInput);
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution";
+  });
+});
+
+test("Security: for-of value from tainted array is user-controlled → eval", `
+  var items = JSON.parse(location.hash.slice(1));
+  for (var item of items) {
+    eval(item);
+  }
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval";
+  });
+});
+
+// ── Object.assign property-level tracking ──
+
+test("Security: Object.assign({}, tainted).prop → innerHTML", `
+  var config = { html: location.hash.slice(1), safe: true };
+  var merged = Object.assign({}, config);
+  document.body.innerHTML = merged.html;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: Object.assign with multiple sources, tainted property → eval", `
+  var defaults = { code: "console.log('safe')" };
+  var userOpts = { code: location.search.slice(1) };
+  var opts = Object.assign({}, defaults, userOpts);
+  eval(opts.code);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval" && s.sourceType === "user-controlled";
+  });
+});
+
+// ── Factory handler pattern (message handler returned from factory function) ──
+
+test("Security: factory-returned message handler → innerHTML via callback", `
+  function makeHandler(sinkFn) {
+    return function(event) {
+      sinkFn(event.data);
+    };
+  }
+  window.addEventListener("message", makeHandler(function(data) {
+    document.body.innerHTML = data;
+  }));
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: factory-returned handler detects postmessage-no-origin", `
+  function createHandler(cb) {
+    return function(ev) { cb(ev.data); };
+  }
+  window.addEventListener("message", createHandler(function(d) {
+    document.body.innerHTML = d;
+  }));
+`, function(r) {
+  var hasPostMsg = r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin";
+  });
+  var hasXss = r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+  return hasPostMsg && hasXss;
+});
+
+test("Security: factory-returned handler assigned to onmessage → eval", `
+  var makeListener = function(fn) {
+    return function(e) { fn(e.data); };
+  };
+  window.onmessage = makeListener(function(payload) {
+    eval(payload);
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval" && s.sourceType === "user-controlled";
+  });
+});
+
+// ── Stage 4: Parameter destructuring taint propagation ──
+
+test("Security: destructured param function({data}) in message handler → innerHTML", `
+  window.addEventListener("message", function({data}) {
+    document.getElementById("out").innerHTML = data;
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: destructured param with default function({data} = {}) in message handler → innerHTML", `
+  window.addEventListener("message", function({data} = {}) {
+    document.body.innerHTML = data;
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: renamed destructured param function({origin: src}) in message handler → eval", `
+  window.addEventListener("message", function({origin: src, payload}) {
+    eval(payload);
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: destructured param in named function called with tainted arg → innerHTML", `
+  function render({html}) {
+    document.body.innerHTML = html;
+  }
+  render({html: location.hash});
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+// ── Stage 4: Array method callback taint propagation ──
+
+test("Security: tainted.forEach(x => innerHTML = x)", `
+  var parts = location.hash.split(",");
+  parts.forEach(function(item) {
+    document.body.innerHTML = item;
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: tainted.map(x => eval(x))", `
+  var cmds = location.search.split("&");
+  cmds.map(function(cmd) {
+    eval(cmd);
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: tainted.filter callback param is tainted → innerHTML", `
+  var items = [location.hash];
+  items.filter(function(x) {
+    document.getElementById("log").innerHTML = x;
+    return true;
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: tainted.find callback param → eval", `
+  var data = [location.hash, "safe"];
+  data.find(function(item) {
+    eval(item);
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: tainted.reduce — currentValue (param 1) is tainted → innerHTML", `
+  var chunks = location.hash.split("/");
+  chunks.reduce(function(acc, chunk) {
+    document.body.innerHTML = chunk;
+    return acc + chunk;
+  }, "");
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: named function passed by reference to forEach → innerHTML", `
+  function process(item) {
+    document.body.innerHTML = item;
+  }
+  var data = [location.hash];
+  data.forEach(process);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+// ── Stage 4: Promise .then() chain taint propagation ──
+
+test("Security: fetch(tainted).then(r => r.text()).then(data => innerHTML = data)", `
+  fetch(location.hash)
+    .then(function(r) { return r.text(); })
+    .then(function(data) {
+      document.body.innerHTML = data;
+    });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: promise.then(data => eval(data)) with tainted promise", `
+  var p = fetch(location.hash);
+  p.then(function(data) {
+    eval(data);
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: await fetch(tainted) then await .text() → innerHTML", `
+  async function load() {
+    var resp = await fetch(location.hash);
+    var text = await resp.text();
+    document.body.innerHTML = text;
+  }
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+test("Security: .then() with named handler function", `
+  function handleData(data) {
+    document.body.innerHTML = data;
+  }
+  fetch(location.hash).then(handleData);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
 // ── Summary ──
 console.log("\n" + "=".repeat(50));
 console.log("Results: " + passed + "/" + total + " passed, " + failed + " failed");

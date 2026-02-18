@@ -2903,6 +2903,36 @@ function _fetchSourceMapForScript(tabId, tab, analysis, scriptUrl, smUrl) {
           if (analysis.sourceMapTypes.length) {
             console.debug("[AST:sourcemap] Extracted %d types", analysis.sourceMapTypes.length);
           }
+          // Run security analysis on original (unminified) source files.
+          // Original sources have meaningful names and TypeScript types,
+          // enabling better taint detection than analyzing the minified bundle alone.
+          var smSecFindings = 0;
+          for (var _ssi = 0; _ssi < smData.sourcesContent.length; _ssi++) {
+            var _srcContent = smData.sourcesContent[_ssi];
+            var _srcName = smData.sources[_ssi] || "source_" + _ssi;
+            // Skip empty, tiny files, and non-JS/TS files
+            if (!_srcContent || _srcContent.length < 100) continue;
+            if (!/\.(js|ts|jsx|tsx|mjs)$/i.test(_srcName) && !/^[^.]+$/.test(_srcName)) continue;
+            try {
+              var _srcAnalysis = analyzeJSBundle(_srcContent, _srcName);
+              var _srcSinks = _srcAnalysis.securitySinks || [];
+              var _srcDangerous = _srcAnalysis.dangerousPatterns || [];
+              if (_srcSinks.length || _srcDangerous.length) {
+                if (!tab._securityFindings) tab._securityFindings = [];
+                tab._securityFindings.push({
+                  sourceUrl: _srcName,
+                  securitySinks: _srcSinks,
+                  dangerousPatterns: _srcDangerous,
+                });
+                smSecFindings += _srcSinks.length + _srcDangerous.length;
+              }
+            } catch (_srcErr) {
+              // Original source may not parse (JSX, decorators, etc.) — skip silently
+            }
+          }
+          if (smSecFindings > 0) {
+            console.debug("[AST:sourcemap] Security analysis of original sources: %d additional findings", smSecFindings);
+          }
         }
         mergeASTResultsIntoVDD(tab, [analysis], tabId);
         mergeToGlobal(tab);
@@ -3114,6 +3144,64 @@ function mergeASTResultsIntoVDD(tab, results, tabId) {
         }
         if (vcMatches > 0) {
           console.debug("[AST:merge] Value constraints: %d matched to VDD parameters", vcMatches);
+        }
+      }
+      // Merge sourceMap TypeScript types: enrich VDD parameters with type info from original sources
+      if (analysis.sourceMapTypes && analysis.sourceMapTypes.length) {
+        var typeMatches = 0;
+        var tsMethods = doc.resources && doc.resources.learned ? doc.resources.learned.methods || {} : {};
+        for (var _tmName in tsMethods) {
+          var _tmMethod = tsMethods[_tmName];
+          if (!_tmMethod.parameters) continue;
+          for (var _tpName in _tmMethod.parameters) {
+            var _tpParam = _tmMethod.parameters[_tpName];
+            if (_tpParam._tsType) continue; // already enriched
+            for (var _sti = 0; _sti < analysis.sourceMapTypes.length; _sti++) {
+              var _smType = analysis.sourceMapTypes[_sti];
+              for (var _stf = 0; _stf < _smType.fields.length; _stf++) {
+                if (_smType.fields[_stf].name === _tpName) {
+                  _tpParam._tsType = _smType.fields[_stf].type;
+                  _tpParam._tsInterface = _smType.name;
+                  _tpParam._tsOptional = _smType.fields[_stf].optional || false;
+                  if (!_tpParam.type) _tpParam.type = _smType.fields[_stf].type;
+                  typeMatches++;
+                  break;
+                }
+              }
+              if (_tpParam._tsType) break;
+            }
+          }
+        }
+        // Enrich proto field maps with human-readable names from TypeScript .pb.ts interfaces
+        if (analysis.protoFieldMaps && analysis.protoFieldMaps.length) {
+          for (var _fmi = 0; _fmi < analysis.protoFieldMaps.length; _fmi++) {
+            var _fm = analysis.protoFieldMaps[_fmi];
+            for (var _sti2 = 0; _sti2 < analysis.sourceMapTypes.length; _sti2++) {
+              var _pbType = analysis.sourceMapTypes[_sti2];
+              if (_pbType.kind !== "interface" && _pbType.kind !== "type") continue;
+              // Match by field count similarity — proto field maps and TypeScript interfaces
+              // from the same proto definition should have similar field counts
+              if (_pbType.fields.length === _fm.fields.length ||
+                  Math.abs(_pbType.fields.length - _fm.fields.length) <= 2) {
+                // Check if it looks proto-related (from .pb.ts file or has matching structure)
+                var _isPbType = /\.pb\.|_pb\.|proto/i.test(_pbType.source || "");
+                if (_isPbType) {
+                  if (!_fm._tsNames) _fm._tsNames = {};
+                  for (var _pfi = 0; _pfi < _pbType.fields.length; _pfi++) {
+                    var _pbField = _pbType.fields[_pfi];
+                    // Map by position: TypeScript interface field order matches proto field order
+                    _fm._tsNames[_pfi + 1] = _pbField.name;
+                  }
+                  _fm._tsInterface = _pbType.name;
+                  typeMatches++;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        if (typeMatches > 0) {
+          console.debug("[AST:merge] TypeScript type enrichment: %d matches", typeMatches);
         }
       }
     } else {
