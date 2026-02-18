@@ -4787,6 +4787,469 @@ test("Worker XSS escalation: hash → new Worker (CVE pattern)", `
   });
 });
 
+// === Research-Based: WebSocket Injection ===
+console.log("\n=== Security: WebSocket Injection ===\n");
+
+test("new WebSocket(tainted) → request-forgery", `
+  var wsUrl = location.hash.slice(1);
+  var ws = new WebSocket(wsUrl);
+  ws.onmessage = function(e) { console.log(e.data); };
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "new WebSocket" && s.source === "location.hash";
+  });
+});
+
+test("new WebSocket(literal) → NOT flagged", `
+  var ws = new WebSocket("wss://api.example.com/ws");
+`, function(r) {
+  return !r.securitySinks.some(function(s) { return s.sink === "new WebSocket"; });
+});
+
+test("new WebSocket(window.name) → request-forgery", `
+  var ws = new WebSocket(window.name);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "new WebSocket" && s.source === "window.name";
+  });
+});
+
+// === Research-Based: EventSource Injection ===
+console.log("\n=== Security: EventSource Injection ===\n");
+
+test("new EventSource(tainted) → request-forgery", `
+  var streamUrl = new URLSearchParams(location.search).get("stream");
+  var es = new EventSource(streamUrl);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "new EventSource";
+  });
+});
+
+test("new EventSource(literal) → NOT flagged", `
+  var es = new EventSource("/api/events");
+`, function(r) {
+  return !r.securitySinks.some(function(s) { return s.sink === "new EventSource"; });
+});
+
+// === Research-Based: fetch/XHR/sendBeacon Request Forgery ===
+console.log("\n=== Security: Network Request Forgery ===\n");
+
+test("fetch(tainted URL) → request-forgery", `
+  var url = location.hash.slice(1);
+  fetch(url);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "fetch" && s.source === "location.hash";
+  });
+});
+
+test("fetch(literal URL) → NOT flagged as request-forgery", `
+  fetch("/api/data");
+`, function(r) {
+  return !r.securitySinks.some(function(s) { return s.type === "request-forgery"; });
+});
+
+test("fetch(tainted URL + credentials) → request-forgery", `
+  var endpoint = location.hash.slice(1);
+  fetch(endpoint, { credentials: "include" });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "fetch";
+  });
+});
+
+test("navigator.sendBeacon(tainted URL) → request-forgery", `
+  var exfilUrl = location.hash.slice(1);
+  navigator.sendBeacon(exfilUrl, document.cookie);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "navigator.sendBeacon" && s.source === "location.hash";
+  });
+});
+
+test("navigator.sendBeacon(literal) → NOT flagged", `
+  navigator.sendBeacon("/analytics", "data");
+`, function(r) {
+  return !r.securitySinks.some(function(s) { return s.sink === "navigator.sendBeacon"; });
+});
+
+test("xhr.open(method, tainted URL) → request-forgery", `
+  var url = location.hash.slice(1);
+  var xhr = new XMLHttpRequest();
+  xhr.open("GET", url);
+  xhr.send();
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "XMLHttpRequest.open" && s.source === "location.hash";
+  });
+});
+
+test("xhr.open(method, literal) → NOT flagged as request-forgery", `
+  var xhr = new XMLHttpRequest();
+  xhr.open("GET", "/api/data");
+  xhr.send();
+`, function(r) {
+  return !r.securitySinks.some(function(s) { return s.type === "request-forgery" && s.sink === "XMLHttpRequest.open"; });
+});
+
+// === Research-Based: jQuery DOM Manipulation ===
+console.log("\n=== Security: jQuery DOM Manipulation Sinks ===\n");
+
+test("jQuery .html(tainted) → xss", `
+  var content = location.hash.slice(1);
+  $("#container").html(content);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === ".html" && s.source === "location.hash";
+  });
+});
+
+test("jQuery .append(tainted) → xss", `
+  var markup = location.hash.slice(1);
+  $("#list").append(markup);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === ".append";
+  });
+});
+
+test("jQuery .prepend(tainted) → xss", `
+  var item = document.referrer;
+  $("body").prepend(item);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === ".prepend" && s.source === "document.referrer";
+  });
+});
+
+test("jQuery .after(tainted) → xss", `
+  var data = location.search;
+  el.after(data);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === ".after";
+  });
+});
+
+test("jQuery .before(tainted) → xss", `
+  var data = location.search;
+  el.before(data);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === ".before";
+  });
+});
+
+test("jQuery .replaceWith(tainted) → xss", `
+  var html = document.URL;
+  el.replaceWith(html);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === ".replaceWith";
+  });
+});
+
+test("jQuery .html(literal) → NOT flagged", `
+  $("#container").html("<b>safe</b>");
+`, function(r) {
+  return !r.securitySinks.some(function(s) { return s.sink === ".html"; });
+});
+
+// === Research-Based: Implicit ReDoS ===
+console.log("\n=== Security: Implicit ReDoS ===\n");
+
+test("str.match(tainted) → regex-implicit", `
+  var pattern = location.hash.slice(1);
+  var result = "test string".match(pattern);
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "regex-implicit" && p.description.indexOf("match") !== -1;
+  });
+});
+
+test("str.search(tainted) → regex-implicit", `
+  var pat = location.search.slice(1);
+  var idx = "hello world".search(pat);
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "regex-implicit" && p.description.indexOf("search") !== -1;
+  });
+});
+
+test("str.split(tainted) → regex-implicit", `
+  var sep = location.hash.slice(1);
+  var parts = "a,b,c".split(sep);
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "regex-implicit" && p.description.indexOf("split") !== -1;
+  });
+});
+
+test("str.match(literal regex) → NOT flagged", `
+  var result = "test".match(/\\d+/);
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) { return p.type === "regex-implicit"; });
+});
+
+test("str.match(literal string) → NOT flagged", `
+  var result = "test".match("simple");
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) { return p.type === "regex-implicit"; });
+});
+
+// === Research-Based: React dangerouslySetInnerHTML ===
+console.log("\n=== Security: React dangerouslySetInnerHTML ===\n");
+
+test("dangerouslySetInnerHTML with tainted __html → xss", `
+  var content = location.hash.slice(1);
+  React.createElement("div", { dangerouslySetInnerHTML: { __html: content } });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "dangerouslySetInnerHTML" && s.source === "location.hash";
+  });
+});
+
+test("dangerouslySetInnerHTML with literal __html → NOT flagged", `
+  React.createElement("div", { dangerouslySetInnerHTML: { __html: "<b>safe</b>" } });
+`, function(r) {
+  return !r.securitySinks.some(function(s) { return s.sink === "dangerouslySetInnerHTML"; });
+});
+
+test("dangerouslySetInnerHTML nested in JSX-compiled output → xss", `
+  var userInput = document.referrer;
+  (0, jsx)("div", { dangerouslySetInnerHTML: { __html: userInput } });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "dangerouslySetInnerHTML" && s.source === "document.referrer";
+  });
+});
+
+// === Research-Based: localStorage/sessionStorage Taint Sources ===
+console.log("\n=== Security: Storage Taint Sources ===\n");
+
+test("localStorage.getItem → innerHTML → xss", `
+  var name = localStorage.getItem("username");
+  document.getElementById("profile").innerHTML = name;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.source === "localStorage.getItem";
+  });
+});
+
+test("sessionStorage.getItem → eval → eval", `
+  var code = sessionStorage.getItem("handler");
+  eval(code);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval" && s.source === "sessionStorage.getItem";
+  });
+});
+
+test("localStorage.getItem → location.href → redirect", `
+  var url = localStorage.getItem("redirect");
+  location.href = url;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.source === "localStorage.getItem";
+  });
+});
+
+test("localStorage.getItem → fetch → request-forgery", `
+  var endpoint = localStorage.getItem("api");
+  fetch(endpoint);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "fetch" && s.source === "localStorage.getItem";
+  });
+});
+
+// === Research-Based: Trusted Types Passthrough ===
+console.log("\n=== Security: Trusted Types Passthrough ===\n");
+
+test("trustedTypes.createPolicy with arrow identity → flagged", `
+  trustedTypes.createPolicy("default", {
+    createHTML: (s) => s,
+    createScript: (s) => s,
+    createScriptURL: (s) => s,
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "trusted-types-passthrough" && p.description.indexOf("createHTML") !== -1;
+  });
+});
+
+test("trustedTypes.createPolicy with function identity → flagged", `
+  trustedTypes.createPolicy("default", {
+    createHTML: function(s) { return s; },
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "trusted-types-passthrough";
+  });
+});
+
+test("trustedTypes.createPolicy with block arrow identity → flagged", `
+  trustedTypes.createPolicy("mypolicy", {
+    createScriptURL: (input) => { return input; },
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "trusted-types-passthrough" && p.description.indexOf("createScriptURL") !== -1;
+  });
+});
+
+test("trustedTypes.createPolicy with sanitizer → NOT flagged", `
+  trustedTypes.createPolicy("safe", {
+    createHTML: (s) => DOMPurify.sanitize(s),
+    createScript: (s) => "",
+    createScriptURL: (s) => s.startsWith("https://") ? s : "",
+  });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) { return p.type === "trusted-types-passthrough"; });
+});
+
+// === Research-Based: Deep MemberExpression Taint Propagation ===
+console.log("\n=== Security: Deep Taint Propagation ===\n");
+
+test("DOMParser output → innerHTML (mXSS double-parse pattern)", `
+  var doc = new DOMParser().parseFromString(location.hash, "text/html");
+  document.getElementById("out").innerHTML = doc.body.innerHTML;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.source === "location.hash";
+  });
+});
+
+test("JSON.parse(tainted).property → innerHTML → xss", `
+  var data = JSON.parse(location.hash.slice(1));
+  document.getElementById("greeting").innerHTML = data.message;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.source === "location.hash";
+  });
+});
+
+test("JSON.parse(tainted).nested.property → eval → eval", `
+  var config = JSON.parse(location.search.slice(1));
+  eval(config.settings.code);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval";
+  });
+});
+
+test("deep chain: tainted.a.b.c → innerHTML → xss", `
+  var obj = JSON.parse(location.hash);
+  el.innerHTML = obj.data.items.html;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+// === Research-Based: Real-World CVE Patterns ===
+console.log("\n=== Security: Real-World CVE Patterns (2024-2025) ===\n");
+
+test("new URLSearchParams(tainted).get() → innerHTML → xss", `
+  var params = new URLSearchParams(location.search);
+  document.getElementById("name").innerHTML = params.get("name");
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("WebSocket hijack: hash → new WebSocket (CVE-2023-41896 pattern)", `
+  var wsHost = location.hash.slice(1);
+  var socket = new WebSocket("wss://" + wsHost + "/ws");
+  socket.onmessage = function(e) {
+    document.getElementById("output").innerHTML = e.data;
+  };
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "new WebSocket";
+  });
+});
+
+test("sendBeacon exfiltration: hash URL + cookie data", `
+  var url = location.hash.slice(1);
+  navigator.sendBeacon(url, document.cookie);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "navigator.sendBeacon";
+  });
+});
+
+test("Stored DOM XSS: localStorage → innerHTML (persistent XSS)", `
+  var savedTemplate = localStorage.getItem("template");
+  document.getElementById("widget").innerHTML = savedTemplate;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.source === "localStorage.getItem";
+  });
+});
+
+test("EventSource data injection: hash → new EventSource", `
+  var sseUrl = location.hash.slice(1);
+  var source = new EventSource(sseUrl);
+  source.onmessage = function(e) { console.log(e.data); };
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "new EventSource";
+  });
+});
+
+test("Trusted Types bypass: passthrough policy (CVE-2024-45801 pattern)", `
+  if (window.trustedTypes) {
+    trustedTypes.createPolicy("default", {
+      createHTML: (s) => s,
+    });
+  }
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "trusted-types-passthrough";
+  });
+});
+
+test("jQuery + hash XSS: .html(location.hash)", `
+  var content = decodeURIComponent(location.hash.slice(1));
+  $(".output").html(content);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === ".html";
+  });
+});
+
+test("fetch SSRF: hash → fetch (client-side request forgery)", `
+  var apiUrl = location.hash.slice(1);
+  fetch(apiUrl).then(function(r) { return r.json(); });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "fetch";
+  });
+});
+
+test("implicit ReDoS: location.hash → str.match (CVE-2024-52798 pattern)", `
+  var searchPattern = location.hash.slice(1);
+  var matches = document.body.textContent.match(searchPattern);
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "regex-implicit";
+  });
+});
+
+test("React SSR XSS: referrer → dangerouslySetInnerHTML", `
+  var input = document.referrer;
+  React.createElement("div", {
+    dangerouslySetInnerHTML: { __html: "<p>" + input + "</p>" }
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "dangerouslySetInnerHTML";
+  });
+});
+
 // ── Summary ──
 console.log("\n" + "=".repeat(50));
 console.log("Results: " + passed + "/" + total + " passed, " + failed + " failed");
