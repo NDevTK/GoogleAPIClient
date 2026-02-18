@@ -3037,14 +3037,14 @@ test("postMessage listener with origin == check → not flagged", `
   });
 });
 
-test("postMessage listener with source check → not flagged", `
+test("postMessage listener with source-only check → flagged (source insufficient)", `
   window.addEventListener("message", function(event) {
     if (event.source !== parent) return;
     handleMessage(event.data);
   });
 `, function(r) {
-  return !r.dangerousPatterns.some(function(p) {
-    return p.type === "postmessage-no-origin";
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" && p.description.indexOf("source") !== -1;
   });
 });
 
@@ -4218,6 +4218,574 @@ test("XF: safe function (literal return) in script A → called in script B — 
     return s.type === "xss" && s.sink === "innerHTML";
   });
 }, true);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██  RESEARCH-BASED SECURITY IMPROVEMENTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── New Assignment Sinks (from DOM XSS research) ──
+console.log("\n=== Security: Research-Based New Sinks ===\n");
+
+test("iframe.srcdoc = tainted → XSS", `
+  var payload = location.hash.slice(1);
+  var iframe = document.createElement("iframe");
+  iframe.srcdoc = payload;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "srcdoc" && s.severity === "high";
+  });
+});
+
+test("element.href = tainted → XSS (javascript: protocol)", `
+  var link = document.createElement("a");
+  link.href = location.hash.slice(1);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "href" && s.severity === "high";
+  });
+});
+
+test("element.src = tainted → XSS (script/iframe/embed injection)", `
+  var script = document.createElement("script");
+  script.src = location.hash.slice(1);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "src" && s.severity === "high";
+  });
+});
+
+test("element.action = tainted → XSS (form action hijack)", `
+  var form = document.getElementById("f");
+  form.action = location.hash.slice(1);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "action" && s.severity === "high";
+  });
+});
+
+test("element.formAction = tainted → XSS (submit button hijack)", `
+  var btn = document.getElementById("submit");
+  btn.formAction = location.hash.slice(1);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "formAction" && s.severity === "high";
+  });
+});
+
+test("location.href = tainted → redirect (NOT xss)", `
+  location.href = location.hash.slice(1);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "href";
+  }) && !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "href";
+  });
+});
+
+test("element.href = literal → NOT flagged", `
+  var link = document.createElement("a");
+  link.href = "https://example.com";
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.sink === "href";
+  });
+});
+
+test("element.setHTMLUnsafe(tainted) → XSS", `
+  var content = location.hash.slice(1);
+  document.getElementById("out").setHTMLUnsafe(content);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "setHTMLUnsafe" && s.severity === "high";
+  });
+});
+
+test("Document.parseHTMLUnsafe(tainted) → XSS", `
+  var html = location.hash.slice(1);
+  Document.parseHTMLUnsafe(html);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "parseHTMLUnsafe" && s.severity === "high";
+  });
+});
+
+// ── Dynamic import() ──
+console.log("\n=== Security: Dynamic import() ===\n");
+
+test("import(taintedUrl) → eval-class sink", `
+  var mod = location.hash.slice(1);
+  import(mod).then(function(m) { m.default(); });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "import" && s.severity === "high";
+  });
+});
+
+test("import(literal) → NOT flagged", `
+  import("./module.js").then(function(m) { m.default(); });
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.sink === "import";
+  });
+});
+
+// ── window.open() ──
+console.log("\n=== Security: window.open() ===\n");
+
+test("window.open(tainted) → open redirect (bare open)", `
+  var url = location.hash.slice(1);
+  open(url);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "window.open" && s.severity === "high";
+  });
+});
+
+test("window.open(tainted) → open redirect (member expression)", `
+  var url = location.hash.slice(1);
+  window.open(url);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "window.open" && s.severity === "high";
+  });
+});
+
+test("window.open(literal) → NOT flagged", `
+  window.open("https://example.com");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.sink === "window.open";
+  });
+});
+
+// ── Worker/SharedWorker injection ──
+console.log("\n=== Security: Worker Injection ===\n");
+
+test("new Worker(tainted) → eval-class sink", `
+  var url = location.hash.slice(1);
+  var w = new Worker(url);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "new Worker" && s.severity === "high";
+  });
+});
+
+test("new SharedWorker(tainted) → eval-class sink", `
+  var url = location.hash.slice(1);
+  var sw = new SharedWorker(url);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "new SharedWorker" && s.severity === "high";
+  });
+});
+
+test("new Worker(literal) → NOT flagged", `
+  var w = new Worker("/worker.js");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.sink === "new Worker";
+  });
+});
+
+test("importScripts(tainted) → eval-class sink", `
+  var url = location.hash.slice(1);
+  importScripts(url);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "importScripts" && s.severity === "high";
+  });
+});
+
+test("navigator.serviceWorker.register(tainted) → eval-class sink", `
+  var url = location.hash.slice(1);
+  navigator.serviceWorker.register(url);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "serviceWorker.register" && s.severity === "high";
+  });
+});
+
+test("navigator.serviceWorker.register(literal) → NOT flagged", `
+  navigator.serviceWorker.register("/sw.js");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.sink === "serviceWorker.register";
+  });
+});
+
+// ── Open redirect: bare location, document.location ──
+console.log("\n=== Security: Extended Redirect Sinks ===\n");
+
+test("location = tainted → redirect (bare assignment)", `
+  var url = location.hash.slice(1);
+  location = url;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "location" && s.severity === "high";
+  });
+});
+
+test("document.location = tainted → redirect", `
+  var url = location.hash.slice(1);
+  document.location = url;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "location" && s.severity === "high";
+  });
+});
+
+test("document.location.href = tainted → redirect", `
+  var url = location.hash.slice(1);
+  document.location.href = url;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "href";
+  });
+});
+
+test("document.location.assign(tainted) → redirect", `
+  var url = location.hash.slice(1);
+  document.location.assign(url);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.sink === "location.assign";
+  });
+});
+
+// ── PostMessage improvements ──
+console.log("\n=== Security: PostMessage Improvements ===\n");
+
+test("postMessage listener with event.origin.indexOf → weak origin check", `
+  window.addEventListener("message", function(event) {
+    if (event.origin.indexOf("example.com") !== -1) {
+      document.body.innerHTML = event.data;
+    }
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-weak-origin" && p.severity === "high";
+  });
+});
+
+test("postMessage listener with event.origin.includes → weak origin check", `
+  window.addEventListener("message", function(event) {
+    if (event.origin.includes("trusted.com")) {
+      eval(event.data);
+    }
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-weak-origin";
+  });
+});
+
+test("postMessage listener with event.origin.startsWith → weak origin check", `
+  window.addEventListener("message", function(event) {
+    if (event.origin.startsWith("https://example.com")) {
+      document.body.innerHTML = event.data;
+    }
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-weak-origin";
+  });
+});
+
+test("postMessage listener with event.origin.endsWith → weak origin check", `
+  window.addEventListener("message", function(event) {
+    if (event.origin.endsWith("example.com")) {
+      document.body.innerHTML = event.data;
+    }
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-weak-origin";
+  });
+});
+
+test("postMessage listener with strict origin === → NOT flagged as weak", `
+  window.addEventListener("message", function(event) {
+    if (event.origin !== "https://trusted.com") return;
+    document.body.innerHTML = event.data;
+  });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" || p.type === "postmessage-weak-origin";
+  });
+});
+
+test("window.onmessage = handler without origin check → flagged", `
+  window.onmessage = function(event) {
+    document.body.innerHTML = event.data;
+  };
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" && p.severity === "high";
+  });
+});
+
+test("self.onmessage = handler without origin check → flagged", `
+  self.onmessage = function(e) {
+    eval(e.data);
+  };
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" && p.severity === "high";
+  });
+});
+
+test("window.onmessage = handler WITH origin check → NOT flagged", `
+  window.onmessage = function(event) {
+    if (event.origin !== "https://trusted.com") return;
+    document.body.innerHTML = event.data;
+  };
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" || p.type === "postmessage-weak-origin";
+  });
+});
+
+test("postMessage(data, '*') → wildcard target flagged", `
+  var token = "secret123";
+  window.parent.postMessage({ auth: token }, "*");
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-wildcard-target";
+  });
+});
+
+test("window.opener.postMessage(data, '*') → flagged with opener context", `
+  window.opener.postMessage({ token: "abc" }, "*");
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-wildcard-target" && p.severity === "high" &&
+           p.description.indexOf("opener") !== -1;
+  });
+});
+
+test("postMessage(data, 'https://specific.com') → NOT flagged", `
+  window.parent.postMessage({ data: 123 }, "https://specific.com");
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-wildcard-target";
+  });
+});
+
+// ── Prototype Pollution API Detection ──
+console.log("\n=== Security: Prototype Pollution APIs ===\n");
+
+test("Object.defineProperty with user-controlled key → flagged", `
+  var key = location.hash.slice(1);
+  Object.defineProperty(window, key, { value: true, writable: true });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution" && p.description.indexOf("defineProperty") !== -1;
+  });
+});
+
+test("Object.defineProperty with literal key → NOT flagged", `
+  Object.defineProperty(window, "myProp", { value: true, writable: true });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution" && p.description.indexOf("defineProperty") !== -1;
+  });
+});
+
+test("Reflect.set with user-controlled key → flagged", `
+  var key = location.hash.slice(1);
+  var config = {};
+  Reflect.set(config, key, "pwned");
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution" && p.description.indexOf("Reflect.set") !== -1;
+  });
+});
+
+test("Reflect.set with literal key → NOT flagged", `
+  var config = {};
+  Reflect.set(config, "name", "value");
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution" && p.description.indexOf("Reflect.set") !== -1;
+  });
+});
+
+test("Object.assign with user-controlled source → prototype-pollution-merge", `
+  var userInput = location.hash.slice(1);
+  var config = {};
+  Object.assign(config, userInput);
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution-merge" && p.severity === "medium";
+  });
+});
+
+test("Object.assign with literal source → NOT flagged", `
+  var config = {};
+  Object.assign(config, { name: "value" });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution-merge";
+  });
+});
+
+test("Object.assign with multiple sources, one tainted → flagged", `
+  var defaults = { theme: "light" };
+  var overrides = location.hash.slice(1);
+  var config = {};
+  Object.assign(config, defaults, overrides);
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution-merge";
+  });
+});
+
+// ── New Taint Sources ──
+console.log("\n=== Security: New Taint Sources ===\n");
+
+test("history.state → innerHTML → XSS", `
+  var title = history.state;
+  document.getElementById("header").innerHTML = title;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.source === "history.state";
+  });
+});
+
+test("document.title → innerHTML → XSS", `
+  var breadcrumb = document.title;
+  document.getElementById("nav").innerHTML = breadcrumb;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.source === "document.title";
+  });
+});
+
+test("document.title → eval → code injection", `
+  var cmd = document.title;
+  eval(cmd);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.source === "document.title";
+  });
+});
+
+test("history.state → location.href → redirect", `
+  var state = history.state;
+  location.href = state;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect" && s.source === "history.state";
+  });
+});
+
+// ── setAttribute("style", tainted) — CSS injection ──
+console.log("\n=== Security: CSS Injection via setAttribute ===\n");
+
+test("setAttribute('style', tainted) → XSS (CSS injection)", `
+  var css = location.hash.slice(1);
+  document.getElementById("el").setAttribute("style", css);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "setAttribute:style" && s.severity === "high";
+  });
+});
+
+test("setAttribute('style', literal) → NOT flagged", `
+  document.getElementById("el").setAttribute("style", "color: red");
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.sink === "setAttribute:style";
+  });
+});
+
+// ── Combined / Real-world patterns ──
+console.log("\n=== Security: Real-World Vulnerability Patterns ===\n");
+
+test("Firing Range: location.hash → iframe.srcdoc (Google FR pattern)", `
+  var payload = location.hash.substring(1);
+  var frame = document.createElement("iframe");
+  frame.srcdoc = payload;
+  document.body.appendChild(frame);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "srcdoc" && s.source === "location.hash";
+  });
+});
+
+test("Firing Range: location.hash → script.src (script injection)", `
+  var src = location.hash.slice(1);
+  var s = document.createElement("script");
+  s.src = src;
+  document.head.appendChild(s);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "src" && s.source === "location.hash";
+  });
+});
+
+test("OAuth postMessage: opener.postMessage with wildcard → flagged", `
+  var token = getOAuthToken();
+  window.opener.postMessage({ type: "auth", token: token }, "*");
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-wildcard-target" && p.description.indexOf("opener") !== -1;
+  });
+});
+
+test("DOM clobbering gadget: document.currentScript.src → script.src (CVE pattern)", `
+  var baseUrl = document.currentScript.src;
+  var s = document.createElement("script");
+  s.src = baseUrl;
+  document.body.appendChild(s);
+`, function(r) {
+  // document.currentScript.src is not a taint source (not user-controlled)
+  // so this should NOT be flagged — DOM clobbering requires HTML injection first
+  return !r.securitySinks.some(function(s) {
+    return s.sink === "src";
+  });
+});
+
+test("Prototype pollution via Object.assign with parsed JSON from hash", `
+  var data = JSON.parse(decodeURIComponent(location.hash.slice(1)));
+  var config = {};
+  Object.assign(config, data);
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution-merge";
+  });
+});
+
+test("Multiple sinks: location.search → innerHTML AND eval (both detected)", `
+  var input = location.search.slice(1);
+  document.body.innerHTML = input;
+  eval(input);
+`, function(r) {
+  var hasXss = r.securitySinks.some(function(s) { return s.type === "xss" && s.sink === "innerHTML"; });
+  var hasEval = r.securitySinks.some(function(s) { return s.type === "eval" && s.sink === "eval"; });
+  return hasXss && hasEval;
+});
+
+test("Service Worker hijack: hash → serviceWorker.register (CVE pattern)", `
+  var swUrl = location.hash.substring(1);
+  if (navigator.serviceWorker) {
+    navigator.serviceWorker.register(swUrl);
+  }
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "serviceWorker.register" && s.source === "location.hash";
+  });
+});
+
+test("Worker XSS escalation: hash → new Worker (CVE pattern)", `
+  var workerUrl = location.hash.slice(1);
+  var w = new Worker(workerUrl);
+  w.postMessage("start");
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "new Worker" && s.source === "location.hash";
+  });
+});
 
 // ── Summary ──
 console.log("\n" + "=".repeat(50));
