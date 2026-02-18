@@ -2906,6 +2906,23 @@ function _fetchSourceMapForScript(tabId, tab, analysis, scriptUrl, smUrl) {
           // Run security analysis on original (unminified) source files.
           // Original sources have meaningful names and TypeScript types,
           // enabling better taint detection than analyzing the minified bundle alone.
+          // Build a set of existing finding keys to deduplicate against the combined analysis.
+          var _existingKeys = new Set();
+          if (tab._securityFindings) {
+            for (var _efi = 0; _efi < tab._securityFindings.length; _efi++) {
+              var _efEntry = tab._securityFindings[_efi];
+              var _efSinks = _efEntry.securitySinks || [];
+              for (var _esi = 0; _esi < _efSinks.length; _esi++) {
+                var _es = _efSinks[_esi];
+                _existingKeys.add(_es.type + ":" + _es.sink + ":" + _es.location.line + ":" + _es.location.column);
+              }
+              var _efDangs = _efEntry.dangerousPatterns || [];
+              for (var _edi = 0; _edi < _efDangs.length; _edi++) {
+                var _ed = _efDangs[_edi];
+                _existingKeys.add(_ed.type + ":" + _ed.location.line + ":" + _ed.location.column);
+              }
+            }
+          }
           var smSecFindings = 0;
           for (var _ssi = 0; _ssi < smData.sourcesContent.length; _ssi++) {
             var _srcContent = smData.sourcesContent[_ssi];
@@ -2915,8 +2932,12 @@ function _fetchSourceMapForScript(tabId, tab, analysis, scriptUrl, smUrl) {
             if (!/\.(js|ts|jsx|tsx|mjs)$/i.test(_srcName) && !/^[^.]+$/.test(_srcName)) continue;
             try {
               var _srcAnalysis = analyzeJSBundle(_srcContent, _srcName);
-              var _srcSinks = _srcAnalysis.securitySinks || [];
-              var _srcDangerous = _srcAnalysis.dangerousPatterns || [];
+              var _srcSinks = (_srcAnalysis.securitySinks || []).filter(function(s) {
+                return !_existingKeys.has(s.type + ":" + s.sink + ":" + s.location.line + ":" + s.location.column);
+              });
+              var _srcDangerous = (_srcAnalysis.dangerousPatterns || []).filter(function(d) {
+                return !_existingKeys.has(d.type + ":" + d.location.line + ":" + d.location.column);
+              });
               if (_srcSinks.length || _srcDangerous.length) {
                 if (!tab._securityFindings) tab._securityFindings = [];
                 tab._securityFindings.push({
@@ -3333,10 +3354,11 @@ function mergeASTResultsIntoVDD(tab, results, tabId) {
         analysis.fetchCallSites.length, newEndpoints);
     }
 
-    // Store security findings on tab state
+    // Store security findings on tab state (only once per analysis — skip if already merged)
     var secSinks = analysis.securitySinks || [];
     var dangerousPats = analysis.dangerousPatterns || [];
-    if (secSinks.length || dangerousPats.length) {
+    if ((secSinks.length || dangerousPats.length) && !analysis._securityMerged) {
+      analysis._securityMerged = true;
       if (!tab._securityFindings) tab._securityFindings = [];
       tab._securityFindings.push({
         sourceUrl: analysis.sourceUrl,
