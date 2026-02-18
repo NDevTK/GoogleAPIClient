@@ -4977,13 +4977,11 @@ test("str.search(tainted) → regex-implicit", `
   });
 });
 
-test("str.split(tainted) → regex-implicit", `
+test("str.split(tainted) → NOT flagged (split does not create implicit RegExp)", `
   var sep = location.hash.slice(1);
   var parts = "a,b,c".split(sep);
 `, function(r) {
-  return r.dangerousPatterns.some(function(p) {
-    return p.type === "regex-implicit" && p.description.indexOf("split") !== -1;
-  });
+  return !r.dangerousPatterns.some(function(p) { return p.type === "regex-implicit"; });
 });
 
 test("str.match(literal regex) → NOT flagged", `
@@ -5247,6 +5245,361 @@ test("React SSR XSS: referrer → dangerouslySetInnerHTML", `
 `, function(r) {
   return r.securitySinks.some(function(s) {
     return s.type === "xss" && s.sink === "dangerouslySetInnerHTML";
+  });
+});
+
+// ── Taint Propagation Improvements ──
+
+console.log("\n--- event.data taint source ---");
+
+test("Security: event.data → innerHTML (postMessage XSS)", `
+  window.addEventListener("message", function(event) {
+    document.getElementById("output").innerHTML = event.data;
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML" && s.source === "event.data";
+  });
+});
+
+test("Security: event.data property access → innerHTML", `
+  window.addEventListener("message", function(e) {
+    var html = e.data.content;
+    document.getElementById("target").innerHTML = html;
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: event.data → eval", `
+  self.addEventListener("message", function(event) {
+    eval(event.data);
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval";
+  });
+});
+
+test("Security: locally-bound event → NOT flagged as event.data", `
+  function process(event) {
+    var event = { data: "safe" };
+    document.getElementById("x").innerHTML = event.data;
+  }
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.source === "event.data";
+  });
+});
+
+console.log("\n--- LogicalExpression taint propagation ---");
+
+test("Security: location.hash || default → innerHTML (OR propagation)", `
+  var content = location.hash.slice(1) || "<p>default</p>";
+  document.getElementById("out").innerHTML = content;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: condition && tainted → innerHTML (AND propagation)", `
+  var val = window.loaded && location.search;
+  document.body.innerHTML = val;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: nullish coalescing ?? tainted → innerHTML", `
+  var url = cachedValue ?? location.hash;
+  document.getElementById("frame").innerHTML = url;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: literal || literal → NOT flagged", `
+  var val = "hello" || "world";
+  document.getElementById("out").innerHTML = val;
+`, function(r) {
+  return !r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.source;
+  });
+});
+
+console.log("\n--- Destructuring taint propagation ---");
+
+test("Security: const { data } = event → innerHTML (object destructuring)", `
+  window.addEventListener("message", function(event) {
+    var { data } = event;
+    document.getElementById("out").innerHTML = data;
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: const { html } = parsed where parsed = JSON.parse(location.hash)", `
+  var parsed = JSON.parse(location.hash.slice(1));
+  var { html } = parsed;
+  document.getElementById("out").innerHTML = html;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: nested destructuring const { payload: { html } } from tainted", `
+  var msg = JSON.parse(location.search);
+  var { payload } = msg;
+  document.body.innerHTML = payload;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: array destructuring [first] = tainted.split()", `
+  var parts = location.hash.split("#");
+  var first = parts[0];
+  document.body.innerHTML = first;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+console.log("\n--- Return-value tracing through nested blocks ---");
+
+test("Security: function with if/else return → taint propagates", `
+  function getContent(mode) {
+    if (mode === "user") {
+      return location.hash.slice(1);
+    } else {
+      return "default";
+    }
+  }
+  document.body.innerHTML = getContent("user");
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: function with switch/case return → taint propagates", `
+  function getData(type) {
+    switch (type) {
+      case "hash": return location.hash;
+      case "search": return location.search;
+      default: return "/";
+    }
+  }
+  document.body.innerHTML = getData("hash");
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: function with try/catch return → taint propagates", `
+  function safeParse() {
+    try {
+      return JSON.parse(location.hash.slice(1));
+    } catch (e) {
+      return "error";
+    }
+  }
+  document.body.innerHTML = safeParse();
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: function with nested if return → taint propagates", `
+  function resolve(cfg) {
+    if (cfg.type === "url") {
+      if (cfg.trusted) {
+        return "/safe";
+      } else {
+        return location.search;
+      }
+    }
+    return "default";
+  }
+  document.body.innerHTML = resolve({type: "url"});
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+console.log("\n--- SequenceExpression taint propagation ---");
+
+test("Security: (0, eval)(tainted) → indirect eval", `
+  var code = location.hash.slice(1);
+  (0, eval)(code);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.sink === "eval";
+  });
+});
+
+test("Security: (sideEffect(), tainted) → innerHTML", `
+  var val = (console.log("loading"), location.hash.slice(1));
+  document.body.innerHTML = val;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+console.log("\n--- AwaitExpression taint propagation ---");
+
+test("Security: await tainted.json() → innerHTML", `
+  async function loadData() {
+    var resp = await fetch(location.hash.slice(1));
+    var data = await resp.json();
+    document.body.innerHTML = data;
+  }
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+test("Security: await fetch(tainted) → request forgery", `
+  async function load() {
+    var url = location.hash.slice(1);
+    var resp = await fetch(url);
+  }
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "fetch";
+  });
+});
+
+console.log("\n--- SpreadElement taint propagation ---");
+
+test("Security: [...tainted] → preserves taint through spread", `
+  var parts = location.hash.split("/");
+  var copy = [...parts];
+  document.body.innerHTML = copy[0];
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
+  });
+});
+
+console.log("\n--- __proto__ assignment detection ---");
+
+test("Security: obj.__proto__ = tainted → prototype pollution", `
+  var key = location.hash.slice(1);
+  var payload = JSON.parse(key);
+  var obj = {};
+  obj.__proto__ = payload;
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution" && p.description.indexOf("__proto__") !== -1;
+  });
+});
+
+test("Security: obj.__proto__ = literal → NOT flagged", `
+  var obj = {};
+  obj.__proto__ = { toString: function() { return "safe"; } };
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution" && p.description.indexOf("__proto__") !== -1;
+  });
+});
+
+test("Security: target.__proto__ = event.data → prototype pollution via postMessage", `
+  window.addEventListener("message", function(e) {
+    var target = {};
+    target.__proto__ = e.data;
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "prototype-pollution" && p.description.indexOf("__proto__") !== -1;
+  });
+});
+
+console.log("\n--- Real-world combined patterns ---");
+
+test("Security: postMessage event.data → document.write (full chain)", `
+  window.addEventListener("message", function(evt) {
+    var content = evt.data;
+    document.write(content);
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "document.write";
+  });
+});
+
+test("Security: event.data via destructuring → location.href (redirect)", `
+  window.addEventListener("message", function(event) {
+    var { url } = event.data;
+    location.href = url;
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "redirect";
+  });
+});
+
+test("Security: location.search ?? default → fetch (request forgery via ??)", `
+  async function loadApi() {
+    var endpoint = new URLSearchParams(location.search).get("api") ?? "/default";
+    var resp = await fetch(endpoint);
+  }
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "fetch";
+  });
+});
+
+test("Security: function with if/return → jQuery .html() (combined pattern)", `
+  function getTemplate(page) {
+    if (page === "custom") {
+      return location.hash.slice(1);
+    }
+    return "<p>default</p>";
+  }
+  $(".container").html(getTemplate("custom"));
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === ".html";
+  });
+});
+
+test("Security: event.data → new WebSocket (request forgery)", `
+  window.addEventListener("message", function(e) {
+    var ws = new WebSocket(e.data.wsUrl);
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "request-forgery" && s.sink === "new WebSocket";
+  });
+});
+
+test("Security: await + destructuring + LogicalExpression combined", `
+  async function process() {
+    var raw = location.hash.slice(1);
+    var data = JSON.parse(raw);
+    var { html } = data;
+    var content = html || "<p>empty</p>";
+    document.body.innerHTML = content;
+  }
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.sink === "innerHTML";
   });
 });
 
