@@ -66,7 +66,7 @@ All AST analysis uses Babel's scope system (`path.scope.getBinding()`) for varia
 - **Message Routing**: `chrome.runtime.onMessage` routes by sender origin — extension pages go to `handlePopupMessage`, content scripts go to `handleContentMessage`. Allowed content script types: `CONTENT_KEYS`, `CONTENT_ENDPOINTS`, `RESPONSE_BODY`.
 - **UI Security**: Strict origin checks in `onMessage` handlers. All dynamic content passed through `esc()` to prevent XSS.
 - **Data Persistence**: `scheduleSave()` for global store writes (IndexedDB, inaccessible to content scripts), `scheduleSessionSave(tabId)` for per-tab request log writes (`chrome.storage.session`, 1s debounce). GlobalStore uses IndexedDB instead of `chrome.storage.local` to prevent compromised renderers from reading cross-site structural metadata.
-- **Intercept Script Safety**: `intercept.js` runs in main world — never blocks the caller (async body reads), caps bodies at 256KB, filters non-API content types. Uses IIFE to avoid global pollution.
+- **Intercept Script Safety**: `intercept.js` runs in main world — never blocks the caller (async body reads), filters non-API content types. Uses IIFE to avoid global pollution.
 - **Send Panel**: Content-Type and body mode are auto-determined (no manual dropdowns). `currentContentType` set from `schema.contentTypes[0]` or replayed request headers. `currentBodyMode` set to `form` (schema loaded), `graphql` (GraphQL URL), or `raw` (fallback). `setBodyMode()` toggles panel visibility.
 
 ## Security Model

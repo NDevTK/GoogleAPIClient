@@ -94,7 +94,7 @@ npm install && node build.js
 ## Architecture
 
 ```
-intercept.js       Main-world fetch/XHR wrapper (response body capture, 256KB cap)
+intercept.js       Main-world fetch/XHR wrapper (response body capture)
 content.js         Isolated-world content script (DOM scanning, PAGE_FETCH relay, intercept relay)
 background.js      Service worker (request interception, VDD learning, AST orchestration, export)
 popup.js           Popup controller (rendering, replay, form builder, security panel)
@@ -154,7 +154,6 @@ GlobalStore uses IndexedDB (inaccessible to content scripts) instead of `chrome.
 - This tool is for **authorized security research only**.
 - Cookie values are redacted; only their presence is tracked.
 - No debugger permission required — no visible browser UI impact.
-- Response bodies capped at 256KB per capture.
 - All dynamic content in the popup is escaped via `esc()` to prevent self-XSS.
 
 ## Testing

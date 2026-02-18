@@ -7,7 +7,6 @@
 (function () {
   "use strict";
 
-  const MAX_BODY = 262144; // 256 KB
   const EVENT_NAME = "__uasr_resp";
 
   // ─── Filters ────────────────────────────────────────────────────────────────
@@ -110,12 +109,10 @@
               base64Encoded = false;
             if (isBinary(ct)) {
               const buf = await clone.arrayBuffer();
-              if (buf.byteLength > MAX_BODY) return;
               body = uint8ToBase64(new Uint8Array(buf));
               base64Encoded = true;
             } else {
               body = await clone.text();
-              if (body.length > MAX_BODY) body = body.slice(0, MAX_BODY);
             }
 
             emit({
@@ -169,18 +166,15 @@
         let body,
           base64Encoded = false;
         if (this.responseType === "arraybuffer" && this.response) {
-          if (this.response.byteLength > MAX_BODY) return;
           body = uint8ToBase64(new Uint8Array(this.response));
           base64Encoded = true;
         } else if (this.responseType === "" || this.responseType === "text") {
           body = this.responseText;
           if (!body) return;
-          if (body.length > MAX_BODY) body = body.slice(0, MAX_BODY);
         } else if (this.responseType === "json") {
           try {
             body = JSON.stringify(this.response);
             if (!body) return;
-            if (body.length > MAX_BODY) body = body.slice(0, MAX_BODY);
           } catch (_) {
             return;
           }

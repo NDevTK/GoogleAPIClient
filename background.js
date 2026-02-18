@@ -22,7 +22,7 @@ const _scriptBuffers = new Map(); // tabId → { scripts: [{url, code}], timer: 
 const globalStore = {
   apiKeys: new Map(), // key → { origin, referer, firstSeen, ... }
   endpoints: new Map(), // endpointKey → endpoint data
-  discoveryDocs: new Map(), // service → { status, url, method, apiKey, fetchedAt, summary }
+  discoveryDocs: new Map(), // service → { status, url, method, apiKey, fetchedAt, doc }
   probeResults: new Map(), // endpointKey → probe result
   scopes: new Map(), // service → string[]
   securityFindings: new Map(), // sourceUrl → { sourceUrl, securitySinks[], dangerousPatterns[] }
@@ -264,8 +264,7 @@ function _serializeGlobalStore() {
           method: v.method || null,
           apiKey: v.apiKey || null,
           fetchedAt: v.fetchedAt || null,
-          summary: v.summary || (v.doc ? summarizeDiscovery(v.doc) : null),
-          doc: v.doc, // Persist full doc (crucial for virtual docs)
+          doc: v.doc || null,
         },
       ]),
     ),
@@ -382,8 +381,7 @@ function mergeToGlobal(tab) {
         method: v.method,
         apiKey: v.apiKey,
         fetchedAt: v.fetchedAt,
-        summary: v.doc ? summarizeDiscovery(v.doc) : v.summary || null,
-        doc: v.doc, // kept in memory + persisted (needed for virtual doc schemas)
+        doc: v.doc || null,
       });
     } else if (!globalStore.discoveryDocs.has(k)) {
       globalStore.discoveryDocs.set(k, { status: v.status });
@@ -423,20 +421,10 @@ const _globalStoreReady = loadGlobalStore();
 
 // ─── Session Storage (Request Logs) ─────────────────────────────────────────
 
-const MAX_SESSION_BODY = 4096;
-
 function serializeLogEntry(entry) {
   const clone = { ...entry };
   delete clone.requestBody; // Chrome requestBody object, redundant with rawBodyB64
   delete clone.decodedBody; // Parsed protobuf tree, regenerable
-  if (clone.rawBodyB64 && clone.rawBodyB64.length > MAX_SESSION_BODY) {
-    clone.rawBodyB64 = clone.rawBodyB64.slice(0, MAX_SESSION_BODY);
-    clone._rawTruncated = true;
-  }
-  if (clone.responseBody && clone.responseBody.length > MAX_SESSION_BODY) {
-    clone.responseBody = clone.responseBody.slice(0, MAX_SESSION_BODY);
-    clone._responseTruncated = true;
-  }
   return clone;
 }
 
@@ -2404,7 +2392,6 @@ async function performProbeAndPatch(tabId, service, targetUrl, apiKey) {
       tab.discoveryDocs.set(service, {
         status: "found", // Treat as found so it shows up in UI
         doc: virtualDoc,
-        summary: summarizeDiscovery(virtualDoc),
         apiKey: apiKey,
         fetchedAt: Date.now(),
         method: existingDoc ? currentStatus.method || "HYBRID" : "PROBE",
@@ -3750,7 +3737,6 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
               existing.doc.schemas[sName] = schema;
             }
           }
-          existing.summary = summarizeDiscovery(existing.doc);
         } else {
           // Store as new discovery doc
           const entry = {
@@ -3759,7 +3745,6 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
             method: "IMPORT",
             apiKey: null,
             fetchedAt: Date.now(),
-            summary: summarizeDiscovery(doc),
             doc,
             isVirtual: false,
           };
@@ -4811,7 +4796,7 @@ function serializeTabData(tab) {
     mergedScopes[k] = v;
   }
 
-  // Discovery docs: global base (summaries), tab overwrites with full doc
+  // Discovery docs: global base, tab overwrites with full doc
   const mergedDiscovery = {};
   for (const [k, v] of globalStore.discoveryDocs) {
     if (v.status === "found") {
@@ -4821,7 +4806,7 @@ function serializeTabData(tab) {
         method: v.method,
         apiKey: v.apiKey || null,
         fetchedAt: v.fetchedAt,
-        summary: v.summary || (v.doc ? summarizeDiscovery(v.doc) : null),
+        doc: v.doc || null,
       };
     } else {
       mergedDiscovery[k] = { status: v.status };
@@ -4835,7 +4820,6 @@ function serializeTabData(tab) {
         method: v.method,
         apiKey: v.apiKey || null,
         fetchedAt: v.fetchedAt,
-        summary: v.doc ? summarizeDiscovery(v.doc) : v.summary || null,
         doc: v.doc || null,
         isVirtual: v.isVirtual || false,
       };

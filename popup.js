@@ -1,5 +1,35 @@
 // Popup controller: renders captured data, security findings, and sends requests.
 
+/** Extract a flat deduplicated method list from a discovery doc. */
+function getDocMethods(doc) {
+  if (!doc || !doc.resources) return [];
+  const seen = new Set();
+  const methods = [];
+  function walk(res) {
+    for (const rName in res) {
+      const r = res[rName];
+      if (r.methods) {
+        for (const mName in r.methods) {
+          const m = r.methods[mName];
+          const key = (m.httpMethod || "GET") + " " + m.id;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          methods.push(m);
+        }
+      }
+      if (r.resources) walk(r.resources);
+    }
+  }
+  // Walk probed first so learned wins on dedup (learned is added second, probed filtered by seen)
+  if (doc.resources.probed) walk({ probed: doc.resources.probed });
+  if (doc.resources.learned) walk({ learned: doc.resources.learned });
+  const skip = new Set(["probed", "learned"]);
+  const rest = {};
+  for (const k in doc.resources) { if (!skip.has(k)) rest[k] = doc.resources[k]; }
+  walk(rest);
+  return methods;
+}
+
 let currentTabId = null;
 let tabData = null;
 let currentSchema = null;
@@ -386,13 +416,10 @@ function render() {
     var methods = [];
     for (var i = 0; i < svcNames.length; i++) {
       var sd = tabData.discoveryDocs[svcNames[i]];
-      if (sd.status === "found" && sd.summary && sd.summary.resources) {
-        var rKeys = Object.keys(sd.summary.resources);
-        for (var j = 0; j < rKeys.length; j++) {
-          var rMethods = sd.summary.resources[rKeys[j]];
-          for (var k = 0; k < rMethods.length; k++) {
-            methods.push(rMethods[k].httpMethod + " " + rMethods[k].id);
-          }
+      if (sd.status === "found" && sd.doc) {
+        var docMethods = getDocMethods(sd.doc);
+        for (var k = 0; k < docMethods.length; k++) {
+          methods.push(docMethods[k].httpMethod + " " + docMethods[k].id);
         }
       }
     }
@@ -573,8 +600,8 @@ function renderSendPanel() {
   svcSelect.innerHTML = '<option value="">All Services</option>';
   if (tabData?.discoveryDocs) {
     for (const [svcName, svcData] of Object.entries(tabData.discoveryDocs).sort((a, b) => a[0].localeCompare(b[0]))) {
-      if (svcData.status === "found" && svcData.summary?.resources) {
-        const methodCount = Object.values(svcData.summary.resources).reduce((n, arr) => n + arr.length, 0);
+      if (svcData.status === "found" && svcData.doc) {
+        const methodCount = getDocMethods(svcData.doc).length;
         const opt = document.createElement("option");
         opt.value = svcName;
         opt.textContent = `${svcName} (${methodCount})`;
@@ -601,19 +628,13 @@ function renderMethodDropdown() {
 
     for (const [svcName, svcData] of services) {
       if (svcFilter && svcName !== svcFilter) continue;
-      if (svcData.status === "found" && svcData.summary?.resources) {
-        const methods = [];
-        for (const [rName, rMethods] of Object.entries(
-          svcData.summary.resources,
-        )) {
-          methods.push(...rMethods);
-        }
-
+      if (svcData.status === "found" && svcData.doc) {
+        const methods = getDocMethods(svcData.doc);
         methods.sort((a, b) => a.id.localeCompare(b.id));
 
         if (methods.length > 0) {
           const group = document.createElement("optgroup");
-          group.label = svcData.summary.title || svcName;
+          group.label = svcData.doc.title || svcName;
 
           for (const m of methods) {
             const opt = document.createElement("option");
@@ -689,12 +710,12 @@ function onSendEndpointSelected() {
     const validMethod = selectedOpt.dataset.method;
     const discoveryId = selectedOpt.dataset.discoveryId; // Use data-discoveryId
     const svcData = tabData?.discoveryDocs?.[svc];
-    const summary = svcData?.summary;
+    const doc = svcData?.doc;
 
-    // improved baseUrl resolution using summary
-    let baseUrl = summary?.baseUrl;
-    if (!baseUrl && summary?.rootUrl) {
-      baseUrl = summary.rootUrl + (summary.servicePath || "");
+    // baseUrl resolution from doc
+    let baseUrl = doc?.baseUrl || doc?.rootUrl;
+    if (!baseUrl && doc?.rootUrl) {
+      baseUrl = doc.rootUrl + (doc.servicePath || "");
     }
     // Fallback
     if (!baseUrl) {

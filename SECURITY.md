@@ -84,7 +84,6 @@ Runs in the page's **main world** — same origin and process as the page itself
 
 - No access to extension APIs (`chrome.runtime`, `chrome.storage`, etc.)
 - Can only communicate with `content.js` via `CustomEvent` on `document`
-- Body capture is capped at 256KB to prevent memory exhaustion
 - Filters non-API content types (images, fonts, etc.) before forwarding
 - Wrapped in IIFE to avoid polluting the page's global scope
 - Never blocks the caller — body reads are async
