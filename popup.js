@@ -154,6 +154,19 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     let body;
     if (httpMethod === "GET" || httpMethod === "DELETE") {
+      // Collect URL params from form fields even for GET/DELETE
+      if (bodyMode === "form") {
+        const formValues = collectFormValues();
+        if (Object.keys(formValues.params).length > 0) {
+          try {
+            const urlObj = new URL(url);
+            for (const [k, v] of Object.entries(formValues.params)) {
+              urlObj.searchParams.set(k, String(v));
+            }
+            url = urlObj.toString();
+          } catch (_) {}
+        }
+      }
       body = null;
     } else if (bodyMode === "form") {
       const formValues = collectFormValues();
@@ -1223,6 +1236,12 @@ function collectSingleField(wrapper) {
 function getInputValue(input, type) {
   if (type === "bool") return input.checked;
   if (input.value === "") return null;
+  if (type === "enum") {
+    // Enum values may be strings (AST-detected constraints) or integers (protobuf enums).
+    // Return as number only if the value is numeric.
+    var numVal = Number(input.value);
+    return isNaN(numVal) ? input.value : numVal;
+  }
   if (
     [
       "int32",
@@ -1231,7 +1250,6 @@ function getInputValue(input, type) {
       "uint64",
       "double",
       "float",
-      "enum",
       "sint32",
       "sint64",
       "fixed32",
@@ -1267,6 +1285,22 @@ async function sendRequest() {
 
   let body;
   if (httpMethod === "GET" || httpMethod === "DELETE") {
+    // Collect URL params from form fields even for GET/DELETE
+    if (bodyMode === "form") {
+      const formValues = collectFormValues();
+      if (Object.keys(formValues.params).length > 0) {
+        try {
+          const urlObj = new URL(url);
+          for (const [k, v] of Object.entries(formValues.params)) {
+            urlObj.searchParams.set(k, String(v));
+          }
+          url = urlObj.toString();
+          currentRequestUrl = url;
+        } catch (_) {
+          console.warn("[Send] URL construction failed:", _);
+        }
+      }
+    }
     body = { mode: "raw", formData: null, rawBody: null, frameId: currentReplayRequest?.frameId };
   } else if (bodyMode === "form") {
     const formValues = collectFormValues();

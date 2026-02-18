@@ -3316,12 +3316,28 @@ function mergeASTResultsIntoVDD(tab, results, tabId) {
           var vddM = (vddProbed && vddProbed.methods && vddProbed.methods[meta.methodName])
             || (vddLearned && vddLearned.methods && (vddLearned.methods[meta.methodName] || (qualName ? vddLearned.methods[qualName] : null)));
           if (vddM) {
+            // Enrich URL parameters with valid values
             for (var vi = 0; vi < callSite.params.length; vi++) {
               var vp = callSite.params[vi];
               if (vp.validValues && vp.validValues.length > 0 && vddM.parameters[vp.name]) {
                 var ep = vddM.parameters[vp.name];
                 if (!ep.customEnum && !ep.enum) {
                   ep.enum = vp.validValues.map(String);
+                }
+              }
+            }
+            // Enrich body schema properties with valid values
+            if (vddM.request && vddM.request.$ref) {
+              var bodySchemaObj = vddDocEntry.doc.schemas[vddM.request.$ref];
+              if (bodySchemaObj && bodySchemaObj.properties) {
+                for (var bvi = 0; bvi < callSite.params.length; bvi++) {
+                  var bvp = callSite.params[bvi];
+                  if (bvp.validValues && bvp.validValues.length > 0 && (bvp.location || "query") === "body") {
+                    var schemaProp = bodySchemaObj.properties[bvp.name];
+                    if (schemaProp && !schemaProp.enum) {
+                      schemaProp.enum = bvp.validValues.map(String);
+                    }
+                  }
                 }
               }
             }
@@ -4309,6 +4325,10 @@ function encodeSinglePbFieldRaw(type, value) {
 function coerceValue(value, type) {
   if (value == null) return null;
   if (type === "bool") return value === true || value === "true";
+  if (type === "enum") {
+    var n = Number(value);
+    return isNaN(n) ? String(value) : n;
+  }
   if (
     [
       "int32",
@@ -4317,7 +4337,6 @@ function coerceValue(value, type) {
       "uint64",
       "double",
       "float",
-      "enum",
       "sint32",
       "sint64",
       "fixed32",

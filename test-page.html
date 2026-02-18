@@ -246,6 +246,19 @@ function processAction(action) {
   }
 }
 
+// 22b. POST with body field value constraints
+var VALID_ROLES = ["admin", "editor", "viewer", "guest"];
+var VALID_STATUSES = ["active", "suspended", "pending"];
+function createUser(name, role, status) {
+  if (VALID_ROLES.includes(role) && VALID_STATUSES.includes(status)) {
+    fetch("https://api.example.com/v1/users/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name, role: role, status: status })
+    });
+  }
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // PROTO DETECTION — Enums and field maps
 // ══════════════════════════════════════════════════════════════════════════════
