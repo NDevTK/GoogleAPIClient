@@ -2,7 +2,48 @@
 // endpoints, auth headers, coordinates discovery document fetching,
 // req2proto fallback probing, and stores AST security findings.
 
-importScripts("lib/protobuf.js", "lib/discovery.js", "lib/req2proto.js", "lib/stats.js", "lib/chains.js", "lib/babel-bundle.js", "lib/ast.js", "lib/sourcemap.js");
+importScripts("lib/protobuf.js", "lib/discovery.js", "lib/req2proto.js", "lib/stats.js", "lib/chains.js");
+
+// ─── Offscreen AST Worker ────────────────────────────────────────────────────
+// Heavy libs (babel-bundle.js, ast.js, sourcemap.js) run in an offscreen
+// document so the service worker stays responsive during analysis.
+
+var _offscreenReady = null;
+
+async function ensureOffscreen() {
+  if (_offscreenReady) return _offscreenReady;
+  _offscreenReady = (async () => {
+    var contexts = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"]
+    });
+    if (contexts.length > 0) return;
+    await chrome.offscreen.createDocument({
+      url: "ast-worker.html",
+      reasons: ["WORKERS"],
+      justification: "AST analysis of JavaScript bundles"
+    });
+  })();
+  return _offscreenReady;
+}
+
+async function sendToOffscreen(msg) {
+  await ensureOffscreen();
+  return chrome.runtime.sendMessage(msg);
+}
+
+// Inlined from ast.js — extracts sourceMappingURL from the last 500 chars.
+// Runs synchronously in the service worker (no Babel needed).
+function extractSourceMapUrl(code) {
+  var tail = code.length > 500 ? code.slice(-500) : code;
+  var marker = "sourceMappingURL=";
+  var idx = tail.indexOf(marker);
+  if (idx === -1) return null;
+  var start = idx + marker.length;
+  while (start < tail.length && (tail.charCodeAt(start) === 32 || tail.charCodeAt(start) === 9)) start++;
+  var end = start;
+  while (end < tail.length && tail.charCodeAt(end) > 32) end++;
+  return end > start ? tail.substring(start, end) : null;
+}
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -2775,7 +2816,7 @@ function _hashScriptCode(code) {
   return "inline:" + h;
 }
 
-function _analyzeCombinedScripts(tabId) {
+async function _analyzeCombinedScripts(tabId) {
   var buf = _scriptBuffers.get(tabId);
   if (!buf || buf.scripts.length === 0) return;
 
@@ -2823,18 +2864,27 @@ function _analyzeCombinedScripts(tabId) {
   else if (buf.pageUrl) tabUrl = buf.pageUrl;
   else if (scripts[0].url) tabUrl = scripts[0].url;
 
-  // Analyze combined as a single script (forceScript=true for shared global scope)
+  // Analyze combined in offscreen document (non-blocking)
   var analysis;
+  var response;
   try {
-    analysis = analyzeJSBundle(combined, tabUrl, true);
+    response = await sendToOffscreen({
+      type: "AST_ANALYZE", code: combined, sourceUrl: tabUrl, forceScript: true
+    });
   } catch (e) {
-    console.debug("[AST:combined] analyzeJSBundle threw for tab=%d: %s", tabId, e.message);
+    console.debug("[AST:combined] sendToOffscreen failed for tab=%d: %s", tabId, e.message || e);
+    return;
+  }
+  if (!response || !response.success) {
+    console.debug("[AST:combined] analyzeJSBundle failed for tab=%d: %s", tabId,
+      response ? response.error : "no response");
     // Fallback: analyze scripts individually
     for (var fi = 0; fi < scripts.length; fi++) {
       analyzeScript(tabId, scripts[fi].url, scripts[fi].code);
     }
     return;
   }
+  analysis = response.result;
 
   var hasFindings = analysis.protoEnums.length || analysis.protoFieldMaps.length ||
     analysis.fetchCallSites.length || analysis.sourceMapUrl ||
@@ -2874,25 +2924,35 @@ function _fetchSourceMapForScript(tabId, tab, analysis, scriptUrl, smUrl) {
   }
   console.debug("[AST:sourcemap] Fetching: %s (from %s)", smUrl, scriptUrl);
   pageContextFetch(tabId, smUrl, { method: "GET" }, new URL(smUrl).origin)
-    .then(function(smResp) {
+    .then(async function(smResp) {
       if (!smResp.body || smResp.error) {
         console.debug("[AST:sourcemap] Fetch failed for %s: %s", smUrl, smResp.error || "empty body");
         return;
       }
       try {
         var smJson = JSON.parse(smResp.body);
-        var smData = parseSourceMap(smJson);
+        var smResp2 = await sendToOffscreen({ type: "AST_PARSE_SOURCEMAP", sourceMapJson: smJson });
+        if (!smResp2 || !smResp2.success) {
+          console.debug("[AST:sourcemap] parseSourceMap failed for %s: %s", smUrl, smResp2 ? smResp2.error : "no response");
+          return;
+        }
+        var smData = smResp2.result;
         analysis.sourceMap = smData;
         console.debug("[AST:sourcemap] Parsed: %d sources, %d names, %d proto files, %d API client files",
           smData.sources.length, smData.names.length, smData.protoFileNames.length, smData.apiClientFiles.length);
         if (smData.sourcesContent && smData.sourcesContent.length) {
-          analysis.sourceMapTypes = extractTypesFromSources(smData.sourcesContent, smData.sources);
-          if (analysis.sourceMapTypes.length) {
-            console.debug("[AST:sourcemap] Extracted %d types", analysis.sourceMapTypes.length);
+          var typesResp = await sendToOffscreen({
+            type: "AST_EXTRACT_TYPES",
+            sourcesContent: smData.sourcesContent,
+            sources: smData.sources
+          });
+          if (typesResp && typesResp.success) {
+            analysis.sourceMapTypes = typesResp.result;
+            if (analysis.sourceMapTypes.length) {
+              console.debug("[AST:sourcemap] Extracted %d types", analysis.sourceMapTypes.length);
+            }
           }
-          // Run security analysis on original (unminified) source files.
-          // Original sources have meaningful names and TypeScript types,
-          // enabling better taint detection than analyzing the minified bundle alone.
+          // Run security analysis on original (unminified) source files via batch offscreen call.
           // Build a set of existing finding keys to deduplicate against the combined analysis.
           var _existingKeys = new Set();
           if (tab._securityFindings) {
@@ -2910,36 +2970,42 @@ function _fetchSourceMapForScript(tabId, tab, analysis, scriptUrl, smUrl) {
               }
             }
           }
-          var smSecFindings = 0;
+          // Collect files eligible for security analysis
+          var batchFiles = [];
           for (var _ssi = 0; _ssi < smData.sourcesContent.length; _ssi++) {
             var _srcContent = smData.sourcesContent[_ssi];
             var _srcName = smData.sources[_ssi] || "source_" + _ssi;
-            // Skip empty, tiny files, and non-JS/TS files
             if (!_srcContent || _srcContent.length < 100) continue;
             if (!/\.(js|ts|jsx|tsx|mjs)$/i.test(_srcName) && !/^[^.]+$/.test(_srcName)) continue;
-            try {
-              var _srcAnalysis = analyzeJSBundle(_srcContent, _srcName);
-              var _srcSinks = (_srcAnalysis.securitySinks || []).filter(function(s) {
-                return !_existingKeys.has(s.type + ":" + s.sink + ":" + s.location.line + ":" + s.location.column);
-              });
-              var _srcDangerous = (_srcAnalysis.dangerousPatterns || []).filter(function(d) {
-                return !_existingKeys.has(d.type + ":" + d.location.line + ":" + d.location.column);
-              });
-              if (_srcSinks.length || _srcDangerous.length) {
-                if (!tab._securityFindings) tab._securityFindings = [];
-                tab._securityFindings.push({
-                  sourceUrl: _srcName,
-                  securitySinks: _srcSinks,
-                  dangerousPatterns: _srcDangerous,
-                });
-                smSecFindings += _srcSinks.length + _srcDangerous.length;
-              }
-            } catch (_srcErr) {
-              // Original source may not parse (JSX, decorators, etc.) — skip silently
-            }
+            batchFiles.push({ code: _srcContent, name: _srcName });
           }
-          if (smSecFindings > 0) {
-            console.debug("[AST:sourcemap] Security analysis of original sources: %d additional findings", smSecFindings);
+          if (batchFiles.length > 0) {
+            var batchResp = await sendToOffscreen({ type: "AST_ANALYZE_BATCH", files: batchFiles });
+            if (batchResp && batchResp.success) {
+              var smSecFindings = 0;
+              for (var _bi = 0; _bi < batchResp.result.length; _bi++) {
+                var _bResult = batchResp.result[_bi];
+                if (!_bResult.success) continue;
+                var _srcSinks = (_bResult.securitySinks || []).filter(function(s) {
+                  return !_existingKeys.has(s.type + ":" + s.sink + ":" + s.location.line + ":" + s.location.column);
+                });
+                var _srcDangerous = (_bResult.dangerousPatterns || []).filter(function(d) {
+                  return !_existingKeys.has(d.type + ":" + d.location.line + ":" + d.location.column);
+                });
+                if (_srcSinks.length || _srcDangerous.length) {
+                  if (!tab._securityFindings) tab._securityFindings = [];
+                  tab._securityFindings.push({
+                    sourceUrl: batchFiles[_bi].name,
+                    securitySinks: _srcSinks,
+                    dangerousPatterns: _srcDangerous,
+                  });
+                  smSecFindings += _srcSinks.length + _srcDangerous.length;
+                }
+              }
+              if (smSecFindings > 0) {
+                console.debug("[AST:sourcemap] Security analysis of original sources: %d additional findings", smSecFindings);
+              }
+            }
           }
         }
         mergeASTResultsIntoVDD(tab, [analysis], tabId);
@@ -2955,16 +3021,25 @@ function _fetchSourceMapForScript(tabId, tab, analysis, scriptUrl, smUrl) {
 
 // ─── AST Bundle Analysis ─────────────────────────────────────────────────────
 
-function analyzeScript(tabId, scriptUrl, code) {
+async function analyzeScript(tabId, scriptUrl, code) {
   var tab = getTab(tabId);
   console.debug("[AST] Received script: %s (%d chars) tab=%d", scriptUrl || "(inline)", code.length, tabId);
   var analysis;
+  var response;
   try {
-    analysis = analyzeJSBundle(code, scriptUrl);
+    response = await sendToOffscreen({
+      type: "AST_ANALYZE", code: code, sourceUrl: scriptUrl
+    });
   } catch (e) {
-    console.debug("[AST] analyzeJSBundle threw for %s: %s", scriptUrl, e.message);
+    console.debug("[AST] sendToOffscreen failed for %s: %s", scriptUrl, e.message || e);
     return;
   }
+  if (!response || !response.success) {
+    console.debug("[AST] analyzeJSBundle failed for %s: %s", scriptUrl,
+      response ? response.error : "no response");
+    return;
+  }
+  analysis = response.result;
 
   var hasFindings = analysis.protoEnums.length || analysis.protoFieldMaps.length ||
     analysis.fetchCallSites.length || analysis.sourceMapUrl ||
@@ -3001,14 +3076,19 @@ function analyzeScript(tabId, scriptUrl, code) {
     }
     console.debug("[AST:sourcemap] Fetching: %s", smUrl);
     pageContextFetch(tabId, smUrl, { method: "GET" }, new URL(smUrl).origin)
-      .then(function(smResp) {
+      .then(async function(smResp) {
         if (!smResp.body || smResp.error) {
           console.debug("[AST:sourcemap] Fetch failed for %s: %s", smUrl, smResp.error || "empty body");
           return;
         }
         try {
           var smJson = JSON.parse(smResp.body);
-          var smData = parseSourceMap(smJson);
+          var smResp2 = await sendToOffscreen({ type: "AST_PARSE_SOURCEMAP", sourceMapJson: smJson });
+          if (!smResp2 || !smResp2.success) {
+            console.debug("[AST:sourcemap] parseSourceMap failed for %s: %s", smUrl, smResp2 ? smResp2.error : "no response");
+            return;
+          }
+          var smData = smResp2.result;
           analysis.sourceMap = smData;
           console.debug("[AST:sourcemap] Parsed: %d sources, %d names, %d proto files, %d API client files, %d sourcesContent",
             smData.sources.length, smData.names.length, smData.protoFileNames.length,
@@ -3020,10 +3100,17 @@ function analyzeScript(tabId, scriptUrl, code) {
             console.debug("[AST:sourcemap] API client files: %s", smData.apiClientFiles.join(", "));
           }
           if (smData.sourcesContent && smData.sourcesContent.length) {
-            analysis.sourceMapTypes = extractTypesFromSources(smData.sourcesContent, smData.sources);
-            if (analysis.sourceMapTypes.length) {
-              console.debug("[AST:sourcemap] Extracted %d types: %s", analysis.sourceMapTypes.length,
-                analysis.sourceMapTypes.map(function(t) { return t.kind + " " + t.name; }).slice(0, 10).join(", "));
+            var typesResp = await sendToOffscreen({
+              type: "AST_EXTRACT_TYPES",
+              sourcesContent: smData.sourcesContent,
+              sources: smData.sources
+            });
+            if (typesResp && typesResp.success) {
+              analysis.sourceMapTypes = typesResp.result;
+              if (analysis.sourceMapTypes.length) {
+                console.debug("[AST:sourcemap] Extracted %d types: %s", analysis.sourceMapTypes.length,
+                  analysis.sourceMapTypes.map(function(t) { return t.kind + " " + t.name; }).slice(0, 10).join(", "));
+              }
             }
           }
           mergeASTResultsIntoVDD(tab, [analysis], tabId);
