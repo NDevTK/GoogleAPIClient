@@ -41,6 +41,15 @@ let logFilter = "active"; // "active" | "all" | tabId (number)
 let allTabsData = null; // { tabId: { meta, requestLog } }
 let lastSendResult = null; // Last rendered response for re-render after rename
 
+// Virtual scroll state for request log
+const _vs = {
+  entries: [],       // full sorted entry list
+  heights: new Map(),// measured heights by entry id
+  estHeight: 85,     // estimated row height (px)
+  buffer: 3,         // extra rows above/below viewport
+  scrollHandler: null,
+};
+
 function setBodyMode(mode) {
   currentBodyMode = mode;
   document.getElementById("send-form-fields").style.display =
@@ -252,7 +261,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       parts.push(`  -H '${sq(k)}: ${sq(v)}'`);
     }
     if (req.body) {
-      parts.push(`  -d '${sq(req.body)}'`);
+      const ct = (req.headers || {})["Content-Type"] || "";
+      if (ct.includes("protobuf") || ct.includes("grpc")) {
+        // Binary body is base64-encoded — pipe through base64 decode
+        parts.push(`  --data-binary @- <<< $(echo '${sq(req.body)}' | base64 -d)`);
+      } else {
+        parts.push(`  -d '${sq(req.body)}'`);
+      }
     }
     parts.push(`  '${sq(req.url)}'`);
     return parts.join(" \\\n");
@@ -268,11 +283,30 @@ document.addEventListener("DOMContentLoaded", async () => {
   function formatPython(req) {
     const lines = ["import requests", ""];
     const kwargs = [];
-    if (Object.keys(req.headers || {}).length) {
-      kwargs.push(`    headers=${JSON.stringify(req.headers)}`);
-    }
-    if (req.body) {
+    const ct = (req.headers || {})["Content-Type"] || "";
+    const isBinaryBody = ct.includes("protobuf") || ct.includes("grpc");
+    const isJson = ct.includes("application/json");
+    // For JSON content types, use json= with parsed object.
+    // For binary (protobuf/gRPC-Web), body is base64 — decode it.
+    // Otherwise use data= with raw string.
+    if (isBinaryBody && req.body) {
+      lines[0] = "import requests\nimport base64";
+      kwargs.push(`    data=base64.b64decode(${JSON.stringify(req.body)})`);
+    } else if (isJson && req.body) {
+      try {
+        const parsed = JSON.parse(req.body);
+        kwargs.push(`    json=${JSON.stringify(parsed)}`);
+      } catch (_) {
+        kwargs.push(`    data=${JSON.stringify(req.body)}`);
+      }
+    } else if (req.body) {
       kwargs.push(`    data=${JSON.stringify(req.body)}`);
+    }
+    const headers = { ...(req.headers || {}) };
+    // json= sets Content-Type automatically — remove to avoid conflict
+    if (isJson && req.body) delete headers["Content-Type"];
+    if (Object.keys(headers).length) {
+      kwargs.push(`    headers=${JSON.stringify(headers)}`);
     }
     const fn = req.method === "GET" ? "get" : req.method === "POST" ? "post" : req.method === "PUT" ? "put" : req.method === "DELETE" ? "delete" : "request";
     if (fn === "request") {
@@ -409,57 +443,6 @@ async function populateTabFilter() {
 // ─── Render ──────────────────────────────────────────────────────────────────
 
 function render() {
-  // Debug: dump state on every render
-  if (tabData) {
-    var epKeys = tabData.endpoints ? Object.keys(tabData.endpoints) : [];
-    var svcNames = tabData.discoveryDocs ? Object.keys(tabData.discoveryDocs) : [];
-    var methods = [];
-    for (var i = 0; i < svcNames.length; i++) {
-      var sd = tabData.discoveryDocs[svcNames[i]];
-      if (sd.status === "found" && sd.doc) {
-        var docMethods = getDocMethods(sd.doc);
-        for (var k = 0; k < docMethods.length; k++) {
-          methods.push(docMethods[k].httpMethod + " " + docMethods[k].id);
-        }
-      }
-    }
-    console.debug("[popup:render] tabId=%s | %d endpoints, %d services, %d methods",
-      currentTabId, epKeys.length, svcNames.length, methods.length);
-    for (var ei = 0; ei < epKeys.length; ei++) {
-      var ep = tabData.endpoints[epKeys[ei]];
-      console.debug("[popup:render]   EP: %s %s | source=%s host=%s service=%s | key=%s",
-        ep.method, ep.path || ep.url, ep.source, ep.host || "?", ep.service || "?", epKeys[ei]);
-    }
-    for (var i2 = 0; i2 < svcNames.length; i2++) {
-      var sd2 = tabData.discoveryDocs[svcNames[i2]];
-      if (sd2.status !== "found" || !sd2.doc || !sd2.doc.resources) continue;
-      var resKeys = Object.keys(sd2.doc.resources);
-      for (var j2 = 0; j2 < resKeys.length; j2++) {
-        var resMethods = sd2.doc.resources[resKeys[j2]].methods;
-        if (!resMethods) continue;
-        var mKeys = Object.keys(resMethods);
-        for (var k2 = 0; k2 < mKeys.length; k2++) {
-          var mObj = resMethods[mKeys[k2]];
-          var paramStr = "";
-          if (mObj.parameters) {
-            var pKeys = Object.keys(mObj.parameters);
-            for (var p2 = 0; p2 < pKeys.length; p2++) {
-              var pp = mObj.parameters[pKeys[p2]];
-              paramStr += (paramStr ? ", " : "") + pKeys[p2] + ":" + (pp.location || "?");
-              if (pp.enum) paramStr += " enum=[" + pp.enum.join(",") + "]";
-              if (pp.type) paramStr += " type=" + pp.type;
-            }
-          }
-          var reqStr = mObj.request ? JSON.stringify(mObj.request).slice(0, 120) : "null";
-          console.debug("[popup:render]   METHOD: %s %s | path=%s | params={%s} | req=%s",
-            mObj.httpMethod, mObj.id, mObj.path || "?", paramStr, reqStr);
-        }
-      }
-    }
-  } else {
-    console.debug("[popup:render] tabData is null — tabId=%s", currentTabId);
-  }
-
   renderDataPanel();
   renderSecurityPanel();
   renderSendPanel();
@@ -2011,17 +1994,122 @@ function findSchemaForRequest(req) {
   return null;
 }
 
-// ─── Response Panel (Request Log) ─────────────────────────────────────────────
+// ─── Response Panel (Request Log) — Virtual Scroll ──────────────────────────
+
+function _renderLogCard(req, showTabLabel) {
+  const hasProto = !!req.decodedBody;
+  return `<div class="card request-card clickable-card mb-8" data-id="${esc(String(req.id))}" data-tab-id="${esc(String(req._tabId))}">
+    <div class="card-label flex-between">
+      <span>
+        <span class="badge ${esc(req.method)}">${esc(req.method)}</span>
+        <span class="text-timestamp">${new Date(req.timestamp).toLocaleTimeString()}</span>
+        ${showTabLabel ? `<span class="badge badge-tab">${esc(req._tabTitle || "Tab " + req._tabId)}</span>` : ""}
+      </span>
+      ${getStatusBadge(req.status)}
+    </div>
+    <div class="card-value card-value-mono">${esc(req.url)}</div>
+    <div class="card-meta">
+      ${req.service ? `Service: <strong>${esc(req.service)}</strong>` : ""}
+      ${hasProto ? ' <span class="badge badge-found">PROTOBUF</span>' : ""}
+      ${req.url.includes("batchexecute") ? ' <span class="badge badge-batch">BATCHEXECUTE</span>' : ""}
+      ${isGrpcWeb(req.mimeType || req.contentType || "") ? ' <span class="badge badge-grpc">gRPC-WEB</span>' : ""}
+      ${isSSE(req.mimeType || "") ? ' <span class="badge badge-sse">SSE</span>' : ""}
+      ${isNDJSON(req.mimeType || "") ? ' <span class="badge badge-ndjson">NDJSON</span>' : ""}
+      ${isGraphQLUrl(req.url) ? ' <span class="badge badge-graphql">GRAPHQL</span>' : ""}
+      ${isMultipartBatch(req.mimeType || "") ? ' <span class="badge badge-multipart">MULTIPART</span>' : ""}
+      ${/\/async\//.test(req.url) ? ' <span class="badge badge-batch">ASYNC</span>' : ""}
+    </div>
+  </div>`;
+}
+
+function _getRowHeight(idx) {
+  return _vs.heights.get(idx) || _vs.estHeight;
+}
+
+function _getTotalHeight() {
+  let h = 0;
+  for (let i = 0; i < _vs.entries.length; i++) h += _getRowHeight(i);
+  return h;
+}
+
+function _getVisibleRange(scrollEl) {
+  const scrollTop = scrollEl.scrollTop;
+  const viewH = scrollEl.clientHeight;
+  const buf = _vs.buffer;
+  let y = 0, startIdx = 0;
+  // Find first visible
+  for (let i = 0; i < _vs.entries.length; i++) {
+    const rh = _getRowHeight(i);
+    if (y + rh > scrollTop) { startIdx = i; break; }
+    y += rh;
+    if (i === _vs.entries.length - 1) startIdx = i;
+  }
+  // Find last visible
+  let endIdx = startIdx;
+  let vy = y;
+  for (let i = startIdx; i < _vs.entries.length; i++) {
+    endIdx = i;
+    vy += _getRowHeight(i);
+    if (vy >= scrollTop + viewH) break;
+  }
+  // Add buffer
+  startIdx = Math.max(0, startIdx - buf);
+  endIdx = Math.min(_vs.entries.length - 1, endIdx + buf);
+  // Top offset for positioning
+  let topPad = 0;
+  for (let i = 0; i < startIdx; i++) topPad += _getRowHeight(i);
+  return { startIdx, endIdx, topPad };
+}
+
+function _measureRenderedCards(container, startIdx) {
+  const cards = container.querySelectorAll(".request-card");
+  cards.forEach((card, i) => {
+    const h = card.offsetHeight + 8; // include mb-8
+    _vs.heights.set(startIdx + i, h);
+  });
+}
+
+function _renderVisibleSlice() {
+  const container = document.getElementById("response-log");
+  const scrollEl = document.getElementById("panel-response");
+  if (!_vs.entries.length) return;
+
+  const { startIdx, endIdx, topPad } = _getVisibleRange(scrollEl);
+  const showTabLabel = logFilter !== "active";
+
+  let html = "";
+  for (let i = startIdx; i <= endIdx; i++) {
+    html += _renderLogCard(_vs.entries[i], showTabLabel);
+  }
+
+  const totalH = _getTotalHeight();
+  let bottomPad = 0;
+  for (let i = endIdx + 1; i < _vs.entries.length; i++) bottomPad += _getRowHeight(i);
+
+  container.innerHTML =
+    `<div style="height:${topPad}px"></div>` +
+    html +
+    `<div style="height:${bottomPad}px"></div>`;
+
+  // Measure actual rendered heights for refinement
+  const inner = container.querySelectorAll(".request-card");
+  inner.forEach((card, i) => {
+    const rect = card.getBoundingClientRect();
+    _vs.heights.set(startIdx + i, rect.height + 8);
+  });
+
+  // Attach click handlers
+  inner.forEach((c) => {
+    c.onclick = () => {
+      const sourceTabId = c.dataset.tabId ? parseInt(c.dataset.tabId, 10) : undefined;
+      replayRequest(c.dataset.id, sourceTabId);
+    };
+  });
+}
 
 function renderResponsePanel() {
   const container = document.getElementById("response-log");
   const scrollEl = document.getElementById("panel-response");
-  const oldScrollHeight = scrollEl.scrollHeight;
-  const oldScrollTop = scrollEl.scrollTop;
-  const wasAtTop = oldScrollTop < 15;
-
-  // Stabilize container height during re-render
-  container.style.minHeight = container.scrollHeight + "px";
 
   // Build entry list based on filter mode
   let entries = [];
@@ -2036,66 +2124,36 @@ function renderResponsePanel() {
       }
     }
     entries.sort((a, b) => b.timestamp - a.timestamp);
-    if (entries.length > 200) entries = entries.slice(0, 200);
   }
+
+  // Detach old scroll handler if entries changed
+  if (_vs.scrollHandler) {
+    scrollEl.removeEventListener("scroll", _vs.scrollHandler);
+    _vs.scrollHandler = null;
+  }
+
+  _vs.entries = entries;
+  _vs.heights.clear();
 
   if (entries.length === 0) {
     container.innerHTML = '<div class="empty">No requests captured yet.</div>';
-    container.style.minHeight = "";
     return;
   }
 
-  const showTabLabel = logFilter !== "active";
-  let html = "";
-  for (const req of entries) {
-    const hasProto = !!req.decodedBody;
+  // Render initial visible slice
+  _renderVisibleSlice();
 
-    html += `<div class="card request-card clickable-card mb-8" data-id="${esc(String(req.id))}" data-tab-id="${esc(String(req._tabId))}">
-      <div class="card-label flex-between">
-        <span>
-          <span class="badge ${esc(req.method)}">${esc(req.method)}</span>
-          <span class="text-timestamp">${new Date(req.timestamp).toLocaleTimeString()}</span>
-          ${showTabLabel ? `<span class="badge badge-tab">${esc(req._tabTitle || "Tab " + req._tabId)}</span>` : ""}
-        </span>
-        ${getStatusBadge(req.status)}
-      </div>
-      <div class="card-value card-value-mono">${esc(req.url)}</div>
-      <div class="card-meta">
-        ${req.service ? `Service: <strong>${esc(req.service)}</strong>` : ""}
-        ${hasProto ? ' <span class="badge badge-found">PROTOBUF</span>' : ""}
-        ${req.url.includes("batchexecute") ? ' <span class="badge badge-batch">BATCHEXECUTE</span>' : ""}
-        ${isGrpcWeb(req.mimeType || req.contentType || "") ? ' <span class="badge badge-grpc">gRPC-WEB</span>' : ""}
-        ${isSSE(req.mimeType || "") ? ' <span class="badge badge-sse">SSE</span>' : ""}
-        ${isNDJSON(req.mimeType || "") ? ' <span class="badge badge-ndjson">NDJSON</span>' : ""}
-        ${isGraphQLUrl(req.url) ? ' <span class="badge badge-graphql">GRAPHQL</span>' : ""}
-        ${isMultipartBatch(req.mimeType || "") ? ' <span class="badge badge-multipart">MULTIPART</span>' : ""}
-        ${/\/async\//.test(req.url) ? ' <span class="badge badge-batch">ASYNC</span>' : ""}
-      </div>
-    </div>`;
-  }
-  container.innerHTML = html;
-
-  // Use requestAnimationFrame to ensure DOM is updated before scroll correction
-  requestAnimationFrame(() => {
-    if (wasAtTop) {
-      scrollEl.scrollTop = 0;
-    } else {
-      const heightDelta = scrollEl.scrollHeight - oldScrollHeight;
-      if (heightDelta !== 0) {
-        scrollEl.scrollTop = oldScrollTop + heightDelta;
-      }
-    }
-    // Clear the stabilizer
-    container.style.minHeight = "";
-  });
-
-  // Attach listeners
-  container.querySelectorAll(".request-card").forEach((c) => {
-    c.onclick = () => {
-      const sourceTabId = c.dataset.tabId ? parseInt(c.dataset.tabId, 10) : undefined;
-      replayRequest(c.dataset.id, sourceTabId);
-    };
-  });
+  // Attach scroll-driven rendering
+  let rafPending = false;
+  _vs.scrollHandler = () => {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      _renderVisibleSlice();
+    });
+  };
+  scrollEl.addEventListener("scroll", _vs.scrollHandler, { passive: true });
 }
 
 function renderBatchExecuteResponse(bodyText, req, overrideDoc = null) {

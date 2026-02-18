@@ -2065,6 +2065,26 @@ async function sendPageFetch(tabId, url, opts, frameId = 0) {
 
 const tempTabPool = new Map(); // origin -> { tabId, windowId, promise, refCount, closeTimer }
 
+// Track temp window IDs in session storage so we can clean up after SW restart.
+async function _saveTempWindowIds() {
+  const ids = [];
+  for (const entry of tempTabPool.values()) {
+    if (entry.windowId) ids.push(entry.windowId);
+  }
+  try { await chrome.storage.session.set({ _tempWinIds: ids }); } catch (_) {}
+}
+// On startup, close any temp windows leaked from a previous SW lifetime.
+(async () => {
+  try {
+    const data = await chrome.storage.session.get("_tempWinIds");
+    const ids = data?._tempWinIds;
+    if (Array.isArray(ids)) {
+      for (const wid of ids) chrome.windows.remove(wid).catch(() => {});
+      await chrome.storage.session.remove("_tempWinIds");
+    }
+  } catch (_) {}
+})();
+
 async function acquireTempTab(origin) {
   let entry = tempTabPool.get(origin);
 
@@ -2123,6 +2143,7 @@ async function acquireTempTab(origin) {
     const result = await promise;
     entry.tabId = result.tabId;
     entry.windowId = result.windowId;
+    _saveTempWindowIds();
     return result.tabId;
   } catch (err) {
     throw err;
@@ -2145,6 +2166,7 @@ function releaseTempTab(origin) {
         chrome.tabs.remove(entry.tabId).catch(() => {});
       }
       if (entry.tabId) state.tabs.delete(entry.tabId);
+      _saveTempWindowIds();
     }, 10000);
   }
 }
@@ -3782,8 +3804,23 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
       const tab = getTab(tabId);
       try {
         const spec = msg.spec;
-        if (!spec || !spec.paths) {
-          sendResponse({ error: "Invalid OpenAPI spec: missing paths" });
+        if (!spec || typeof spec !== "object") {
+          sendResponse({ error: "Invalid OpenAPI spec: not an object" });
+          return;
+        }
+        if (!spec.paths || typeof spec.paths !== "object") {
+          sendResponse({ error: "Invalid OpenAPI spec: missing or invalid paths" });
+          return;
+        }
+        // Validate OpenAPI version — only 3.0.x and 3.1.x supported
+        if (spec.openapi) {
+          if (!/^3\.\d+\.\d+/.test(spec.openapi)) {
+            sendResponse({ error: "Unsupported OpenAPI version: " + spec.openapi + ". Only 3.x is supported." });
+            return;
+          }
+        } else if (spec.swagger) {
+          // Swagger 2.0 — not supported by convertOpenApiToDiscovery
+          sendResponse({ error: "Swagger 2.0 is not supported. Please convert to OpenAPI 3.x first." });
           return;
         }
         // Determine service name from server URL or info.title
