@@ -286,12 +286,6 @@
     }
   }
 
-  // Preserve prototype chain and static properties
-  WrappedWebSocket.prototype = _WebSocket.prototype;
-  WrappedWebSocket.CONNECTING = _WebSocket.CONNECTING;
-  WrappedWebSocket.OPEN = _WebSocket.OPEN;
-  WrappedWebSocket.CLOSING = _WebSocket.CLOSING;
-  WrappedWebSocket.CLOSED = _WebSocket.CLOSED;
   window.WebSocket = WrappedWebSocket;
 
   // ─── EventSource wrapper ────────────────────────────────────────────────────
@@ -320,10 +314,6 @@
       }
     }
 
-    WrappedEventSource.prototype = _EventSource.prototype;
-    WrappedEventSource.CONNECTING = _EventSource.CONNECTING;
-    WrappedEventSource.OPEN = _EventSource.OPEN;
-    WrappedEventSource.CLOSED = _EventSource.CLOSED;
     window.EventSource = WrappedEventSource;
   }
 
