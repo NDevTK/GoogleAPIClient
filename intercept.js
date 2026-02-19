@@ -372,4 +372,5 @@
       return _sendBeacon.apply(navigator, arguments);
     };
   }
+
 })();

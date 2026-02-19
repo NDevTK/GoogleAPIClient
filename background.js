@@ -529,10 +529,10 @@ async function loadSessionLogs() {
           tab.requestLog = value;
           // Restore _wsConnState from persisted WEBSOCKET entries
           for (const entry of value) {
-            if (entry.method === "WEBSOCKET" && entry.wsId) {
+            if (entry.method === "WEBSOCKET" && entry.channelId) {
               if (!_wsConnState.has(tabId)) _wsConnState.set(tabId, new Map());
               // After SW restart, mark all as closed — intercept.js will re-emit WS_OPEN for live ones
-              _wsConnState.get(tabId).set(entry.wsId, {
+              _wsConnState.get(tabId).set(entry.channelId, {
                 url: entry.url,
                 readyState: entry.wsOpen ? 1 : 3,
                 entryId: entry.id,
@@ -2782,6 +2782,9 @@ async function handleResponseBody(tabId, msg) {
   if (!msg.url) return;
   await _globalStoreReady;
 
+  // Normalize channel ID from relay messages
+  const channelId = msg.channelId || msg.wsId;
+
   // WebSocket lifecycle: one log entry per connection, messages[] array
   const isWs = msg.method === "WS_OPEN" || msg.method === "WS_CLOSE" ||
     msg.method === "WS_SEND" || msg.method === "WS_RECV";
@@ -2799,23 +2802,23 @@ async function handleResponseBody(tabId, msg) {
         service: extractInterfaceName(new URL(msg.url)),
         timestamp: Date.now(),
         status: 0,
-        wsId: msg.wsId,
+        channelId: channelId,
         wsOpen: true,
         messages: [],
       };
       tab.requestLog.unshift(entry);
       if (tab.requestLog.length > 50) tab.requestLog.pop();
-      conns.set(msg.wsId, { url: msg.url, readyState: 1, entryId: entry.id });
+      conns.set(channelId, { url: msg.url, readyState: 1, entryId: entry.id });
       scheduleSessionSave(tabId);
       notifyPopup(tabId);
       return;
     }
 
     if (msg.method === "WS_CLOSE") {
-      const conn = conns.get(msg.wsId);
+      const conn = conns.get(channelId);
       if (conn) conn.readyState = 3;
       // Mark the log entry as closed
-      const entry = tab.requestLog.find((r) => r.wsId === msg.wsId && r.method === "WEBSOCKET");
+      const entry = tab.requestLog.find((r) => r.channelId === channelId && r.method === "WEBSOCKET");
       if (entry) {
         entry.wsOpen = false;
         entry.messages.push({
@@ -2834,7 +2837,7 @@ async function handleResponseBody(tabId, msg) {
     }
 
     // WS_SEND or WS_RECV — append message to existing connection entry
-    let entry = tab.requestLog.find((r) => r.wsId === msg.wsId && r.method === "WEBSOCKET");
+    let entry = tab.requestLog.find((r) => r.channelId === channelId && r.method === "WEBSOCKET");
     if (!entry) {
       // WS was opened before extension injected, or after SW restart — create entry now
       entry = {
@@ -2844,13 +2847,13 @@ async function handleResponseBody(tabId, msg) {
         service: extractInterfaceName(new URL(msg.url)),
         timestamp: Date.now(),
         status: 0,
-        wsId: msg.wsId,
+        channelId: channelId,
         wsOpen: true,
         messages: [],
       };
       tab.requestLog.unshift(entry);
       if (tab.requestLog.length > 50) tab.requestLog.pop();
-      conns.set(msg.wsId, { url: msg.url, readyState: 1, entryId: entry.id });
+      conns.set(channelId, { url: msg.url, readyState: 1, entryId: entry.id });
     }
 
     entry.messages.push({
@@ -2871,6 +2874,47 @@ async function handleResponseBody(tabId, msg) {
         catch (_) { textBody = null; }
       }
       if (textBody) extractKeysFromText(tabId, textBody, msg.url, "response_body");
+    }
+
+    scheduleSessionSave(tabId);
+    notifyPopup(tabId);
+    return;
+  }
+
+  // postMessage: one log entry per source origin, messages[] array
+  // Only PM_RECV — can't wrap window.postMessage (see intercept.js comments)
+  if (msg.method === "PM_RECV") {
+    const tab = getTab(tabId);
+    let entry = tab.requestLog.find((r) => r.channelId === channelId && r.method === "POSTMESSAGE");
+    if (!entry) {
+      entry = {
+        id: "pm_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
+        url: msg.url,
+        method: "POSTMESSAGE",
+        service: extractInterfaceName(new URL(msg.url)),
+        timestamp: Date.now(),
+        status: 0,
+        channelId: channelId,
+        sourceOrigin: msg.sourceOrigin || "",
+        targetOrigin: msg.targetOrigin || "",
+        messages: [],
+      };
+      tab.requestLog.unshift(entry);
+      if (tab.requestLog.length > 50) tab.requestLog.pop();
+    }
+
+    entry.messages.push({
+      dir: "recv",
+      time: Date.now(),
+      body: msg.body || "",
+      base64: false,
+    });
+    entry.timestamp = Date.now();
+    if (entry.messages.length > 200) entry.messages.splice(0, entry.messages.length - 200);
+
+    // Key scanning on message body
+    if (msg.body) {
+      extractKeysFromText(tabId, msg.body, msg.url, "response_body");
     }
 
     scheduleSessionSave(tabId);
@@ -3883,7 +3927,7 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
       if (tabId == null) return;
       chrome.tabs.sendMessage(tabId, {
         type: "WS_SEND_MSG",
-        wsId: msg.wsId,
+        wsId: msg.channelId,
         data: msg.data,
         binary: msg.binary || false,
       }).then(() => sendResponse({ ok: true }))
@@ -3894,18 +3938,50 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
     case "WS_GET_STATUS": {
       if (tabId == null) return;
       const conns = _wsConnState.get(tabId);
-      const conn = conns?.get(msg.wsId);
+      const conn = conns?.get(msg.channelId);
       // Also return the messages array for the WS console
       let messages = [];
       if (conn) {
         const tab = getTab(tabId);
-        const entry = tab.requestLog.find((r) => r.wsId === msg.wsId && r.method === "WEBSOCKET");
+        const entry = tab.requestLog.find((r) => r.channelId === msg.channelId && r.method === "WEBSOCKET");
         if (entry) messages = entry.messages || [];
       }
       sendResponse({
         readyState: conn ? conn.readyState : 3,
         url: conn?.url || null,
         messages: messages,
+      });
+      return;
+    }
+
+    case "PM_SEND_MSG": {
+      if (tabId == null) return;
+      chrome.tabs.sendMessage(tabId, {
+        type: "PM_SEND_MSG",
+        data: msg.data,
+        targetOrigin: msg.targetOrigin,
+      }).then(() => {
+        // Record sent message in the log entry (intercept.js can't capture outgoing postMessage)
+        const tab = getTab(tabId);
+        const entry = tab.requestLog.find((r) => r.channelId === msg.channelId && r.method === "POSTMESSAGE");
+        if (entry) {
+          entry.messages.push({ dir: "sent", time: Date.now(), body: msg.data || "", base64: false });
+          if (entry.messages.length > 200) entry.messages.splice(0, entry.messages.length - 200);
+          scheduleSessionSave(tabId);
+          notifyPopup(tabId);
+        }
+        sendResponse({ ok: true });
+      }).catch((err) => sendResponse({ error: err.message }));
+      return true;
+    }
+
+    case "PM_GET_STATUS": {
+      if (tabId == null) return;
+      const tab = getTab(tabId);
+      const entry = tab.requestLog.find((r) => r.channelId === msg.channelId && r.method === "POSTMESSAGE");
+      sendResponse({
+        readyState: 1, // postMessage is always "active"
+        messages: entry ? (entry.messages || []) : [],
       });
       return;
     }

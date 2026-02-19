@@ -21,10 +21,47 @@
       body: d.body,
       base64Encoded: d.base64Encoded,
       wsId: d.wsId || null,
+      channelId: d.channelId || null,
+      sourceOrigin: d.sourceOrigin || null,
+      targetOrigin: d.targetOrigin || null,
     });
   });
   // Signal intercept.js that the relay is listening — replays buffered events
   document.dispatchEvent(new CustomEvent("__uasr_ready"));
+
+  // ─── postMessage Listener ─────────────────────────────────────────────────
+  // Runs in isolated world — no main-world wrapper needed. message events are
+  // visible here. Stores event.source per origin for reply from console.
+
+  let _pmIdCounter = 0;
+  const _pmChannels = new Map(); // origin → pmId
+  const _pmSources = new Map(); // origin → event.source (for reply)
+
+  window.addEventListener("message", (event) => {
+    try {
+      // Filter same-window self-messages (framework noise)
+      if (event.source === window) return;
+      const from = event.origin || "null";
+      if (!_pmChannels.has(from)) _pmChannels.set(from, "pm_" + (++_pmIdCounter));
+      const pmId = _pmChannels.get(from);
+      if (event.source) _pmSources.set(from, event.source);
+      let body;
+      try { body = JSON.stringify(event.data); } catch (_) { body = String(event.data); }
+      chrome.runtime.sendMessage({
+        type: "RESPONSE_BODY",
+        url: location.href,
+        method: "PM_RECV",
+        channelId: pmId,
+        status: 0,
+        contentType: "postmessage",
+        responseHeaders: {},
+        body: body,
+        base64Encoded: false,
+        sourceOrigin: from,
+        targetOrigin: location.origin,
+      });
+    } catch (_) {}
+  }, true);
 
   // ─── Key & Endpoint Patterns ────────────────────────────────────────────
 
@@ -210,6 +247,23 @@
         detail: { wsId: msg.wsId, data: msg.data, binary: msg.binary || false }
       }));
       sendResponse({ ok: true });
+      return;
+    }
+    if (msg.type === "PM_SEND_MSG") {
+      const origin = msg.targetOrigin || "*";
+      const source = _pmSources.get(origin);
+      if (!source) {
+        sendResponse({ error: "No source window for origin " + origin });
+        return;
+      }
+      try {
+        let data = msg.data;
+        try { data = JSON.parse(data); } catch (_) {}
+        source.postMessage(data, origin);
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ error: err.message });
+      }
       return;
     }
   });

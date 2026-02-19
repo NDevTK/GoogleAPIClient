@@ -242,6 +242,10 @@ nav {
   background: #2d1b3a;
   color: #b58aff;
 }
+.badge-pm {
+  background: #1b2733;
+  color: #58a6ff;
+}
 .badge-beacon {
   background: #3a1b1b;
   color: #e0784e;

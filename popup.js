@@ -36,8 +36,10 @@ let currentSchema = null;
 let currentRequestUrl = "";
 let currentRequestMethod = "POST";
 let currentContentType = "application/json";
-let currentBodyMode = "form"; // "form" | "raw" | "graphql" | "websocket"
-let currentWsId = null;
+let currentBodyMode = "form"; // "form" | "raw" | "graphql" | "msgconsole"
+let currentChannelId = null;
+let currentChannelType = null; // "WEBSOCKET" | "POSTMESSAGE"
+let currentTargetOrigin = null; // For postMessage send
 let logFilter = "active"; // "active" | "all" | tabId (number)
 let logSearchQuery = ""; // text filter for request log
 let allTabsData = null; // { tabId: { meta, requestLog } }
@@ -56,7 +58,7 @@ const _vs = {
 
 function setBodyMode(mode) {
   currentBodyMode = mode;
-  const isWs = mode === "websocket";
+  const isConsole = mode === "msgconsole";
   document.getElementById("send-form-fields").style.display =
     mode === "form" ? "block" : "none";
   document.getElementById("send-raw-body").style.display =
@@ -64,15 +66,15 @@ function setBodyMode(mode) {
   document.getElementById("send-graphql-fields").style.display =
     mode === "graphql" ? "block" : "none";
   document.getElementById("send-ws-console").style.display =
-    isWs ? "block" : "none";
+    isConsole ? "block" : "none";
   document.getElementById("send-controls").style.display =
-    isWs ? "none" : "";
+    isConsole ? "none" : "";
   document.getElementById("send-headers-section").style.display =
-    isWs ? "none" : "";
+    isConsole ? "none" : "";
   document.getElementById("btn-send").style.display =
-    isWs ? "none" : "";
+    isConsole ? "none" : "";
   document.querySelector(".export-row").style.display =
-    isWs ? "none" : "";
+    isConsole ? "none" : "";
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────
@@ -113,9 +115,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     .getElementById("send-ep-select")
     .addEventListener("change", onSendEndpointSelected);
   document.getElementById("btn-send").addEventListener("click", sendRequest);
-  document.getElementById("ws-console-send").addEventListener("click", sendWsMessage);
+  document.getElementById("ws-console-send").addEventListener("click", sendConsoleMessage);
   document.getElementById("ws-console-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendWsMessage(); }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendConsoleMessage(); }
   });
   document
     .getElementById("btn-add-header")
@@ -498,8 +500,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (msg.tabId === currentTabId || logFilter !== "active") {
         throttledLoadState();
       }
-      if (currentBodyMode === "websocket" && currentWsId) {
-        refreshWsConsole();
+      if (currentBodyMode === "msgconsole" && currentChannelId) {
+        refreshMsgConsole();
       }
     }
   });
@@ -1519,19 +1521,31 @@ async function sendRequest() {
   btn.textContent = "Send Request";
 }
 
-// ─── WebSocket Console ──────────────────────────────────────────────────────
+// ─── Message Console (WebSocket + postMessage) ─────────────────────────────
 
-async function initWsConsole(req) {
-  currentWsId = req.wsId;
-  setBodyMode("websocket");
+async function initMsgConsole(req) {
+  currentChannelId = req.channelId;
+  currentChannelType = req.method; // "WEBSOCKET" or "POSTMESSAGE"
+  // For PM reply: target is the sourceOrigin (who sent to us, we reply back to them)
+  currentTargetOrigin = req.sourceOrigin || null;
+  setBodyMode("msgconsole");
 
-  document.getElementById("ws-console-url").textContent = req.url;
+  // Dynamic label based on channel type
+  const labelEl = document.querySelector("#send-ws-console .ws-label");
+  const urlEl = document.getElementById("ws-console-url");
+  if (currentChannelType === "POSTMESSAGE") {
+    labelEl.textContent = "postMessage";
+    urlEl.textContent = (req.sourceOrigin || "?") + " \u2192 " + (req.targetOrigin || "?");
+  } else {
+    labelEl.textContent = "WebSocket";
+    urlEl.textContent = req.url;
+  }
 
   // Render all messages from the combined entry
   const historyEl = document.getElementById("ws-console-history");
   historyEl.innerHTML = "";
   const messages = req.messages || [];
-  _renderWsMessages(historyEl, messages);
+  _renderConsoleMessages(historyEl, messages);
   historyEl.scrollTop = historyEl.scrollHeight;
 
   // Pre-fill input with last sent message for easy re-send
@@ -1548,10 +1562,10 @@ async function initWsConsole(req) {
     input.value = "";
   }
 
-  await refreshWsConsole();
+  await refreshMsgConsole();
 }
 
-function _renderWsMessages(container, messages) {
+function _renderConsoleMessages(container, messages) {
   let html = "";
   for (const msg of messages) {
     if (msg.dir === "close") {
@@ -1581,30 +1595,40 @@ function _renderWsMessages(container, messages) {
   container.innerHTML = html;
 }
 
-async function refreshWsConsole() {
+async function refreshMsgConsole() {
   const statusEl = document.getElementById("ws-console-status");
   const sendBtn = document.getElementById("ws-console-send");
-  if (!currentWsId) {
+  if (!currentChannelId) {
     statusEl.innerHTML = '<span class="ws-status-closed">NO CONNECTION</span>';
     sendBtn.disabled = true;
     return;
   }
+
+  // Pick the right status message type based on channel
+  const statusType = currentChannelType === "POSTMESSAGE" ? "PM_GET_STATUS" : "WS_GET_STATUS";
   try {
     const result = await chrome.runtime.sendMessage({
-      type: "WS_GET_STATUS", tabId: currentTabId, wsId: currentWsId,
+      type: statusType, tabId: currentTabId, channelId: currentChannelId,
     });
-    const names = { 0: "CONNECTING", 1: "OPEN", 2: "CLOSING", 3: "CLOSED" };
-    const classes = { 0: "ws-status-connecting", 1: "ws-status-open",
-      2: "ws-status-closing", 3: "ws-status-closed" };
-    const rs = result.readyState;
-    statusEl.innerHTML = `<span class="${classes[rs] || "ws-status-closed"}">${names[rs] || "CLOSED"}</span>`;
-    sendBtn.disabled = rs !== 1;
+
+    if (currentChannelType === "POSTMESSAGE") {
+      // postMessage is always "active" — no connection lifecycle
+      statusEl.innerHTML = '<span class="ws-status-open">ACTIVE</span>';
+      sendBtn.disabled = false;
+    } else {
+      const names = { 0: "CONNECTING", 1: "OPEN", 2: "CLOSING", 3: "CLOSED" };
+      const classes = { 0: "ws-status-connecting", 1: "ws-status-open",
+        2: "ws-status-closing", 3: "ws-status-closed" };
+      const rs = result.readyState;
+      statusEl.innerHTML = `<span class="${classes[rs] || "ws-status-closed"}">${names[rs] || "CLOSED"}</span>`;
+      sendBtn.disabled = rs !== 1;
+    }
 
     // Live-update message history
     if (result.messages) {
       const historyEl = document.getElementById("ws-console-history");
       const wasAtBottom = historyEl.scrollTop + historyEl.clientHeight >= historyEl.scrollHeight - 20;
-      _renderWsMessages(historyEl, result.messages);
+      _renderConsoleMessages(historyEl, result.messages);
       if (wasAtBottom) historyEl.scrollTop = historyEl.scrollHeight;
     }
   } catch (_) {
@@ -1613,25 +1637,34 @@ async function refreshWsConsole() {
   }
 }
 
-async function sendWsMessage() {
+async function sendConsoleMessage() {
   const input = document.getElementById("ws-console-input");
   const sendBtn = document.getElementById("ws-console-send");
   const data = input.value;
-  if (!data || !currentWsId) return;
+  if (!data || !currentChannelId) return;
 
   sendBtn.disabled = true;
   sendBtn.textContent = "Sending...";
   try {
-    const result = await chrome.runtime.sendMessage({
-      type: "WS_SEND_MSG", tabId: currentTabId, wsId: currentWsId, data: data,
-    });
+    let msgPayload;
+    if (currentChannelType === "POSTMESSAGE") {
+      msgPayload = {
+        type: "PM_SEND_MSG", tabId: currentTabId, channelId: currentChannelId,
+        data: data, targetOrigin: currentTargetOrigin || "*",
+      };
+    } else {
+      msgPayload = {
+        type: "WS_SEND_MSG", tabId: currentTabId,
+        channelId: currentChannelId, data: data,
+      };
+    }
+    const result = await chrome.runtime.sendMessage(msgPayload);
     if (result.error) {
       const historyEl = document.getElementById("ws-console-history");
       historyEl.innerHTML +=
         `<div class="ws-msg ws-msg-error">` +
         `<span class="ws-msg-dir">error</span> ${esc(result.error)}</div>`;
     }
-    // Message will appear via STATE_UPDATED → refreshWsConsole automatically
   } catch (err) {
     const historyEl = document.getElementById("ws-console-history");
     historyEl.innerHTML +=
@@ -1639,7 +1672,7 @@ async function sendWsMessage() {
       `<span class="ws-msg-dir">error</span> ${esc(err.message)}</div>`;
   }
   sendBtn.textContent = "Send Message";
-  await refreshWsConsole();
+  await refreshMsgConsole();
 }
 
 function renderResponse(result) {
@@ -2281,6 +2314,29 @@ function _renderLogCard(req, showTabLabel) {
   </div>`;
   }
 
+  // Combined postMessage entry — show origin pair and message counts
+  if (req.method === "POSTMESSAGE") {
+    const msgs = req.messages || [];
+    const sentCount = msgs.filter((m) => m.dir === "sent").length;
+    const recvCount = msgs.filter((m) => m.dir === "recv").length;
+    const origins = (req.sourceOrigin || "?") + " \u2192 " + (req.targetOrigin || "?");
+    return `<div class="card request-card clickable-card mb-8" data-id="${esc(String(req.id))}" data-tab-id="${esc(String(req._tabId))}">
+    <div class="card-label flex-between">
+      <span>
+        <span class="badge badge-pm">POSTMESSAGE</span>
+        <span class="text-timestamp">${new Date(req.timestamp).toLocaleTimeString()}</span>
+        ${showTabLabel ? `<span class="badge badge-tab">${esc(req._tabTitle || "Tab " + req._tabId)}</span>` : ""}
+      </span>
+      <span class="badge ws-status-open">ACTIVE</span>
+    </div>
+    <div class="card-value card-value-mono">${esc(origins)}</div>
+    <div class="card-meta">
+      ${req.service ? `Service: <strong>${esc(req.service)}</strong>` : ""}
+      <span class="ws-msg-counts">${recvCount} received${sentCount ? ` / ${sentCount} replied` : ""}</span>
+    </div>
+  </div>`;
+  }
+
   return `<div class="card request-card clickable-card mb-8" data-id="${esc(String(req.id))}" data-tab-id="${esc(String(req._tabId))}">
     <div class="card-label flex-between">
       <span>
@@ -2694,9 +2750,9 @@ async function replayRequest(reqId, sourceTabId) {
   }
   currentReplayRequest = req;
 
-  // WebSocket mode: show WS console instead of HTTP send panel
-  if (req.method === "WEBSOCKET") {
-    await initWsConsole(req);
+  // Message console mode: WebSocket or postMessage
+  if (req.method === "WEBSOCKET" || req.method === "POSTMESSAGE") {
+    await initMsgConsole(req);
     document.querySelector(".tab[data-panel='send']").click();
     return;
   }
