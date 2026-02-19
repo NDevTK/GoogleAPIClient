@@ -466,7 +466,6 @@ const _globalStoreReady = loadGlobalStore();
 function serializeLogEntry(entry) {
   const clone = { ...entry };
   delete clone.requestBody; // Chrome requestBody object, redundant with rawBodyB64
-  delete clone.decodedBody; // Parsed protobuf tree, regenerable
   return clone;
 }
 
