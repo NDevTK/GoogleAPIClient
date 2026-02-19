@@ -2108,6 +2108,11 @@ async function _saveTempWindowIds() {
 })();
 
 async function acquireTempTab(origin) {
+  // Only allow http/https origins — never file://, chrome://, etc.
+  if (!origin.startsWith("http://") && !origin.startsWith("https://")) {
+    throw new Error("blocked: unsafe origin protocol");
+  }
+
   let entry = tempTabPool.get(origin);
 
   if (entry) {
@@ -2226,7 +2231,7 @@ async function _resolveFrameForOrigin(tabId, initiatorOrigin) {
  * Dynamically resolves the correct frame by matching initiatorOrigin
  * against the tab's current frames (frameIds are ephemeral).
  */
-async function pageContextFetch(tabId, url, opts, initiatorOrigin) {
+async function pageContextFetch(tabId, url, opts, initiatorOrigin, allowFallbackTab = false) {
   // Validate URL
   try {
     const parsed = new URL(url);
@@ -2269,8 +2274,23 @@ async function pageContextFetch(tabId, url, opts, initiatorOrigin) {
     }
   }
 
-  // Fall back: use pooled minimized background window
+  // Try any existing tab with the same origin before creating a new one
   if (initiatorOrigin) {
+    try {
+      const allTabs = await chrome.tabs.query({});
+      for (const t of allTabs) {
+        if (!t.url || t.id === tabId) continue;
+        try {
+          if (new URL(t.url).origin === initiatorOrigin) {
+            return await sendPageFetch(t.id, url, opts, 0);
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  // Fall back: open a temp tab only when the user explicitly clicked Send
+  if (initiatorOrigin && allowFallbackTab) {
     try {
       const tempTabId = await acquireTempTab(initiatorOrigin);
       return await sendPageFetch(tempTabId, url, opts);
@@ -4713,6 +4733,7 @@ async function executeSendRequest(tabId, msg) {
         bodyEncoding,
       },
       initiatorOrigin,
+      true,
     );
   } catch (err) {
     return { error: `fetch_exception: ${err.message}`, timing: Date.now() - startTime };
