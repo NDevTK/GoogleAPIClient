@@ -2768,6 +2768,11 @@ function getStatusBadge(status) {
 let currentReplayRequest = null;
 
 async function replayRequest(reqId, sourceTabId) {
+  // Clear previous send result
+  lastSendResult = null;
+  const sendResp = document.getElementById("send-response");
+  if (sendResp) sendResp.style.display = "none";
+
   // Search the correct log source
   let req;
   if (sourceTabId && allTabsData && allTabsData[sourceTabId]) {
