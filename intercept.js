@@ -198,4 +198,172 @@
 
     return _xhrSend.apply(this, arguments);
   };
+
+  // ─── WebSocket wrapper ──────────────────────────────────────────────────────
+
+  const _WebSocket = window.WebSocket;
+
+  class WrappedWebSocket extends _WebSocket {
+    constructor(url, protocols) {
+      super(url, protocols);
+      const wsUrl = typeof url === "string" ? url : String(url);
+
+      // Capture outbound messages
+      const _origSend = this.send.bind(this);
+      this.send = function (data) {
+        try {
+          let body, base64Encoded = false;
+          if (typeof data === "string") {
+            body = data;
+          } else if (data instanceof ArrayBuffer) {
+            body = uint8ToBase64(new Uint8Array(data));
+            base64Encoded = true;
+          } else if (data instanceof Uint8Array) {
+            body = uint8ToBase64(data);
+            base64Encoded = true;
+          } else if (typeof Blob !== "undefined" && data instanceof Blob) {
+            // Blob — read asynchronously, emit after
+            data.arrayBuffer().then(function (ab) {
+              emit({
+                url: wsUrl,
+                method: "WS_SEND",
+                status: 0,
+                contentType: "websocket",
+                responseHeaders: {},
+                body: uint8ToBase64(new Uint8Array(ab)),
+                base64Encoded: true,
+              });
+            }).catch(function () {});
+            return _origSend(data);
+          }
+          emit({
+            url: wsUrl,
+            method: "WS_SEND",
+            status: 0,
+            contentType: "websocket",
+            responseHeaders: {},
+            body,
+            base64Encoded,
+          });
+        } catch (_) {}
+        return _origSend(data);
+      };
+
+      // Capture inbound messages
+      this.addEventListener("message", function (e) {
+        try {
+          let body, base64Encoded = false;
+          if (typeof e.data === "string") {
+            body = e.data;
+          } else if (e.data instanceof ArrayBuffer) {
+            body = uint8ToBase64(new Uint8Array(e.data));
+            base64Encoded = true;
+          } else if (typeof Blob !== "undefined" && e.data instanceof Blob) {
+            e.data.arrayBuffer().then(function (ab) {
+              emit({
+                url: wsUrl,
+                method: "WS_RECV",
+                status: 0,
+                contentType: "websocket",
+                responseHeaders: {},
+                body: uint8ToBase64(new Uint8Array(ab)),
+                base64Encoded: true,
+              });
+            }).catch(function () {});
+            return;
+          }
+          emit({
+            url: wsUrl,
+            method: "WS_RECV",
+            status: 0,
+            contentType: "websocket",
+            responseHeaders: {},
+            body,
+            base64Encoded,
+          });
+        } catch (_) {}
+      });
+    }
+  }
+
+  // Preserve prototype chain and static properties
+  WrappedWebSocket.prototype = _WebSocket.prototype;
+  WrappedWebSocket.CONNECTING = _WebSocket.CONNECTING;
+  WrappedWebSocket.OPEN = _WebSocket.OPEN;
+  WrappedWebSocket.CLOSING = _WebSocket.CLOSING;
+  WrappedWebSocket.CLOSED = _WebSocket.CLOSED;
+  window.WebSocket = WrappedWebSocket;
+
+  // ─── EventSource wrapper ────────────────────────────────────────────────────
+
+  const _EventSource = window.EventSource;
+
+  if (_EventSource) {
+    class WrappedEventSource extends _EventSource {
+      constructor(url, opts) {
+        super(url, opts);
+        const esUrl = typeof url === "string" ? url : String(url);
+
+        this.addEventListener("message", function (e) {
+          try {
+            emit({
+              url: esUrl,
+              method: "SSE",
+              status: 200,
+              contentType: "text/event-stream",
+              responseHeaders: {},
+              body: e.data,
+              base64Encoded: false,
+            });
+          } catch (_) {}
+        });
+      }
+    }
+
+    WrappedEventSource.prototype = _EventSource.prototype;
+    WrappedEventSource.CONNECTING = _EventSource.CONNECTING;
+    WrappedEventSource.OPEN = _EventSource.OPEN;
+    WrappedEventSource.CLOSED = _EventSource.CLOSED;
+    window.EventSource = WrappedEventSource;
+  }
+
+  // ─── sendBeacon wrapper ─────────────────────────────────────────────────────
+
+  const _sendBeacon = navigator.sendBeacon;
+
+  if (_sendBeacon) {
+    navigator.sendBeacon = function (url, data) {
+      try {
+        const beaconUrl = new URL(url, location.href).href;
+        let body = null, base64Encoded = false;
+        if (typeof data === "string") {
+          body = data;
+        } else if (data instanceof Uint8Array) {
+          body = uint8ToBase64(data);
+          base64Encoded = true;
+        } else if (data instanceof ArrayBuffer) {
+          body = uint8ToBase64(new Uint8Array(data));
+          base64Encoded = true;
+        } else if (typeof URLSearchParams !== "undefined" && data instanceof URLSearchParams) {
+          body = data.toString();
+        } else if (typeof FormData !== "undefined" && data instanceof FormData) {
+          // FormData can't be serialized simply — skip body
+        } else if (typeof Blob !== "undefined" && data instanceof Blob) {
+          // Can't read synchronously — emit URL only
+        }
+        if (shouldCapture(beaconUrl, "")) {
+          emit({
+            url: beaconUrl,
+            method: "BEACON",
+            status: 0,
+            contentType: "beacon",
+            responseHeaders: {},
+            body,
+            base64Encoded,
+          });
+        }
+      } catch (_) {}
+      return _sendBeacon.apply(navigator, arguments);
+    };
+  }
 })();

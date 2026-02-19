@@ -1248,6 +1248,26 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
           mergeSchemaInto(doc, schemaName, newSchema);
         }
       }
+    } else if (
+      headers["content-type"]?.includes("grpc-web") ||
+      headers["content-type"]?.includes("grpc+proto")
+    ) {
+      // gRPC-Web request body: 5-byte frame header + protobuf payload
+      try {
+        const parsed = parseGrpcWebFrames(bytes);
+        if (parsed) {
+          for (const frame of parsed.frames) {
+            if (frame.type !== "data") continue;
+            const tree = pbDecodeTree(frame.data, 8);
+            if (tree && tree.length > 0) {
+              const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Request`;
+              m.request = { $ref: schemaName };
+              const newSchema = generateSchemaFromPbTree(tree, schemaName, doc.schemas);
+              mergeSchemaInto(doc, schemaName, newSchema);
+            }
+          }
+        }
+      } catch (e) {}
     } else if (headers["content-type"]?.includes("json+protobuf")) {
       // JSPB body — positional array encoding
       try {
@@ -1677,7 +1697,9 @@ function learnFromResponse(tabId, interfaceName, entry) {
     } catch (e) {}
   } else if (
     mimeType.includes("protobuf") ||
-    entry.contentType?.includes("protobuf")
+    entry.contentType?.includes("protobuf") ||
+    mimeType.includes("octet-stream") ||
+    entry.contentType?.includes("octet-stream")
   ) {
     // Decode response protobuf heuristically
     try {
@@ -2747,9 +2769,27 @@ async function handleResponseBody(tabId, msg) {
   }
 
   // Match to request log entry — most recent entry for this URL without a body
-  const entry = tab.requestLog.find(
+  let entry = tab.requestLog.find(
     (r) => r.url === msg.url && !r.responseBody,
   );
+
+  // For transports not captured by webRequest (WebSocket, EventSource, sendBeacon),
+  // create a log entry on the fly
+  const isAltTransport = msg.method === "WS_SEND" || msg.method === "WS_RECV" ||
+    msg.method === "SSE" || msg.method === "BEACON";
+  if (!entry && isAltTransport) {
+    entry = {
+      id: "alt_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
+      url: msg.url,
+      method: msg.method,
+      service: extractInterfaceName(new URL(msg.url)),
+      timestamp: Date.now(),
+      status: msg.status || 0,
+    };
+    tab.requestLog.unshift(entry);
+    if (tab.requestLog.length > 50) tab.requestLog.pop();
+  }
+
   if (entry) {
     entry.responseBody = msg.body;
     entry.responseBase64 = msg.base64Encoded || false;

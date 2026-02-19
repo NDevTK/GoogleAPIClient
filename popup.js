@@ -38,16 +38,19 @@ let currentRequestMethod = "POST";
 let currentContentType = "application/json";
 let currentBodyMode = "form"; // "form" | "raw" | "graphql"
 let logFilter = "active"; // "active" | "all" | tabId (number)
+let logSearchQuery = ""; // text filter for request log
 let allTabsData = null; // { tabId: { meta, requestLog } }
 let lastSendResult = null; // Last rendered response for re-render after rename
 
 // Virtual scroll state for request log
 const _vs = {
   entries: [],       // full sorted entry list
-  heights: new Map(),// measured heights by entry id
   estHeight: 85,     // estimated row height (px)
-  buffer: 3,         // extra rows above/below viewport
+  buffer: 5,         // extra rows above/below viewport
   scrollHandler: null,
+  lastStart: -1,     // last rendered start index (skip no-op re-renders)
+  lastEnd: -1,       // last rendered end index
+  rendering: false,  // prevent re-entrant renders
 };
 
 function setBodyMode(mode) {
@@ -125,6 +128,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     renderResponsePanel();
   });
   populateTabFilter();
+
+  // Request log search filter
+  document.getElementById("log-search").addEventListener("input", (e) => {
+    logSearchQuery = e.target.value.toLowerCase().trim();
+    renderResponsePanel();
+  });
+
+  // HAR export
+  document.getElementById("btn-export-har").addEventListener("click", exportHar);
 
   // Global rename handler
   document.addEventListener("click", async (e) => {
@@ -346,6 +358,108 @@ document.addEventListener("DOMContentLoaded", async () => {
       btn.textContent = "Failed";
     }
     setTimeout(() => { btn.textContent = format === "python" ? "Python" : format; }, 1500);
+  }
+
+  function exportHar() {
+    // Collect the currently visible entries from the virtual scroll state
+    const entries = _vs.entries;
+    if (!entries || entries.length === 0) {
+      alert("No requests to export.");
+      return;
+    }
+
+    const harEntries = entries.map((r) => {
+      const reqHeaders = [];
+      if (r.requestHeaders) {
+        for (const [k, v] of Object.entries(r.requestHeaders)) {
+          reqHeaders.push({ name: k, value: v });
+        }
+      }
+
+      const respHeaders = [];
+      if (r.responseHeaders) {
+        for (const [k, v] of Object.entries(r.responseHeaders)) {
+          respHeaders.push({ name: k, value: v });
+        }
+      }
+
+      const request = {
+        method: r.method || "GET",
+        url: r.url || "",
+        httpVersion: "HTTP/1.1",
+        cookies: [],
+        headers: reqHeaders,
+        queryString: [],
+        headersSize: -1,
+        bodySize: r.rawBodyB64 ? Math.ceil((r.rawBodyB64.length * 3) / 4) : 0,
+      };
+
+      // Parse query string from URL
+      try {
+        const u = new URL(r.url);
+        u.searchParams.forEach((v, k) => {
+          request.queryString.push({ name: k, value: v });
+        });
+      } catch (_) {}
+
+      // Request body
+      if (r.rawBodyB64) {
+        request.postData = {
+          mimeType: r.contentType || "application/octet-stream",
+          text: r.rawBodyB64,
+          encoding: "base64",
+        };
+      }
+
+      const response = {
+        status: r.status || 0,
+        statusText: r.statusText || (r.status === 200 ? "OK" : ""),
+        httpVersion: "HTTP/1.1",
+        cookies: [],
+        headers: respHeaders,
+        content: {
+          size: r.responseBody ? r.responseBody.length : 0,
+          mimeType: r.mimeType || r.contentType || "",
+        },
+        redirectURL: "",
+        headersSize: -1,
+        bodySize: r.responseBody ? r.responseBody.length : 0,
+      };
+
+      // Response body
+      if (r.responseBody) {
+        response.content.text = r.responseBody;
+        if (r.responseBase64) {
+          response.content.encoding = "base64";
+        }
+      }
+
+      return {
+        startedDateTime: new Date(r.timestamp || Date.now()).toISOString(),
+        time: 0,
+        request,
+        response,
+        cache: {},
+        timings: { send: 0, wait: 0, receive: 0 },
+      };
+    });
+
+    const har = {
+      log: {
+        version: "1.2",
+        creator: { name: "API Security Researcher", version: "1.0" },
+        entries: harEntries,
+      },
+    };
+
+    // Download as file
+    const blob = new Blob([JSON.stringify(har, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "api-security-researcher.har";
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;
@@ -2018,93 +2132,57 @@ function _renderLogCard(req, showTabLabel) {
       ${isGraphQLUrl(req.url) ? ' <span class="badge badge-graphql">GRAPHQL</span>' : ""}
       ${isMultipartBatch(req.mimeType || "") ? ' <span class="badge badge-multipart">MULTIPART</span>' : ""}
       ${/\/async\//.test(req.url) ? ' <span class="badge badge-batch">ASYNC</span>' : ""}
+      ${req.method === "WS_SEND" || req.method === "WS_RECV" ? ' <span class="badge badge-ws">WEBSOCKET</span>' : ""}
+      ${req.method === "SSE" ? ' <span class="badge badge-sse">SSE</span>' : ""}
+      ${req.method === "BEACON" ? ' <span class="badge badge-beacon">BEACON</span>' : ""}
     </div>
   </div>`;
 }
 
-function _getRowHeight(idx) {
-  return _vs.heights.get(idx) || _vs.estHeight;
-}
-
-function _getTotalHeight() {
-  let h = 0;
-  for (let i = 0; i < _vs.entries.length; i++) h += _getRowHeight(i);
-  return h;
-}
-
-function _getVisibleRange(scrollEl) {
-  const scrollTop = scrollEl.scrollTop;
-  const viewH = scrollEl.clientHeight;
-  const buf = _vs.buffer;
-  let y = 0, startIdx = 0;
-  // Find first visible
-  for (let i = 0; i < _vs.entries.length; i++) {
-    const rh = _getRowHeight(i);
-    if (y + rh > scrollTop) { startIdx = i; break; }
-    y += rh;
-    if (i === _vs.entries.length - 1) startIdx = i;
-  }
-  // Find last visible
-  let endIdx = startIdx;
-  let vy = y;
-  for (let i = startIdx; i < _vs.entries.length; i++) {
-    endIdx = i;
-    vy += _getRowHeight(i);
-    if (vy >= scrollTop + viewH) break;
-  }
-  // Add buffer
-  startIdx = Math.max(0, startIdx - buf);
-  endIdx = Math.min(_vs.entries.length - 1, endIdx + buf);
-  // Top offset for positioning
-  let topPad = 0;
-  for (let i = 0; i < startIdx; i++) topPad += _getRowHeight(i);
-  return { startIdx, endIdx, topPad };
-}
-
-function _measureRenderedCards(container, startIdx) {
-  const cards = container.querySelectorAll(".request-card");
-  cards.forEach((card, i) => {
-    const h = card.offsetHeight + 8; // include mb-8
-    _vs.heights.set(startIdx + i, h);
-  });
-}
-
 function _renderVisibleSlice() {
+  if (_vs.rendering) return;
   const container = document.getElementById("response-log");
   const scrollEl = document.getElementById("panel-response");
-  if (!_vs.entries.length) return;
+  const n = _vs.entries.length;
+  if (!n) return;
 
-  const { startIdx, endIdx, topPad } = _getVisibleRange(scrollEl);
+  const rh = _vs.estHeight;
+  const buf = _vs.buffer;
+  const scrollTop = scrollEl.scrollTop;
+  const viewH = scrollEl.clientHeight;
+
+  // Calculate visible range using fixed row height (no feedback loop)
+  let startIdx = Math.max(0, Math.floor(scrollTop / rh) - buf);
+  let endIdx = Math.min(n - 1, Math.ceil((scrollTop + viewH) / rh) + buf);
+
+  // Skip re-render if visible range unchanged
+  if (startIdx === _vs.lastStart && endIdx === _vs.lastEnd) return;
+  _vs.lastStart = startIdx;
+  _vs.lastEnd = endIdx;
+
+  _vs.rendering = true;
+
+  const topPad = startIdx * rh;
+  const bottomPad = (n - 1 - endIdx) * rh;
   const showTabLabel = logFilter !== "active";
 
-  let html = "";
+  let html = `<div style="height:${topPad}px"></div>`;
   for (let i = startIdx; i <= endIdx; i++) {
     html += _renderLogCard(_vs.entries[i], showTabLabel);
   }
+  html += `<div style="height:${bottomPad}px"></div>`;
 
-  const totalH = _getTotalHeight();
-  let bottomPad = 0;
-  for (let i = endIdx + 1; i < _vs.entries.length; i++) bottomPad += _getRowHeight(i);
-
-  container.innerHTML =
-    `<div style="height:${topPad}px"></div>` +
-    html +
-    `<div style="height:${bottomPad}px"></div>`;
-
-  // Measure actual rendered heights for refinement
-  const inner = container.querySelectorAll(".request-card");
-  inner.forEach((card, i) => {
-    const rect = card.getBoundingClientRect();
-    _vs.heights.set(startIdx + i, rect.height + 8);
-  });
+  container.innerHTML = html;
 
   // Attach click handlers
-  inner.forEach((c) => {
+  container.querySelectorAll(".request-card").forEach((c) => {
     c.onclick = () => {
       const sourceTabId = c.dataset.tabId ? parseInt(c.dataset.tabId, 10) : undefined;
       replayRequest(c.dataset.id, sourceTabId);
     };
   });
+
+  _vs.rendering = false;
 }
 
 function renderResponsePanel() {
@@ -2126,6 +2204,17 @@ function renderResponsePanel() {
     entries.sort((a, b) => b.timestamp - a.timestamp);
   }
 
+  // Apply text search filter
+  if (logSearchQuery) {
+    entries = entries.filter((r) => {
+      return (r.url && r.url.toLowerCase().includes(logSearchQuery)) ||
+        (r.method && r.method.toLowerCase().includes(logSearchQuery)) ||
+        (r.service && r.service.toLowerCase().includes(logSearchQuery)) ||
+        (r.mimeType && r.mimeType.toLowerCase().includes(logSearchQuery)) ||
+        (r._tabTitle && r._tabTitle.toLowerCase().includes(logSearchQuery));
+    });
+  }
+
   // Detach old scroll handler if entries changed
   if (_vs.scrollHandler) {
     scrollEl.removeEventListener("scroll", _vs.scrollHandler);
@@ -2133,7 +2222,8 @@ function renderResponsePanel() {
   }
 
   _vs.entries = entries;
-  _vs.heights.clear();
+  _vs.lastStart = -1;
+  _vs.lastEnd = -1;
 
   if (entries.length === 0) {
     container.innerHTML = '<div class="empty">No requests captured yet.</div>';

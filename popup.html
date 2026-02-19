@@ -127,8 +127,12 @@
               <option value="all">All Tabs</option>
             </select>
           </div>
-          <button id="btn-clear-log" class="btn-small">Clear</button>
+          <div class="flex-row">
+            <button id="btn-export-har" class="btn-small" title="Export as HAR">HAR</button>
+            <button id="btn-clear-log" class="btn-small">Clear</button>
+          </div>
         </div>
+        <input id="log-search" type="text" class="log-search-input" placeholder="Filter by URL, method, service..." />
         <div id="response-log" class="log-list"></div>
       </div>
     </section>

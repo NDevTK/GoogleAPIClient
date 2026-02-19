@@ -238,6 +238,14 @@ nav {
   background: #1b2d3a;
   color: #58b0d5;
 }
+.badge-ws {
+  background: #2d1b3a;
+  color: #b58aff;
+}
+.badge-beacon {
+  background: #3a1b1b;
+  color: #e0784e;
+}
 .badge-high {
   background: #3d1418;
   color: #f85149;
@@ -1130,6 +1138,26 @@ details summary:hover {
 .log-filter-select:focus {
   border-color: #58a6ff;
   outline: none;
+}
+.log-search-input {
+  display: block;
+  width: 100%;
+  background: #161b22;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  margin-bottom: 6px;
+  box-sizing: border-box;
+}
+.log-search-input:focus {
+  border-color: #58a6ff;
+  outline: none;
+}
+.log-search-input::placeholder {
+  color: #484f58;
 }
 
 .badge-tab {

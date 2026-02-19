@@ -58,14 +58,24 @@
     ENDPOINT_RE.lastIndex = 0;
     let m;
     while ((m = ENDPOINT_RE.exec(text)) !== null) {
-      // Basic heuristic: must look like an API (often has 'api' or '/v1/' or '.json')
+      // Heuristic: must look like an API endpoint
       const url = m[0];
       if (
         url.includes("api") ||
         /\bv\d+\b/.test(url) ||
         url.endsWith(".json") ||
         url.includes("/$rpc/") ||
-        url.includes("graphql")
+        url.includes("graphql") ||
+        url.includes("/rpc/") ||
+        url.includes("/rest/") ||
+        url.includes("/data/") ||
+        url.includes("/service") ||
+        url.includes("/query") ||
+        url.includes("/mutation") ||
+        url.includes("/batch") ||
+        url.includes("/webhook") ||
+        url.includes("googleapis.com") ||
+        /\.(svc|asmx|ashx|axd)([?/]|$)/.test(url)
       ) {
         endpoints.add(url);
       }
