@@ -2262,7 +2262,9 @@ function _renderVisibleSlice() {
 
   const rh = _vs.estHeight;
   const buf = _vs.buffer;
-  const scrollTop = scrollEl.scrollTop;
+  // Subtract the header/search offset so index math is relative to the first card
+  const logOffset = container.offsetTop;
+  const scrollTop = Math.max(0, scrollEl.scrollTop - logOffset);
   const viewH = scrollEl.clientHeight;
 
   // Calculate visible range using fixed row height (no feedback loop)
@@ -2277,18 +2279,18 @@ function _renderVisibleSlice() {
   _vs.rendering = true;
 
   const topPad = startIdx * rh;
-  const bottomPad = (n - 1 - endIdx) * rh;
   const showTabLabel = logFilter !== "active";
+
+  // Fixed minHeight keeps scroll range stable regardless of actual card heights
+  container.style.minHeight = (n * rh) + "px";
 
   let html = '<div id="vs-top-spacer"></div>';
   for (let i = startIdx; i <= endIdx; i++) {
     html += _renderLogCard(_vs.entries[i], showTabLabel);
   }
-  html += '<div id="vs-bottom-spacer"></div>';
 
   container.innerHTML = html;
   document.getElementById("vs-top-spacer").style.height = topPad + "px";
-  document.getElementById("vs-bottom-spacer").style.height = bottomPad + "px";
 
   // Attach click handlers
   container.querySelectorAll(".request-card").forEach((c) => {
@@ -2342,6 +2344,7 @@ function renderResponsePanel() {
   _vs.lastEnd = -1;
 
   if (entries.length === 0) {
+    container.style.minHeight = "";
     container.innerHTML = '<div class="empty">No requests captured yet.</div>';
     return;
   }
