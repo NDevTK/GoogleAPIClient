@@ -37,8 +37,59 @@
   const _pmChannels = new Map(); // origin → pmId
   const _pmSources = new Map(); // origin → event.source (for reply)
 
+  // ─── MessageChannel Port Tracking ───────────────────────────────────────────
+  // Ports arrive via event.ports in postMessage transfers. We store them for
+  // bidirectional communication and listen for incoming messages.
+
+  let _mcIdCounter = 0;
+  const _mcPorts = new Map(); // mcId → MessagePort (for sending from console)
+
+  function _instrumentPort(port, mcId) {
+    _mcPorts.set(mcId, port);
+    port.addEventListener("message", (e) => {
+      try {
+        let body;
+        try { body = JSON.stringify(e.data); } catch (_) { body = String(e.data); }
+        chrome.runtime.sendMessage({
+          type: "RESPONSE_BODY",
+          url: location.href,
+          method: "MC_RECV",
+          channelId: mcId,
+          status: 0,
+          contentType: "messagechannel",
+          responseHeaders: {},
+          body: body,
+          base64Encoded: false,
+        });
+      } catch (_) {}
+    });
+    port.start();
+  }
+
   window.addEventListener("message", (event) => {
     try {
+      // Instrument any transferred MessageChannel ports
+      if (event.ports && event.ports.length > 0) {
+        for (const port of event.ports) {
+          const mcId = "mc_" + (++_mcIdCounter);
+          _instrumentPort(port, mcId);
+          // Notify background that a channel was established
+          chrome.runtime.sendMessage({
+            type: "RESPONSE_BODY",
+            url: location.href,
+            method: "MC_OPEN",
+            channelId: mcId,
+            status: 0,
+            contentType: "messagechannel",
+            responseHeaders: {},
+            body: "",
+            base64Encoded: false,
+            sourceOrigin: event.origin || "null",
+            targetOrigin: location.origin,
+          });
+        }
+      }
+
       // Filter same-window self-messages (framework noise)
       if (event.source === window) return;
       const from = event.origin || "null";
@@ -260,6 +311,22 @@
         let data = msg.data;
         try { data = JSON.parse(data); } catch (_) {}
         source.postMessage(data, origin);
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ error: err.message });
+      }
+      return;
+    }
+    if (msg.type === "MC_SEND_MSG") {
+      const port = _mcPorts.get(msg.channelId);
+      if (!port) {
+        sendResponse({ error: "No port for channel " + msg.channelId });
+        return;
+      }
+      try {
+        let data = msg.data;
+        try { data = JSON.parse(data); } catch (_) {}
+        port.postMessage(data);
         sendResponse({ ok: true });
       } catch (err) {
         sendResponse({ error: err.message });

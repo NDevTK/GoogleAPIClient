@@ -38,7 +38,7 @@ let currentRequestMethod = "POST";
 let currentContentType = "application/json";
 let currentBodyMode = "form"; // "form" | "raw" | "graphql" | "msgconsole"
 let currentChannelId = null;
-let currentChannelType = null; // "WEBSOCKET" | "POSTMESSAGE"
+let currentChannelType = null; // "WEBSOCKET" | "POSTMESSAGE" | "MSGCHANNEL"
 let currentTargetOrigin = null; // For postMessage send
 let logFilter = "active"; // "active" | "all" | tabId (number)
 let logSearchQuery = ""; // text filter for request log
@@ -1536,6 +1536,9 @@ async function initMsgConsole(req) {
   if (currentChannelType === "POSTMESSAGE") {
     labelEl.textContent = "postMessage";
     urlEl.textContent = (req.sourceOrigin || "?") + " \u2192 " + (req.targetOrigin || "?");
+  } else if (currentChannelType === "MSGCHANNEL") {
+    labelEl.textContent = "MessageChannel";
+    urlEl.textContent = (req.sourceOrigin || "?") + " \u2192 " + (req.targetOrigin || "?");
   } else {
     labelEl.textContent = "WebSocket";
     urlEl.textContent = req.url;
@@ -1605,14 +1608,15 @@ async function refreshMsgConsole() {
   }
 
   // Pick the right status message type based on channel
-  const statusType = currentChannelType === "POSTMESSAGE" ? "PM_GET_STATUS" : "WS_GET_STATUS";
+  const statusType = currentChannelType === "POSTMESSAGE" ? "PM_GET_STATUS"
+    : currentChannelType === "MSGCHANNEL" ? "MC_GET_STATUS" : "WS_GET_STATUS";
   try {
     const result = await chrome.runtime.sendMessage({
       type: statusType, tabId: currentTabId, channelId: currentChannelId,
     });
 
-    if (currentChannelType === "POSTMESSAGE") {
-      // postMessage is always "active" — no connection lifecycle
+    if (currentChannelType === "POSTMESSAGE" || currentChannelType === "MSGCHANNEL") {
+      // postMessage / MessageChannel — always "active", no connection lifecycle
       statusEl.innerHTML = '<span class="ws-status-open">ACTIVE</span>';
       sendBtn.disabled = false;
     } else {
@@ -1651,6 +1655,11 @@ async function sendConsoleMessage() {
       msgPayload = {
         type: "PM_SEND_MSG", tabId: currentTabId, channelId: currentChannelId,
         data: data, targetOrigin: currentTargetOrigin || "*",
+      };
+    } else if (currentChannelType === "MSGCHANNEL") {
+      msgPayload = {
+        type: "MC_SEND_MSG", tabId: currentTabId, channelId: currentChannelId,
+        data: data,
       };
     } else {
       msgPayload = {
@@ -2337,6 +2346,29 @@ function _renderLogCard(req, showTabLabel) {
   </div>`;
   }
 
+  // Combined MessageChannel entry — show origin pair and message counts
+  if (req.method === "MSGCHANNEL") {
+    const msgs = req.messages || [];
+    const sentCount = msgs.filter((m) => m.dir === "sent").length;
+    const recvCount = msgs.filter((m) => m.dir === "recv").length;
+    const origins = (req.sourceOrigin || "?") + " \u2192 " + (req.targetOrigin || "?");
+    return `<div class="card request-card clickable-card mb-8" data-id="${esc(String(req.id))}" data-tab-id="${esc(String(req._tabId))}">
+    <div class="card-label flex-between">
+      <span>
+        <span class="badge badge-mc">MSGCHANNEL</span>
+        <span class="text-timestamp">${new Date(req.timestamp).toLocaleTimeString()}</span>
+        ${showTabLabel ? `<span class="badge badge-tab">${esc(req._tabTitle || "Tab " + req._tabId)}</span>` : ""}
+      </span>
+      <span class="badge ws-status-open">ACTIVE</span>
+    </div>
+    <div class="card-value card-value-mono">${esc(origins)}</div>
+    <div class="card-meta">
+      ${req.service ? `Service: <strong>${esc(req.service)}</strong>` : ""}
+      <span class="ws-msg-counts">${recvCount} received${sentCount ? ` / ${sentCount} sent` : ""}</span>
+    </div>
+  </div>`;
+  }
+
   return `<div class="card request-card clickable-card mb-8" data-id="${esc(String(req.id))}" data-tab-id="${esc(String(req._tabId))}">
     <div class="card-label flex-between">
       <span>
@@ -2751,7 +2783,7 @@ async function replayRequest(reqId, sourceTabId) {
   currentReplayRequest = req;
 
   // Message console mode: WebSocket or postMessage
-  if (req.method === "WEBSOCKET" || req.method === "POSTMESSAGE") {
+  if (req.method === "WEBSOCKET" || req.method === "POSTMESSAGE" || req.method === "MSGCHANNEL") {
     await initMsgConsole(req);
     document.querySelector(".tab[data-panel='send']").click();
     return;

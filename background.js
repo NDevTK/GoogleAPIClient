@@ -2922,6 +2922,69 @@ async function handleResponseBody(tabId, msg) {
     return;
   }
 
+  // MessageChannel: MC_OPEN creates entry, MC_RECV appends messages
+  if (msg.method === "MC_OPEN") {
+    const tab = getTab(tabId);
+    let entry = tab.requestLog.find((r) => r.channelId === channelId && r.method === "MSGCHANNEL");
+    if (!entry) {
+      entry = {
+        id: "mc_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
+        url: msg.url,
+        method: "MSGCHANNEL",
+        service: extractInterfaceName(new URL(msg.url)),
+        timestamp: Date.now(),
+        status: 0,
+        channelId: channelId,
+        sourceOrigin: msg.sourceOrigin || "",
+        targetOrigin: msg.targetOrigin || "",
+        messages: [],
+      };
+      tab.requestLog.unshift(entry);
+      if (tab.requestLog.length > 50) tab.requestLog.pop();
+    }
+    scheduleSessionSave(tabId);
+    notifyPopup(tabId);
+    return;
+  }
+
+  if (msg.method === "MC_RECV") {
+    const tab = getTab(tabId);
+    let entry = tab.requestLog.find((r) => r.channelId === channelId && r.method === "MSGCHANNEL");
+    if (!entry) {
+      // Port message arrived before MC_OPEN (race) — create entry
+      entry = {
+        id: "mc_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
+        url: msg.url,
+        method: "MSGCHANNEL",
+        service: extractInterfaceName(new URL(msg.url)),
+        timestamp: Date.now(),
+        status: 0,
+        channelId: channelId,
+        sourceOrigin: "",
+        targetOrigin: "",
+        messages: [],
+      };
+      tab.requestLog.unshift(entry);
+      if (tab.requestLog.length > 50) tab.requestLog.pop();
+    }
+    entry.messages.push({
+      dir: "recv",
+      time: Date.now(),
+      body: msg.body || "",
+      base64: false,
+    });
+    entry.timestamp = Date.now();
+    if (entry.messages.length > 200) entry.messages.splice(0, entry.messages.length - 200);
+
+    if (msg.body) {
+      extractKeysFromText(tabId, msg.body, msg.url, "response_body");
+    }
+
+    scheduleSessionSave(tabId);
+    notifyPopup(tabId);
+    return;
+  }
+
   if (!msg.body) return;
 
   const tab = getTab(tabId);
@@ -3981,6 +4044,37 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
       const entry = tab.requestLog.find((r) => r.channelId === msg.channelId && r.method === "POSTMESSAGE");
       sendResponse({
         readyState: 1, // postMessage is always "active"
+        messages: entry ? (entry.messages || []) : [],
+      });
+      return;
+    }
+
+    case "MC_SEND_MSG": {
+      if (tabId == null) return;
+      chrome.tabs.sendMessage(tabId, {
+        type: "MC_SEND_MSG",
+        channelId: msg.channelId,
+        data: msg.data,
+      }).then(() => {
+        const tab = getTab(tabId);
+        const entry = tab.requestLog.find((r) => r.channelId === msg.channelId && r.method === "MSGCHANNEL");
+        if (entry) {
+          entry.messages.push({ dir: "sent", time: Date.now(), body: msg.data || "", base64: false });
+          if (entry.messages.length > 200) entry.messages.splice(0, entry.messages.length - 200);
+          scheduleSessionSave(tabId);
+          notifyPopup(tabId);
+        }
+        sendResponse({ ok: true });
+      }).catch((err) => sendResponse({ error: err.message }));
+      return true;
+    }
+
+    case "MC_GET_STATUS": {
+      if (tabId == null) return;
+      const tab = getTab(tabId);
+      const entry = tab.requestLog.find((r) => r.channelId === msg.channelId && r.method === "MSGCHANNEL");
+      sendResponse({
+        readyState: 1, // port is active once transferred
         messages: entry ? (entry.messages || []) : [],
       });
       return;
