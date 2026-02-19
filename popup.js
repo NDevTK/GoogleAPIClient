@@ -2916,6 +2916,9 @@ async function replayRequest(reqId, sourceTabId) {
       try {
         const urlObj = new URL(req.url);
         urlObj.searchParams.forEach((val, key) => {
+          // $httpHeaders is a gRPC-Web transport param with CRLF separators —
+          // putting it through a text input strips \r\n and corrupts the URL.
+          if (key === "$httpHeaders") return;
           // Prefer body data if it already provides this key, but for GET it's usually just URL params
           if (initialData[key] === undefined || initialData[key] === null) {
             initialData[key] = val;

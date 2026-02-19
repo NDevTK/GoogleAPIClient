@@ -1174,6 +1174,9 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
   if (!url.pathname.includes("batchexecute")) {
     url.searchParams.forEach((value, name) => {
       if (name === "key" || name === "api_key") return;
+      // $httpHeaders is a gRPC-Web transport mechanism (CRLF-separated headers in URL),
+      // not an API parameter. Putting it in a form input strips \r\n and corrupts the URL.
+      if (name === "$httpHeaders") return;
       if (!m.parameters[name]) {
         m.parameters[name] = {
           type: isNaN(value) ? "string" : "number",
