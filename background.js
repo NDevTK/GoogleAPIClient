@@ -527,6 +527,18 @@ async function loadSessionLogs() {
         const tab = getTab(tabId);
         if (tab.requestLog.length === 0) {
           tab.requestLog = value;
+          // Restore _wsConnState from persisted WEBSOCKET entries
+          for (const entry of value) {
+            if (entry.method === "WEBSOCKET" && entry.wsId) {
+              if (!_wsConnState.has(tabId)) _wsConnState.set(tabId, new Map());
+              // After SW restart, mark all as closed — intercept.js will re-emit WS_OPEN for live ones
+              _wsConnState.get(tabId).set(entry.wsId, {
+                url: entry.url,
+                readyState: entry.wsOpen ? 1 : 3,
+                entryId: entry.id,
+              });
+            }
+          }
         }
       }
     }
@@ -2770,19 +2782,98 @@ async function handleResponseBody(tabId, msg) {
   if (!msg.url) return;
   await _globalStoreReady;
 
-  // WebSocket lifecycle events — track state, no log entry
-  if (msg.method === "WS_OPEN") {
+  // WebSocket lifecycle: one log entry per connection, messages[] array
+  const isWs = msg.method === "WS_OPEN" || msg.method === "WS_CLOSE" ||
+    msg.method === "WS_SEND" || msg.method === "WS_RECV";
+  if (isWs) {
+    const tab = getTab(tabId);
     if (!_wsConnState.has(tabId)) _wsConnState.set(tabId, new Map());
-    _wsConnState.get(tabId).set(msg.wsId, { url: msg.url, readyState: 1 });
-    notifyPopup(tabId);
-    return;
-  }
-  if (msg.method === "WS_CLOSE") {
     const conns = _wsConnState.get(tabId);
-    if (conns) {
+
+    if (msg.method === "WS_OPEN") {
+      // Create one combined log entry for this connection
+      const entry = {
+        id: "ws_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
+        url: msg.url,
+        method: "WEBSOCKET",
+        service: extractInterfaceName(new URL(msg.url)),
+        timestamp: Date.now(),
+        status: 0,
+        wsId: msg.wsId,
+        wsOpen: true,
+        messages: [],
+      };
+      tab.requestLog.unshift(entry);
+      if (tab.requestLog.length > 50) tab.requestLog.pop();
+      conns.set(msg.wsId, { url: msg.url, readyState: 1, entryId: entry.id });
+      scheduleSessionSave(tabId);
+      notifyPopup(tabId);
+      return;
+    }
+
+    if (msg.method === "WS_CLOSE") {
       const conn = conns.get(msg.wsId);
       if (conn) conn.readyState = 3;
+      // Mark the log entry as closed
+      const entry = tab.requestLog.find((r) => r.wsId === msg.wsId && r.method === "WEBSOCKET");
+      if (entry) {
+        entry.wsOpen = false;
+        entry.messages.push({
+          dir: "close",
+          time: Date.now(),
+          body: msg.body || "",
+          base64: false,
+          status: msg.status || 1000,
+        });
+        // Cap messages to prevent storage bloat
+        if (entry.messages.length > 200) entry.messages.splice(0, entry.messages.length - 200);
+      }
+      scheduleSessionSave(tabId);
+      notifyPopup(tabId);
+      return;
     }
+
+    // WS_SEND or WS_RECV — append message to existing connection entry
+    let entry = tab.requestLog.find((r) => r.wsId === msg.wsId && r.method === "WEBSOCKET");
+    if (!entry) {
+      // WS was opened before extension injected, or after SW restart — create entry now
+      entry = {
+        id: "ws_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
+        url: msg.url,
+        method: "WEBSOCKET",
+        service: extractInterfaceName(new URL(msg.url)),
+        timestamp: Date.now(),
+        status: 0,
+        wsId: msg.wsId,
+        wsOpen: true,
+        messages: [],
+      };
+      tab.requestLog.unshift(entry);
+      if (tab.requestLog.length > 50) tab.requestLog.pop();
+      conns.set(msg.wsId, { url: msg.url, readyState: 1, entryId: entry.id });
+    }
+
+    entry.messages.push({
+      dir: msg.method === "WS_SEND" ? "sent" : "recv",
+      time: Date.now(),
+      body: msg.body || "",
+      base64: msg.base64Encoded || false,
+    });
+    entry.timestamp = Date.now(); // Bump to keep it near top in sorted views
+    // Cap messages to prevent storage bloat
+    if (entry.messages.length > 200) entry.messages.splice(0, entry.messages.length - 200);
+
+    // Key scanning on message body
+    if (msg.body) {
+      let textBody = msg.body;
+      if (msg.base64Encoded) {
+        try { textBody = new TextDecoder().decode(base64ToUint8(msg.body)); }
+        catch (_) { textBody = null; }
+      }
+      if (textBody) extractKeysFromText(tabId, textBody, msg.url, "response_body");
+    }
+
+    scheduleSessionSave(tabId);
     notifyPopup(tabId);
     return;
   }
@@ -2812,10 +2903,9 @@ async function handleResponseBody(tabId, msg) {
     (r) => r.url === msg.url && !r.responseBody,
   );
 
-  // For transports not captured by webRequest (WebSocket, EventSource, sendBeacon),
+  // For transports not captured by webRequest (EventSource, sendBeacon),
   // create a log entry on the fly
-  const isAltTransport = msg.method === "WS_SEND" || msg.method === "WS_RECV" ||
-    msg.method === "SSE" || msg.method === "BEACON";
+  const isAltTransport = msg.method === "SSE" || msg.method === "BEACON";
   if (!entry && isAltTransport) {
     entry = {
       id: "alt_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
@@ -2824,7 +2914,6 @@ async function handleResponseBody(tabId, msg) {
       service: extractInterfaceName(new URL(msg.url)),
       timestamp: Date.now(),
       status: msg.status || 0,
-      wsId: msg.wsId || null,
     };
     tab.requestLog.unshift(entry);
     if (tab.requestLog.length > 50) tab.requestLog.pop();
@@ -3806,9 +3895,17 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
       if (tabId == null) return;
       const conns = _wsConnState.get(tabId);
       const conn = conns?.get(msg.wsId);
+      // Also return the messages array for the WS console
+      let messages = [];
+      if (conn) {
+        const tab = getTab(tabId);
+        const entry = tab.requestLog.find((r) => r.wsId === msg.wsId && r.method === "WEBSOCKET");
+        if (entry) messages = entry.messages || [];
+      }
       sendResponse({
         readyState: conn ? conn.readyState : 3,
         url: conn?.url || null,
+        messages: messages,
       });
       return;
     }

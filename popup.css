@@ -297,6 +297,8 @@ nav {
 .ws-msg-sent { background: #0d2818; border-left: 2px solid #3fb950; }
 .ws-msg-recv { background: #1a1a2e; border-left: 2px solid #58a6ff; }
 .ws-msg-error { background: #2d1117; border-left: 2px solid #f85149; color: #f85149; }
+.ws-msg-close { background: #1c1c1c; border-left: 2px solid #484f58; color: #484f58; font-style: italic; }
+.ws-msg-counts { font-size: 11px; color: #8b949e; margin-left: 8px; }
 .ws-msg-dir {
   font-size: 9px;
   text-transform: uppercase;

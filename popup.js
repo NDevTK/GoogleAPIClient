@@ -499,7 +499,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         throttledLoadState();
       }
       if (currentBodyMode === "websocket" && currentWsId) {
-        refreshWsStatus();
+        refreshWsConsole();
       }
     }
   });
@@ -1527,29 +1527,20 @@ async function initWsConsole(req) {
 
   document.getElementById("ws-console-url").textContent = req.url;
 
+  // Render all messages from the combined entry
   const historyEl = document.getElementById("ws-console-history");
   historyEl.innerHTML = "";
-  if (req.responseBody) {
-    let bodyText = req.responseBody;
-    if (req.responseBase64) {
-      try { bodyText = new TextDecoder().decode(base64ToUint8(req.responseBody)); }
-      catch (_) {}
-    }
-    const direction = req.method === "WS_SEND" ? "sent" : "received";
-    const dirClass = req.method === "WS_SEND" ? "ws-msg-sent" : "ws-msg-recv";
-    const time = new Date(req.timestamp).toLocaleTimeString();
-    historyEl.innerHTML =
-      `<div class="ws-msg ${dirClass}">` +
-      `<span class="ws-msg-dir">${esc(direction)}</span> ` +
-      `<span class="ws-msg-time">${esc(time)}</span>` +
-      `<pre class="ws-msg-body">${esc(bodyText)}</pre></div>`;
-  }
+  const messages = req.messages || [];
+  _renderWsMessages(historyEl, messages);
+  historyEl.scrollTop = historyEl.scrollHeight;
 
+  // Pre-fill input with last sent message for easy re-send
   const input = document.getElementById("ws-console-input");
-  if (req.method === "WS_SEND" && req.responseBody) {
-    let bodyText = req.responseBody;
-    if (req.responseBase64) {
-      try { bodyText = new TextDecoder().decode(base64ToUint8(req.responseBody)); }
+  const lastSent = messages.filter((m) => m.dir === "sent").pop();
+  if (lastSent) {
+    let bodyText = lastSent.body;
+    if (lastSent.base64) {
+      try { bodyText = new TextDecoder().decode(base64ToUint8(lastSent.body)); }
       catch (_) {}
     }
     input.value = bodyText;
@@ -1557,10 +1548,40 @@ async function initWsConsole(req) {
     input.value = "";
   }
 
-  await refreshWsStatus();
+  await refreshWsConsole();
 }
 
-async function refreshWsStatus() {
+function _renderWsMessages(container, messages) {
+  let html = "";
+  for (const msg of messages) {
+    if (msg.dir === "close") {
+      const time = new Date(msg.time).toLocaleTimeString();
+      html +=
+        `<div class="ws-msg ws-msg-close">` +
+        `<span class="ws-msg-dir">closed</span> ` +
+        `<span class="ws-msg-time">${esc(time)}</span>` +
+        (msg.body ? `<pre class="ws-msg-body">${esc(String(msg.body))}</pre>` : "") +
+        `</div>`;
+      continue;
+    }
+    let bodyText = msg.body;
+    if (msg.base64) {
+      try { bodyText = new TextDecoder().decode(base64ToUint8(msg.body)); }
+      catch (_) {}
+    }
+    const dirLabel = msg.dir === "sent" ? "sent" : "received";
+    const dirClass = msg.dir === "sent" ? "ws-msg-sent" : "ws-msg-recv";
+    const time = new Date(msg.time).toLocaleTimeString();
+    html +=
+      `<div class="ws-msg ${dirClass}">` +
+      `<span class="ws-msg-dir">${esc(dirLabel)}</span> ` +
+      `<span class="ws-msg-time">${esc(time)}</span>` +
+      `<pre class="ws-msg-body">${esc(bodyText)}</pre></div>`;
+  }
+  container.innerHTML = html;
+}
+
+async function refreshWsConsole() {
   const statusEl = document.getElementById("ws-console-status");
   const sendBtn = document.getElementById("ws-console-send");
   if (!currentWsId) {
@@ -1578,6 +1599,14 @@ async function refreshWsStatus() {
     const rs = result.readyState;
     statusEl.innerHTML = `<span class="${classes[rs] || "ws-status-closed"}">${names[rs] || "CLOSED"}</span>`;
     sendBtn.disabled = rs !== 1;
+
+    // Live-update message history
+    if (result.messages) {
+      const historyEl = document.getElementById("ws-console-history");
+      const wasAtBottom = historyEl.scrollTop + historyEl.clientHeight >= historyEl.scrollHeight - 20;
+      _renderWsMessages(historyEl, result.messages);
+      if (wasAtBottom) historyEl.scrollTop = historyEl.scrollHeight;
+    }
   } catch (_) {
     statusEl.innerHTML = '<span class="ws-status-closed">UNKNOWN</span>';
     sendBtn.disabled = true;
@@ -1602,14 +1631,15 @@ async function sendWsMessage() {
         `<div class="ws-msg ws-msg-error">` +
         `<span class="ws-msg-dir">error</span> ${esc(result.error)}</div>`;
     }
+    // Message will appear via STATE_UPDATED → refreshWsConsole automatically
   } catch (err) {
     const historyEl = document.getElementById("ws-console-history");
     historyEl.innerHTML +=
       `<div class="ws-msg ws-msg-error">` +
       `<span class="ws-msg-dir">error</span> ${esc(err.message)}</div>`;
   }
-  sendBtn.disabled = false;
   sendBtn.textContent = "Send Message";
+  await refreshWsConsole();
 }
 
 function renderResponse(result) {
@@ -2226,6 +2256,31 @@ function findSchemaForRequest(req) {
 
 function _renderLogCard(req, showTabLabel) {
   const hasProto = !!req.decodedBody;
+
+  // Combined WebSocket entry — show message counts and connection status
+  if (req.method === "WEBSOCKET") {
+    const msgs = req.messages || [];
+    const sentCount = msgs.filter((m) => m.dir === "sent").length;
+    const recvCount = msgs.filter((m) => m.dir === "recv").length;
+    const statusClass = req.wsOpen ? "ws-status-open" : "ws-status-closed";
+    const statusText = req.wsOpen ? "OPEN" : "CLOSED";
+    return `<div class="card request-card clickable-card mb-8" data-id="${esc(String(req.id))}" data-tab-id="${esc(String(req._tabId))}">
+    <div class="card-label flex-between">
+      <span>
+        <span class="badge badge-ws">WEBSOCKET</span>
+        <span class="text-timestamp">${new Date(req.timestamp).toLocaleTimeString()}</span>
+        ${showTabLabel ? `<span class="badge badge-tab">${esc(req._tabTitle || "Tab " + req._tabId)}</span>` : ""}
+      </span>
+      <span class="badge ${esc(statusClass)}">${esc(statusText)}</span>
+    </div>
+    <div class="card-value card-value-mono">${esc(req.url)}</div>
+    <div class="card-meta">
+      ${req.service ? `Service: <strong>${esc(req.service)}</strong>` : ""}
+      <span class="ws-msg-counts">${sentCount} sent / ${recvCount} received</span>
+    </div>
+  </div>`;
+  }
+
   return `<div class="card request-card clickable-card mb-8" data-id="${esc(String(req.id))}" data-tab-id="${esc(String(req._tabId))}">
     <div class="card-label flex-between">
       <span>
@@ -2246,7 +2301,6 @@ function _renderLogCard(req, showTabLabel) {
       ${isGraphQLUrl(req.url) ? ' <span class="badge badge-graphql">GRAPHQL</span>' : ""}
       ${isMultipartBatch(req.mimeType || "") ? ' <span class="badge badge-multipart">MULTIPART</span>' : ""}
       ${/\/async\//.test(req.url) ? ' <span class="badge badge-batch">ASYNC</span>' : ""}
-      ${req.method === "WS_SEND" || req.method === "WS_RECV" ? ' <span class="badge badge-ws">WEBSOCKET</span>' : ""}
       ${req.method === "SSE" ? ' <span class="badge badge-sse">SSE</span>' : ""}
       ${req.method === "BEACON" ? ' <span class="badge badge-beacon">BEACON</span>' : ""}
     </div>
@@ -2641,7 +2695,7 @@ async function replayRequest(reqId, sourceTabId) {
   currentReplayRequest = req;
 
   // WebSocket mode: show WS console instead of HTTP send panel
-  if (req.method === "WS_SEND" || req.method === "WS_RECV") {
+  if (req.method === "WEBSOCKET") {
     await initWsConsole(req);
     document.querySelector(".tab[data-panel='send']").click();
     return;
