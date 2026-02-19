@@ -55,6 +55,7 @@ const state = {
 // Session storage for request logs — survives SW restarts, clears on browser close
 const _sessionSaveTimers = new Map(); // tabId → timeoutId
 const _tabMeta = new Map(); // tabId → { title, url, closed? }
+const _wsConnState = new Map(); // tabId → Map<wsId, { url, readyState }>
 
 // Cross-script AST analysis: buffer scripts per tab, debounce, concatenate + analyze
 const _scriptBuffers = new Map(); // tabId → { scripts: [{url, code}], timer: null }
@@ -2747,8 +2748,27 @@ async function probeEndpoint(tabId, endpointKey) {
 // ─── Response Body Handling (from intercept.js via content.js relay) ─────────
 
 async function handleResponseBody(tabId, msg) {
-  if (!msg.url || !msg.body) return;
+  if (!msg.url) return;
   await _globalStoreReady;
+
+  // WebSocket lifecycle events — track state, no log entry
+  if (msg.method === "WS_OPEN") {
+    if (!_wsConnState.has(tabId)) _wsConnState.set(tabId, new Map());
+    _wsConnState.get(tabId).set(msg.wsId, { url: msg.url, readyState: 1 });
+    notifyPopup(tabId);
+    return;
+  }
+  if (msg.method === "WS_CLOSE") {
+    const conns = _wsConnState.get(tabId);
+    if (conns) {
+      const conn = conns.get(msg.wsId);
+      if (conn) conn.readyState = 3;
+    }
+    notifyPopup(tabId);
+    return;
+  }
+
+  if (!msg.body) return;
 
   const tab = getTab(tabId);
 
@@ -2785,6 +2805,7 @@ async function handleResponseBody(tabId, msg) {
       service: extractInterfaceName(new URL(msg.url)),
       timestamp: Date.now(),
       status: msg.status || 0,
+      wsId: msg.wsId || null,
     };
     tab.requestLog.unshift(entry);
     if (tab.requestLog.length > 50) tab.requestLog.pop();
@@ -3750,6 +3771,39 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
       return true;
     }
 
+    case "WS_SEND_MSG": {
+      if (tabId == null) return;
+      chrome.tabs.sendMessage(tabId, {
+        type: "WS_SEND_MSG",
+        wsId: msg.wsId,
+        data: msg.data,
+        binary: msg.binary || false,
+      }).then(() => sendResponse({ ok: true }))
+        .catch((err) => sendResponse({ error: err.message }));
+      return true;
+    }
+
+    case "WS_GET_STATUS": {
+      if (tabId == null) return;
+      const conns = _wsConnState.get(tabId);
+      const conn = conns?.get(msg.wsId);
+      if (!conn || conn.readyState === 3) {
+        sendResponse({ readyState: 3, url: conn?.url || null });
+        return;
+      }
+      chrome.tabs.sendMessage(tabId, {
+        type: "WS_QUERY_STATUS",
+        wsId: msg.wsId,
+      }).then((result) => {
+        conn.readyState = result.readyState;
+        sendResponse({ readyState: result.readyState, url: conn.url });
+      }).catch(() => {
+        conn.readyState = 3;
+        sendResponse({ readyState: 3, url: conn.url });
+      });
+      return true;
+    }
+
     case "BUILD_REQUEST": {
       if (tabId == null) return;
       buildExportRequest(tabId, msg).then((result) => {
@@ -4070,6 +4124,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     meta.count = tab ? tab.requestLog.length : meta.count || 0;
   }
   state.tabs.delete(tabId);
+  _wsConnState.delete(tabId);
   // Clean up script buffer and cancel pending analysis
   var buf = _scriptBuffers.get(tabId);
   if (buf && buf.timer) clearTimeout(buf.timer);

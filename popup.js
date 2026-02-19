@@ -36,7 +36,8 @@ let currentSchema = null;
 let currentRequestUrl = "";
 let currentRequestMethod = "POST";
 let currentContentType = "application/json";
-let currentBodyMode = "form"; // "form" | "raw" | "graphql"
+let currentBodyMode = "form"; // "form" | "raw" | "graphql" | "websocket"
+let currentWsId = null;
 let logFilter = "active"; // "active" | "all" | tabId (number)
 let logSearchQuery = ""; // text filter for request log
 let allTabsData = null; // { tabId: { meta, requestLog } }
@@ -55,12 +56,25 @@ const _vs = {
 
 function setBodyMode(mode) {
   currentBodyMode = mode;
+  const isWs = mode === "websocket";
   document.getElementById("send-form-fields").style.display =
     mode === "form" ? "block" : "none";
   document.getElementById("send-raw-body").style.display =
     mode === "raw" ? "block" : "none";
   document.getElementById("send-graphql-fields").style.display =
     mode === "graphql" ? "block" : "none";
+  document.getElementById("send-ws-console").style.display =
+    isWs ? "block" : "none";
+  document.getElementById("send-controls").style.display =
+    isWs ? "none" : "";
+  document.getElementById("send-headers-section").style.display =
+    isWs ? "none" : "";
+  document.getElementById("btn-send").style.display =
+    isWs ? "none" : "";
+  document.querySelector(".export-row").style.display =
+    isWs ? "none" : "";
+  document.getElementById("send-response").style.display =
+    isWs ? "none" : "";
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────
@@ -101,6 +115,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     .getElementById("send-ep-select")
     .addEventListener("change", onSendEndpointSelected);
   document.getElementById("btn-send").addEventListener("click", sendRequest);
+  document.getElementById("ws-console-send").addEventListener("click", sendWsMessage);
+  document.getElementById("ws-console-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendWsMessage(); }
+  });
   document
     .getElementById("btn-add-header")
     .addEventListener("click", addHeaderRow);
@@ -479,6 +497,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (msg.type === "STATE_UPDATED") {
       if (msg.tabId === currentTabId || logFilter !== "active") {
         throttledLoadState();
+      }
+      if (currentBodyMode === "websocket" && currentWsId) {
+        refreshWsStatus();
       }
     }
   });
@@ -1498,6 +1519,99 @@ async function sendRequest() {
   btn.textContent = "Send Request";
 }
 
+// ─── WebSocket Console ──────────────────────────────────────────────────────
+
+async function initWsConsole(req) {
+  currentWsId = req.wsId;
+  setBodyMode("websocket");
+
+  document.getElementById("ws-console-url").textContent = req.url;
+
+  const historyEl = document.getElementById("ws-console-history");
+  historyEl.innerHTML = "";
+  if (req.responseBody) {
+    let bodyText = req.responseBody;
+    if (req.responseBase64) {
+      try { bodyText = new TextDecoder().decode(base64ToUint8(req.responseBody)); }
+      catch (_) {}
+    }
+    const direction = req.method === "WS_SEND" ? "sent" : "received";
+    const dirClass = req.method === "WS_SEND" ? "ws-msg-sent" : "ws-msg-recv";
+    const time = new Date(req.timestamp).toLocaleTimeString();
+    historyEl.innerHTML =
+      `<div class="ws-msg ${dirClass}">` +
+      `<span class="ws-msg-dir">${esc(direction)}</span> ` +
+      `<span class="ws-msg-time">${esc(time)}</span>` +
+      `<pre class="ws-msg-body">${esc(bodyText)}</pre></div>`;
+  }
+
+  const input = document.getElementById("ws-console-input");
+  if (req.method === "WS_SEND" && req.responseBody) {
+    let bodyText = req.responseBody;
+    if (req.responseBase64) {
+      try { bodyText = new TextDecoder().decode(base64ToUint8(req.responseBody)); }
+      catch (_) {}
+    }
+    input.value = bodyText;
+  } else {
+    input.value = "";
+  }
+
+  await refreshWsStatus();
+}
+
+async function refreshWsStatus() {
+  const statusEl = document.getElementById("ws-console-status");
+  const sendBtn = document.getElementById("ws-console-send");
+  if (!currentWsId) {
+    statusEl.innerHTML = '<span class="ws-status-closed">NO CONNECTION</span>';
+    sendBtn.disabled = true;
+    return;
+  }
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: "WS_GET_STATUS", tabId: currentTabId, wsId: currentWsId,
+    });
+    const names = { 0: "CONNECTING", 1: "OPEN", 2: "CLOSING", 3: "CLOSED" };
+    const classes = { 0: "ws-status-connecting", 1: "ws-status-open",
+      2: "ws-status-closing", 3: "ws-status-closed" };
+    const rs = result.readyState;
+    statusEl.innerHTML = `<span class="${classes[rs] || "ws-status-closed"}">${names[rs] || "CLOSED"}</span>`;
+    sendBtn.disabled = rs !== 1;
+  } catch (_) {
+    statusEl.innerHTML = '<span class="ws-status-closed">UNKNOWN</span>';
+    sendBtn.disabled = true;
+  }
+}
+
+async function sendWsMessage() {
+  const input = document.getElementById("ws-console-input");
+  const sendBtn = document.getElementById("ws-console-send");
+  const data = input.value;
+  if (!data || !currentWsId) return;
+
+  sendBtn.disabled = true;
+  sendBtn.textContent = "Sending...";
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: "WS_SEND_MSG", tabId: currentTabId, wsId: currentWsId, data: data,
+    });
+    if (result.error) {
+      const historyEl = document.getElementById("ws-console-history");
+      historyEl.innerHTML +=
+        `<div class="ws-msg ws-msg-error">` +
+        `<span class="ws-msg-dir">error</span> ${esc(result.error)}</div>`;
+    }
+  } catch (err) {
+    const historyEl = document.getElementById("ws-console-history");
+    historyEl.innerHTML +=
+      `<div class="ws-msg ws-msg-error">` +
+      `<span class="ws-msg-dir">error</span> ${esc(err.message)}</div>`;
+  }
+  sendBtn.disabled = false;
+  sendBtn.textContent = "Send Message";
+}
+
 function renderResponse(result) {
   lastSendResult = result;
   const container = document.getElementById("send-response");
@@ -2166,13 +2280,15 @@ function _renderVisibleSlice() {
   const bottomPad = (n - 1 - endIdx) * rh;
   const showTabLabel = logFilter !== "active";
 
-  let html = `<div style="height:${topPad}px"></div>`;
+  let html = '<div id="vs-top-spacer"></div>';
   for (let i = startIdx; i <= endIdx; i++) {
     html += _renderLogCard(_vs.entries[i], showTabLabel);
   }
-  html += `<div style="height:${bottomPad}px"></div>`;
+  html += '<div id="vs-bottom-spacer"></div>';
 
   container.innerHTML = html;
+  document.getElementById("vs-top-spacer").style.height = topPad + "px";
+  document.getElementById("vs-bottom-spacer").style.height = bottomPad + "px";
 
   // Attach click handlers
   container.querySelectorAll(".request-card").forEach((c) => {
@@ -2522,6 +2638,13 @@ async function replayRequest(reqId, sourceTabId) {
     return;
   }
   currentReplayRequest = req;
+
+  // WebSocket mode: show WS console instead of HTTP send panel
+  if (req.method === "WS_SEND" || req.method === "WS_RECV") {
+    await initWsConsole(req);
+    document.querySelector(".tab[data-panel='send']").click();
+    return;
+  }
 
   // Try to find and select the matching endpoint in the dropdown to load the schema
   const epSelect = document.getElementById("send-ep-select");

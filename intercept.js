@@ -75,6 +75,37 @@
     _buffer.length = 0;
   });
 
+  // ─── WebSocket send command listener ──────────────────────────────────────
+  // Receives commands from content.js to send messages through live WebSocket
+  // connections.  Security note: a compromised renderer already has direct
+  // access to WebSocket objects, so this relay grants no new capability.
+
+  document.addEventListener("__uasr_ws_send", function (e) {
+    if (!e.detail) return;
+    var wsId = e.detail.wsId, data = e.detail.data, binary = e.detail.binary;
+    var ws = _wsConnections.get(wsId);
+    if (!ws || ws.readyState !== 1) return;
+    try {
+      if (binary && typeof data === "string") {
+        var bin = atob(data);
+        var bytes = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        ws.send(bytes.buffer);
+      } else {
+        ws.send(data);
+      }
+    } catch (_) {}
+  });
+
+  document.addEventListener("__uasr_ws_query", function (e) {
+    if (!e.detail) return;
+    var wsId = e.detail.wsId, nonce = e.detail.nonce;
+    var ws = _wsConnections.get(wsId);
+    document.dispatchEvent(new CustomEvent("__uasr_ws_status", {
+      detail: { wsId: wsId, nonce: nonce, readyState: ws ? ws.readyState : 3 }
+    }));
+  });
+
   // ─── fetch() wrapper ───────────────────────────────────────────────────────
 
   const _fetch = window.fetch;
@@ -201,12 +232,32 @@
 
   // ─── WebSocket wrapper ──────────────────────────────────────────────────────
 
+  var _wsIdCounter = 0;
+  var _wsConnections = new Map();
+
   const _WebSocket = window.WebSocket;
 
   class WrappedWebSocket extends _WebSocket {
     constructor(url, protocols) {
       super(url, protocols);
       const wsUrl = typeof url === "string" ? url : String(url);
+      const wsId = "ws_" + (++_wsIdCounter);
+      _wsConnections.set(wsId, this);
+
+      this.addEventListener("open", function () {
+        try {
+          emit({ url: wsUrl, method: "WS_OPEN", wsId: wsId, status: 0,
+            contentType: "websocket", responseHeaders: {}, body: null, base64Encoded: false });
+        } catch (_) {}
+      });
+
+      this.addEventListener("close", function (ev) {
+        try {
+          emit({ url: wsUrl, method: "WS_CLOSE", wsId: wsId, status: ev.code || 1000,
+            contentType: "websocket", responseHeaders: {}, body: ev.reason || "", base64Encoded: false });
+        } catch (_) {}
+        _wsConnections.delete(wsId);
+      });
 
       // Capture outbound messages
       const _origSend = this.send.bind(this);
@@ -222,29 +273,15 @@
             body = uint8ToBase64(data);
             base64Encoded = true;
           } else if (typeof Blob !== "undefined" && data instanceof Blob) {
-            // Blob — read asynchronously, emit after
             data.arrayBuffer().then(function (ab) {
-              emit({
-                url: wsUrl,
-                method: "WS_SEND",
-                status: 0,
-                contentType: "websocket",
-                responseHeaders: {},
-                body: uint8ToBase64(new Uint8Array(ab)),
-                base64Encoded: true,
-              });
+              emit({ url: wsUrl, method: "WS_SEND", wsId: wsId, status: 0,
+                contentType: "websocket", responseHeaders: {},
+                body: uint8ToBase64(new Uint8Array(ab)), base64Encoded: true });
             }).catch(function () {});
             return _origSend(data);
           }
-          emit({
-            url: wsUrl,
-            method: "WS_SEND",
-            status: 0,
-            contentType: "websocket",
-            responseHeaders: {},
-            body,
-            base64Encoded,
-          });
+          emit({ url: wsUrl, method: "WS_SEND", wsId: wsId, status: 0,
+            contentType: "websocket", responseHeaders: {}, body, base64Encoded });
         } catch (_) {}
         return _origSend(data);
       };
@@ -260,27 +297,14 @@
             base64Encoded = true;
           } else if (typeof Blob !== "undefined" && e.data instanceof Blob) {
             e.data.arrayBuffer().then(function (ab) {
-              emit({
-                url: wsUrl,
-                method: "WS_RECV",
-                status: 0,
-                contentType: "websocket",
-                responseHeaders: {},
-                body: uint8ToBase64(new Uint8Array(ab)),
-                base64Encoded: true,
-              });
+              emit({ url: wsUrl, method: "WS_RECV", wsId: wsId, status: 0,
+                contentType: "websocket", responseHeaders: {},
+                body: uint8ToBase64(new Uint8Array(ab)), base64Encoded: true });
             }).catch(function () {});
             return;
           }
-          emit({
-            url: wsUrl,
-            method: "WS_RECV",
-            status: 0,
-            contentType: "websocket",
-            responseHeaders: {},
-            body,
-            base64Encoded,
-          });
+          emit({ url: wsUrl, method: "WS_RECV", wsId: wsId, status: 0,
+            contentType: "websocket", responseHeaders: {}, body, base64Encoded });
         } catch (_) {}
       });
     }

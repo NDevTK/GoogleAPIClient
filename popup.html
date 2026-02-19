@@ -92,6 +92,21 @@
             placeholder="Operation name (optional)"
           />
         </div>
+        <div id="send-ws-console" class="hidden">
+          <div class="ws-console-header">
+            <div class="ws-url-row">
+              <span class="ws-label">WebSocket</span>
+              <span id="ws-console-url" class="ws-url-value"></span>
+            </div>
+            <div class="ws-status-row">
+              <span class="ws-label">Status:</span>
+              <span id="ws-console-status"></span>
+            </div>
+          </div>
+          <div id="ws-console-history" class="ws-history"></div>
+          <textarea id="ws-console-input" placeholder="Type a message..." rows="4"></textarea>
+          <button id="ws-console-send" type="button" class="ws-send-btn" disabled>Send Message</button>
+        </div>
       </div>
 
       <div class="send-actions">

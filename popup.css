@@ -246,6 +246,101 @@ nav {
   background: #3a1b1b;
   color: #e0784e;
 }
+
+/* ─── WebSocket Console ─── */
+#send-ws-console {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ws-console-header {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+.ws-url-row { margin-bottom: 4px; }
+.ws-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #484f58;
+  margin-right: 6px;
+}
+.ws-url-value {
+  font-size: 11px;
+  font-family: monospace;
+  color: #79c0ff;
+  word-break: break-all;
+}
+.ws-status-row { display: flex; align-items: center; }
+.ws-status-open { color: #3fb950; font-size: 11px; font-weight: 600; }
+.ws-status-connecting { color: #d29922; font-size: 11px; font-weight: 600; }
+.ws-status-closing { color: #f0883e; font-size: 11px; font-weight: 600; }
+.ws-status-closed { color: #f85149; font-size: 11px; font-weight: 600; }
+.ws-history {
+  max-height: 200px;
+  overflow-y: auto;
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 4px;
+  padding: 6px;
+}
+.ws-history:empty { display: none; }
+.ws-msg {
+  font-size: 11px;
+  font-family: monospace;
+  margin-bottom: 4px;
+  padding: 3px 6px;
+  border-radius: 3px;
+}
+.ws-msg-sent { background: #0d2818; border-left: 2px solid #3fb950; }
+.ws-msg-recv { background: #1a1a2e; border-left: 2px solid #58a6ff; }
+.ws-msg-error { background: #2d1117; border-left: 2px solid #f85149; color: #f85149; }
+.ws-msg-dir {
+  font-size: 9px;
+  text-transform: uppercase;
+  color: #484f58;
+  margin-right: 4px;
+}
+.ws-msg-time { font-size: 9px; color: #484f58; }
+.ws-msg-body {
+  margin: 2px 0 0 0;
+  padding: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 11px;
+  color: #c9d1d9;
+}
+#ws-console-input {
+  width: 100%;
+  min-height: 60px;
+  background: #161b22;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-family: monospace;
+  resize: vertical;
+  box-sizing: border-box;
+}
+#ws-console-input:focus { border-color: #58a6ff; outline: none; }
+.ws-send-btn {
+  display: block;
+  width: 100%;
+  background: #8957e5;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+.ws-send-btn:hover { background: #a371f7; }
+.ws-send-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+
 .badge-high {
   background: #3d1418;
   color: #f85149;

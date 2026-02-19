@@ -20,6 +20,7 @@
       responseHeaders: d.responseHeaders,
       body: d.body,
       base64Encoded: d.base64Encoded,
+      wsId: d.wsId || null,
     });
   });
   // Signal intercept.js that the relay is listening — replays buffered events
@@ -200,9 +201,38 @@
       sendResponse({ ok: true });
       return;
     }
-    if (msg.type !== "PAGE_FETCH") return;
-    handlePageFetch(msg).then(sendResponse);
-    return true; // async sendResponse
+    if (msg.type === "PAGE_FETCH") {
+      handlePageFetch(msg).then(sendResponse);
+      return true;
+    }
+    if (msg.type === "WS_SEND_MSG") {
+      document.dispatchEvent(new CustomEvent("__uasr_ws_send", {
+        detail: { wsId: msg.wsId, data: msg.data, binary: msg.binary || false }
+      }));
+      sendResponse({ ok: true });
+      return;
+    }
+    if (msg.type === "WS_QUERY_STATUS") {
+      const nonce = Math.random().toString(36).slice(2);
+      let replied = false;
+      const handler = (e) => {
+        if (replied || !e.detail || e.detail.nonce !== nonce) return;
+        replied = true;
+        document.removeEventListener("__uasr_ws_status", handler);
+        sendResponse({ readyState: e.detail.readyState });
+      };
+      document.addEventListener("__uasr_ws_status", handler);
+      document.dispatchEvent(new CustomEvent("__uasr_ws_query", {
+        detail: { wsId: msg.wsId, nonce: nonce }
+      }));
+      setTimeout(() => {
+        if (replied) return;
+        replied = true;
+        document.removeEventListener("__uasr_ws_status", handler);
+        sendResponse({ readyState: 3 });
+      }, 500);
+      return true;
+    }
   });
 
   // ─── Init ──────────────────────────────────────────────────────────────────
