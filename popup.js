@@ -73,8 +73,6 @@ function setBodyMode(mode) {
     isWs ? "none" : "";
   document.querySelector(".export-row").style.display =
     isWs ? "none" : "";
-  document.getElementById("send-response").style.display =
-    isWs ? "none" : "";
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────
@@ -188,8 +186,10 @@ document.addEventListener("DOMContentLoaded", async () => {
           tabId: currentTabId,
         });
 
-        // Reload form to reflect change, passing preserved data
-        loadVirtualSchema(svc, select.dataset.discoveryId, currentData);
+        // Reload form to reflect change, preserving current body mode
+        const savedBodyMode = currentBodyMode;
+        await loadVirtualSchema(svc, select.dataset.discoveryId, currentData);
+        if (currentBodyMode !== savedBodyMode) setBodyMode(savedBodyMode);
         // Re-render response tree so renamed field is immediately visible
         if (lastSendResult) {
           delete lastSendResult.discovery; // Clear stale snapshot so tabData is used
@@ -1741,7 +1741,7 @@ function renderResultBody(result) {
 
   // GraphQL: enhanced display with data/errors/extensions sections
   if (isGraphQLUrl(currentRequestUrl) && result.body.format === "json") {
-    const gqlHtml = renderGraphQLResponse(rawBody);
+    const gqlHtml = renderGraphQLResponse(rawBody, respSchema, responseSchemaId, doc);
     if (gqlHtml) return gqlHtml;
   }
 
@@ -2550,11 +2550,11 @@ function renderNDJSONResponse(bodyText) {
 
 // ─── GraphQL Renderer ───────────────────────────────────────────────────────
 
-function renderGraphQLResponse(bodyText) {
+function renderGraphQLResponse(bodyText, respSchema, responseSchemaId, doc) {
   const gql = parseGraphQLResponse(bodyText);
   if (!gql) return null; // Fall through to normal JSON rendering
 
-  let html = '<div class="pb-tree">';
+  let html = "";
 
   if (gql.errors) {
     html += `<div class="card card-compact-error">
@@ -2564,10 +2564,9 @@ function renderGraphQLResponse(bodyText) {
   }
 
   if (gql.data) {
-    html += `<div class="card card-compact">
-      <div class="card-label">Data</div>
-      <pre class="resp-body">${esc(JSON.stringify(gql.data, null, 2))}</pre>
-    </div>`;
+    const nodes = jsonToTree(gql.data);
+    html += `<div class="card-label">Data</div>` +
+      renderPbTree(nodes, respSchema, responseSchemaId, doc);
   }
 
   if (gql.extensions) {
@@ -2577,7 +2576,6 @@ function renderGraphQLResponse(bodyText) {
     </div>`;
   }
 
-  html += "</div>";
   return html;
 }
 
