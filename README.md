@@ -7,7 +7,7 @@ A Chrome Extension (MV3) that passively reverse-engineers APIs, learns their sch
 Browse any website. The extension works in the background:
 
 1. **Intercepts** every network request, extracting URLs, headers, parameters, and body schemas.
-2. **Captures** response bodies via a main-world fetch/XHR wrapper — no Chrome debugger bar.
+2. **Captures** response bodies via main-world fetch/XHR/WebSocket/EventSource/sendBeacon wrappers — no Chrome debugger bar.
 3. **Decodes** traffic through a protocol chain: async chunked, batchexecute, gRPC-Web, SSE, NDJSON, multipart, GraphQL, JSON, and Protobuf.
 4. **Learns** API structure (VDD — Value-Driven Discovery) by merging schemas from every observed request and response into a unified service map.
 5. **Analyzes** JavaScript bundles with a scope-aware AST engine that extracts API call sites, value constraints, proto field maps, and security vulnerabilities — before any network call is made.
@@ -40,8 +40,10 @@ Open the popup to inspect, test, and export everything it found.
 | **Google Async Chunked** | Hex-length-prefixed streaming with JSPB extraction |
 | **GraphQL** | Parse query/variables/operationName, render data/errors/extensions |
 | **SSE / NDJSON / Multipart** | Server-Sent Events, newline-delimited JSON, multipart batch |
+| **WebSocket** | Intercepts send/receive on live connections, with an interactive console for sending messages through captured sockets |
+| **EventSource / sendBeacon** | Captures SSE streams and beacon payloads |
 
-Format badges (PROTO, JSPB, BATCH, gRPC-WEB, SSE, NDJSON, GRAPHQL, MULTIPART, ASYNC) appear on request log entries.
+Format badges (PROTO, JSPB, BATCH, gRPC-WEB, SSE, NDJSON, GRAPHQL, MULTIPART, ASYNC, WEBSOCKET, BEACON) appear on request log entries.
 
 ### JavaScript Security Code Review
 
@@ -56,10 +58,12 @@ AST-based analysis using Babel's scope system — no regex, no string matching, 
 
 ### Replay & Export
 
+- **WebSocket Console**: Click any WebSocket log entry to open an interactive console — shows connection status (OPEN/CLOSED), message history, and a composer to send messages through the live socket.
 - **Session-Aware Replay**: Executes requests in the target page's context via `PAGE_FETCH` relay, automatically attaching cookies and session state.
 - **Form Builder**: Auto-generated input fields from learned schemas — text inputs, enum dropdowns (from AST value constraints and observed traffic), nested message expansion, repeated field support.
 - **Auto-Determined Encoding**: Content-Type and body mode (form/raw/GraphQL) set automatically from schema or replayed request headers.
 - **Field Renaming**: Click the pencil icon to rename any field or parameter. Names persist in IndexedDB across sessions.
+- **HAR Export**: Download the visible request log as a HAR 1.2 file for use with Burp Suite, ZAP, or browser DevTools.
 - **Export Formats**: curl, fetch (JavaScript), Python (requests library).
 - **OpenAPI Export**: Service-level export as OpenAPI 3.0.3 with learned schemas, field aliases, and `x-field-number` extensions for protobuf round-trip.
 - **OpenAPI Import**: Import OpenAPI/Swagger specs to pre-populate schemas, merging with locally-learned data.
@@ -69,13 +73,15 @@ AST-based analysis using Babel's scope system — no regex, no string matching, 
 - **Multi-Tab Filtering**: View requests from the active tab, all tabs, or a specific closed tab.
 - **Session Persistence**: Logs stored in `chrome.storage.session` — survive MV3 service worker restarts, auto-clear on browser close.
 - **Closed Tab Retention**: Logs from closed tabs remain accessible.
+- **Search & Filter**: Text filter across URL, method, service, content type, and tab title.
+- **Virtual Scroll**: Handles large request logs without DOM bloat.
 
 ## UI Panels
 
 | Panel | Purpose |
 |-------|---------|
 | **Requests** | Live request log with service grouping, protocol badges, and cross-tab filtering |
-| **Send** | Manual testing — service/method selector, form builder with dropdowns, headers editor, replay, export (curl/fetch/Python/OpenAPI) |
+| **Send** | Manual testing — service/method selector, form builder with dropdowns, headers editor, replay, WebSocket console, export (curl/fetch/Python/HAR/OpenAPI) |
 | **Security** | All security findings sorted by severity with type badges, source classification, and code locations |
 | **Keys** | Extracted API keys and tokens with origin, timestamps, and associated services |
 
@@ -94,7 +100,7 @@ npm install && node build.js
 ## Architecture
 
 ```
-intercept.js       Main-world fetch/XHR wrapper (response body capture)
+intercept.js       Main-world fetch/XHR/WebSocket/EventSource/sendBeacon wrapper (response body capture)
 content.js         Isolated-world content script (DOM scanning, PAGE_FETCH relay, intercept relay)
 background.js      Service worker (request interception, VDD learning, AST orchestration, export)
 popup.js           Popup controller (rendering, replay, form builder, security panel)
@@ -159,10 +165,9 @@ GlobalStore uses IndexedDB (inaccessible to content scripts) instead of `chrome.
 ## Testing
 
 ```
-node test-ast.js
+node test-ast.js    # 527 tests — AST engine
+node test-lib.js    # 180 tests — protobuf, discovery, stats, chains
 ```
-
-Runs the AST engine test suite (527 tests) covering API call site extraction, inter-procedural tracing, proto detection, value constraints, jQuery/Axios library support, security sink detection, taint tracking, and dangerous pattern detection.
 
 ## License
 
