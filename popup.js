@@ -661,7 +661,7 @@ function renderSecurityPanel() {
     return (sevOrder[a.item.severity] || 2) - (sevOrder[b.item.severity] || 2);
   });
 
-  var html = '<div class="section-header">Security Findings <span class="badge badge-status">' + allItems.length + '</span></div>';
+  var html = '<div class="section-header">Vulnerabilities <span class="badge badge-status">' + allItems.length + '</span></div>';
 
   for (var i = 0; i < allItems.length; i++) {
     var entry = allItems[i];

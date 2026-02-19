@@ -7,7 +7,7 @@ A Chrome Extension (MV3) that passively reverse-engineers APIs, learns their sch
 Browse any website. The extension works in the background:
 
 1. **Intercepts** every network request, extracting URLs, headers, parameters, and body schemas.
-2. **Captures** response bodies via main-world fetch/XHR/WebSocket/EventSource/sendBeacon wrappers — no Chrome debugger bar.
+2. **Captures** response bodies via main-world fetch/XHR/WebSocket/EventSource/sendBeacon wrappers, plus postMessage and MessageChannel listeners — no Chrome debugger bar.
 3. **Decodes** traffic through a protocol chain: async chunked, batchexecute, gRPC-Web, SSE, NDJSON, multipart, GraphQL, JSON, and Protobuf.
 4. **Learns** API structure (VDD — Value-Driven Discovery) by merging schemas from every observed request and response into a unified service map.
 5. **Analyzes** JavaScript bundles with a scope-aware AST engine that extracts API call sites, value constraints, proto field maps, and security vulnerabilities — before any network call is made.
@@ -41,9 +41,11 @@ Open the popup to inspect, test, and export everything it found.
 | **GraphQL** | Parse query/variables/operationName, render data/errors/extensions |
 | **SSE / NDJSON / Multipart** | Server-Sent Events, newline-delimited JSON, multipart batch |
 | **WebSocket** | Intercepts send/receive on live connections, with an interactive console for sending messages through captured sockets |
+| **postMessage** | Captures cross-frame messages, grouped by source origin, with reply capability via stored `event.source` references |
+| **MessageChannel** | Captures transferred ports from postMessage, instruments for bidirectional message logging, with send capability via stored port references |
 | **EventSource / sendBeacon** | Captures SSE streams and beacon payloads |
 
-Format badges (PROTO, JSPB, BATCH, gRPC-WEB, SSE, NDJSON, GRAPHQL, MULTIPART, ASYNC, WEBSOCKET, BEACON) appear on request log entries.
+Format badges (PROTO, JSPB, BATCH, gRPC-WEB, SSE, NDJSON, GRAPHQL, MULTIPART, ASYNC, WEBSOCKET, POSTMESSAGE, MSGCHANNEL, BEACON) appear on request log entries.
 
 ### JavaScript Security Code Review
 
@@ -58,7 +60,7 @@ AST-based analysis using Babel's scope system — no regex, no string matching, 
 
 ### Replay & Export
 
-- **WebSocket Console**: Click any WebSocket log entry to open an interactive console — shows connection status (OPEN/CLOSED), message history, and a composer to send messages through the live socket.
+- **Message Console**: Click any WebSocket, postMessage, or MessageChannel log entry to open an interactive console — shows connection status, message history, and a composer to send messages through the live socket, `event.source` reference, or transferred port.
 - **Session-Aware Replay**: Executes requests in the target page's context via `PAGE_FETCH` relay, automatically attaching cookies and session state.
 - **Form Builder**: Auto-generated input fields from learned schemas — text inputs, enum dropdowns (from AST value constraints and observed traffic), nested message expansion, repeated field support.
 - **Auto-Determined Encoding**: Content-Type and body mode (form/raw/GraphQL) set automatically from schema or replayed request headers.
@@ -81,8 +83,8 @@ AST-based analysis using Babel's scope system — no regex, no string matching, 
 | Panel | Purpose |
 |-------|---------|
 | **Requests** | Live request log with service grouping, protocol badges, and cross-tab filtering |
-| **Send** | Manual testing — service/method selector, form builder with dropdowns, headers editor, replay, WebSocket console, export (curl/fetch/Python/HAR/OpenAPI) |
-| **Security** | All security findings sorted by severity with type badges, source classification, and code locations |
+| **Send** | Manual testing — service/method selector, form builder with dropdowns, headers editor, replay, message console (WebSocket/postMessage/MessageChannel), export (curl/fetch/Python/HAR/OpenAPI) |
+| **Vulns** | All security findings sorted by severity with type badges, source classification, and code locations |
 | **Keys** | Extracted API keys and tokens with origin, timestamps, and associated services |
 
 ## Installation
@@ -101,7 +103,7 @@ npm install && node build.js
 
 ```
 intercept.js       Main-world fetch/XHR/WebSocket/EventSource/sendBeacon wrapper (response body capture)
-content.js         Isolated-world content script (DOM scanning, PAGE_FETCH relay, intercept relay)
+content.js         Isolated-world content script (DOM scanning, PAGE_FETCH relay, intercept relay, postMessage/MessageChannel listener)
 background.js      Service worker (request interception, VDD learning, AST orchestration, export)
 popup.js           Popup controller (rendering, replay, form builder, security panel)
 popup.html/css     Popup markup and styles
@@ -119,6 +121,8 @@ lib/
 
 ```
 Page JS ──→ intercept.js (main world) ──→ CustomEvent ──→ content.js ──→ background.js
+                                                                              │
+Cross-frame postMessage / MessageChannel ──→ content.js (message listener) ──→│
                                                                               │
 Browser ──→ webRequest API ─────────────────────────────────────────→ background.js
                                                                               │
