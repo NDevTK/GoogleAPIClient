@@ -97,14 +97,6 @@
     } catch (_) {}
   });
 
-  document.addEventListener("__uasr_ws_query", function (e) {
-    if (!e.detail) return;
-    var wsId = e.detail.wsId, nonce = e.detail.nonce;
-    var ws = _wsConnections.get(wsId);
-    document.dispatchEvent(new CustomEvent("__uasr_ws_status", {
-      detail: { wsId: wsId, nonce: nonce, readyState: ws ? ws.readyState : 3 }
-    }));
-  });
 
   // ─── fetch() wrapper ───────────────────────────────────────────────────────
 

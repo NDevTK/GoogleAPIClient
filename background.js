@@ -3787,21 +3787,11 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
       if (tabId == null) return;
       const conns = _wsConnState.get(tabId);
       const conn = conns?.get(msg.wsId);
-      if (!conn || conn.readyState === 3) {
-        sendResponse({ readyState: 3, url: conn?.url || null });
-        return;
-      }
-      chrome.tabs.sendMessage(tabId, {
-        type: "WS_QUERY_STATUS",
-        wsId: msg.wsId,
-      }).then((result) => {
-        conn.readyState = result.readyState;
-        sendResponse({ readyState: result.readyState, url: conn.url });
-      }).catch(() => {
-        conn.readyState = 3;
-        sendResponse({ readyState: 3, url: conn.url });
+      sendResponse({
+        readyState: conn ? conn.readyState : 3,
+        url: conn?.url || null,
       });
-      return true;
+      return;
     }
 
     case "BUILD_REQUEST": {
