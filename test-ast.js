@@ -259,8 +259,8 @@ test("Equality chain constraint", `
 
 console.log("\n=== Proto detection ===\n");
 
-test("Proto enum detection", `
-  var Status = { UNKNOWN: 0, ACTIVE: 1, INACTIVE: 2, DELETED: 3 };
+test("Proto enum detection (bidirectional map)", `
+  var Status = { UNKNOWN: 0, ACTIVE: 1, INACTIVE: 2, DELETED: 3, 0: "UNKNOWN", 1: "ACTIVE", 2: "INACTIVE", 3: "DELETED" };
 `, function(r) {
   return r.protoEnums.length === 1 &&
     r.protoEnums[0].values.ACTIVE === 1;
@@ -6013,6 +6013,228 @@ test("Security: .then() with named handler function", `
 `, function(r) {
   return r.securitySinks.some(function(s) {
     return s.type === "xss" && s.sink === "innerHTML" && s.sourceType === "user-controlled";
+  });
+});
+
+// === Scope-Aware _containsNetworkSink (V1) ===
+console.log("\n=== Scope-Aware Network Sink Detection ===\n");
+
+test("V1: shadowed fetch is NOT a network sink", `
+  (function() {
+    var fetch = function(url) { return {then: function(){}}; };
+    fetch("/api/local");
+  })();
+`, function(r) {
+  // Since fetch is shadowed by a local variable, /api/local should NOT appear as a fetch call site
+  return !r.fetchCallSites.some(function(s) { return s.url === "/api/local"; });
+});
+
+test("V1: global fetch IS a network sink", `
+  function doRequest(url) {
+    return fetch(url);
+  }
+  doRequest("/api");
+`, function(r) {
+  return r.fetchCallSites.some(function(s) { return s.url === "/api"; });
+});
+
+test("V1: .open() on non-XHR object is NOT detected as XHR network sink", `
+  function sendData(method, url) {
+    var channel = new BroadcastChannel("test");
+    channel.open(method, url);
+  }
+  sendData("GET", "/api/data");
+`, function(r) {
+  // channel.open() should NOT be treated as XMLHttpRequest.open()
+  // since channel is a BroadcastChannel, not XMLHttpRequest
+  return !r.fetchCallSites.some(function(s) { return s.url === "/api/data"; });
+});
+
+test("V1: .open() on XMLHttpRequest IS a network sink", `
+  function doXHR(method, url) {
+    var xhr = new XMLHttpRequest();
+    xhr.open(method, url);
+    xhr.send();
+  }
+  doXHR("GET", "/api/data");
+`, function(r) {
+  return r.fetchCallSites.some(function(s) { return s.url === "/api/data"; });
+});
+
+// === Scope-Aware Taint Source Classification (V2/Phase 2) ===
+console.log("\n=== Scope-Aware Taint Source Classification ===\n");
+
+test("V2: shadowed location is NOT a taint source", `
+  function safe() {
+    var location = { hash: "#safe" };
+    document.body.innerHTML = location.hash;
+  }
+`, function(r) {
+  return r.securitySinks.length === 0;
+});
+
+test("V2: global location.hash IS a taint source", `
+  document.body.innerHTML = location.hash;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.source === "location.hash";
+  });
+});
+
+test("V2: window.location.hash with global window IS a taint source", `
+  document.body.innerHTML = window.location.hash;
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.source === "location.hash";
+  });
+});
+
+test("V2: self.document.referrer IS a taint source", `
+  eval(self.document.referrer);
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "eval" && s.source === "document.referrer";
+  });
+});
+
+test("V2: shadowed window.location is NOT a taint source", `
+  function safe() {
+    var window = { location: { hash: "#safe" } };
+    document.body.innerHTML = window.location.hash;
+  }
+`, function(r) {
+  return r.securitySinks.length === 0;
+});
+
+// === Origin Check Walker (V3) ===
+console.log("\n=== Origin Check Walker (V3) ===\n");
+
+test("V3: origin check inside for loop is detected", `
+  window.addEventListener("message", function(e) {
+    for (var i = 0; i < allowedOrigins.length; i++) {
+      if (e.origin === allowedOrigins[i]) {
+        eval(e.data);
+      }
+    }
+  });
+`, function(r) {
+  // Should classify as "strong" origin check — no postmessage-no-origin warning
+  return !r.dangerousPatterns.some(function(d) { return d.type === "postmessage-no-origin"; });
+});
+
+test("V3: origin check inside while loop is detected", `
+  window.addEventListener("message", function(e) {
+    var found = false;
+    var i = 0;
+    while (i < origins.length) {
+      if (e.origin === origins[i]) found = true;
+      i++;
+    }
+    if (found) eval(e.data);
+  });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(d) { return d.type === "postmessage-no-origin"; });
+});
+
+test("V3: origin check inside switch statement is detected", `
+  window.addEventListener("message", function(e) {
+    switch(true) {
+      case e.origin === "https://trusted.com":
+        eval(e.data);
+        break;
+    }
+  });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(d) { return d.type === "postmessage-no-origin"; });
+});
+
+// === Type Tracker (Phase 3) ===
+console.log("\n=== Type Tracker ===\n");
+
+test("Type: new XMLHttpRequest() → .open() correctly identified as XHR sink", `
+  function sendRequest(url) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", url);
+    xhr.send();
+  }
+  sendRequest("/api/data");
+`, function(r) {
+  return r.fetchCallSites.some(function(s) { return s.url === "/api/data" && s.method === "GET"; });
+});
+
+test("Type: Array literal .forEach() propagates taint", `
+  var items = location.hash.split(",");
+  items.forEach(function(item) {
+    document.body.innerHTML = item;
+  });
+`, function(r) {
+  return r.securitySinks.some(function(s) { return s.type === "xss"; });
+});
+
+// === CFG + Sanitizer Path Analysis (Phase 4) ===
+console.log("\n=== CFG + Sanitizer Path Analysis ===\n");
+
+test("CFG: sanitized with encodeURIComponent before href → info severity", `
+  function safe() {
+    var input = location.hash;
+    var sanitized = encodeURIComponent(input);
+    document.body.innerHTML = sanitized;
+  }
+`, function(r) {
+  if (r.securitySinks.length === 0) return false;
+  return r.securitySinks.some(function(s) {
+    return s.sanitized === true && s.severity === "info";
+  });
+});
+
+test("CFG: unsanitized location.hash → innerHTML is high severity", `
+  function unsafe() {
+    var input = location.hash;
+    document.body.innerHTML = input;
+  }
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.severity === "high" && !s.sanitized;
+  });
+});
+
+test("CFG: DOMPurify.sanitize() before innerHTML → info severity", `
+  function safe() {
+    var dirty = location.hash;
+    var clean = DOMPurify.sanitize(dirty);
+    document.body.innerHTML = clean;
+  }
+`, function(r) {
+  if (r.securitySinks.length === 0) return false;
+  return r.securitySinks.some(function(s) {
+    return s.sanitized === true && s.severity === "info";
+  });
+});
+
+test("CFG: parseInt() before eval → info severity (number conversion kills XSS)", `
+  function safe() {
+    var input = location.hash;
+    var num = parseInt(input);
+    eval(num);
+  }
+`, function(r) {
+  if (r.securitySinks.length === 0) return false;
+  return r.securitySinks.some(function(s) {
+    return s.sanitized === true && s.severity === "info";
+  });
+});
+
+test("CFG: partial sanitization (if branch only) remains high", `
+  function partial(flag) {
+    var input = location.hash;
+    if (flag) {
+      input = encodeURIComponent(input);
+    }
+    document.body.innerHTML = input;
+  }
+`, function(r) {
+  return r.securitySinks.some(function(s) {
+    return s.type === "xss" && s.severity === "high";
   });
 });
 
