@@ -1177,6 +1177,8 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
       // $httpHeaders is a gRPC-Web transport mechanism (CRLF-separated headers in URL),
       // not an API parameter. Putting it in a form input strips \r\n and corrupts the URL.
       if (name === "$httpHeaders") return;
+      // $ct is a multipart batch Content-Type transport param, not an API parameter.
+      if (name === "$ct") return;
       if (!m.parameters[name]) {
         m.parameters[name] = {
           type: isNaN(value) ? "string" : "number",
@@ -1263,6 +1265,40 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
           mergeSchemaInto(doc, schemaName, newSchema);
         }
       }
+    } else if (isMultipartBatch(headers["content-type"])) {
+      // Multipart batch: each part is an individual HTTP sub-request with its own body
+      const parts = parseMultipartBatchRequest(text, headers["content-type"]);
+      if (parts) {
+        for (const part of parts) {
+          // Derive method name from part path
+          const pathSegs = part.path.split("?")[0].split("/").filter(Boolean)
+            .filter((s) => s.length <= 32)
+            .map((s) => looksLikeDynamicSegment(s) ? "_id" : s);
+          const partMethodName = part.method.toLowerCase() + "_" +
+            (pathSegs.join("_") || "batch_part");
+          const partMethodId = `${interfaceName.replace(/\//g, ".")}.${partMethodName}`;
+          if (!doc.resources.learned.methods[partMethodName]) {
+            doc.resources.learned.methods[partMethodName] = {
+              id: partMethodId,
+              path: part.path,
+              httpMethod: part.method,
+              parameters: {},
+              request: null,
+              _batchPart: true,
+            };
+          }
+          const partM = doc.resources.learned.methods[partMethodName];
+          if (part.body) {
+            try {
+              const json = JSON.parse(part.body);
+              const schemaName = `${partMethodName.replace(/[^a-zA-Z0-9]/g, "")}Request`;
+              partM.request = { $ref: schemaName };
+              const newSchema = generateSchemaFromJson(json, schemaName, doc.schemas);
+              mergeSchemaInto(doc, schemaName, newSchema);
+            } catch (_) {}
+          }
+        }
+      }
     } else if (
       headers["content-type"]?.includes("grpc-web") ||
       headers["content-type"]?.includes("grpc+proto")
@@ -1342,6 +1378,7 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
   if (!url.pathname.includes("batchexecute")) {
     url.searchParams.forEach((value, name) => {
       if (name === "key" || name === "api_key") return;
+      if (name === "$httpHeaders" || name === "$ct") return;
       if (!m._stats.params[name]) m._stats.params[name] = createParamStats();
       updateParamStats(m._stats.params[name], value);
     });
@@ -4298,7 +4335,27 @@ async function buildExportRequest(tabId, msg) {
 
   let body = null;
   if (msg.httpMethod !== "GET" && msg.httpMethod !== "DELETE" && msg.body) {
-    if (url.includes("batchexecute") && msg.body.mode === "form") {
+    // Check for multipart batch sub-request
+    const _exportBatchMethod = (() => {
+      if (!msg.service || !msg.methodId) return null;
+      const docEntry = tab.discoveryDocs.get(msg.service) || globalStore.discoveryDocs.get(msg.service);
+      if (!docEntry?.doc) return null;
+      const mName = msg.methodId.split(".").pop();
+      return docEntry.doc.resources?.learned?.methods?.[mName];
+    })();
+
+    if (_exportBatchMethod?._batchPart && msg.body.mode === "form") {
+      const fields = msg.body.formData?.fields || [];
+      const jsonBody = JSON.stringify(encodeFormToJson(fields));
+      const partPath = _exportBatchMethod.path;
+      const partMethod = _exportBatchMethod.httpMethod || "GET";
+      const boundary = "batch_" + Date.now();
+      body = `--${boundary}\r\nContent-Type: application/http\r\n\r\n` +
+        `${partMethod} ${partPath} HTTP/1.1\r\n` +
+        `Content-Type: application/json\r\nAccept: application/json\r\n\r\n` +
+        jsonBody + `\r\n--${boundary}--`;
+      headers["Content-Type"] = `multipart/mixed; boundary=${boundary}`;
+    } else if (url.includes("batchexecute") && msg.body.mode === "form") {
       const fields = msg.body.formData?.fields || [];
       const argsArray = encodeFormToJspb(fields);
       const innerJson = JSON.stringify(argsArray);
@@ -4911,7 +4968,28 @@ async function executeSendRequest(tabId, msg) {
   let bodyEncoding = null;
 
   if (msg.httpMethod !== "GET" && msg.httpMethod !== "DELETE" && msg.body) {
-    if (url.includes("batchexecute") && msg.body.mode === "form") {
+    // Check if this is a multipart batch sub-request (_batchPart methods)
+    const _batchPartMethod = (() => {
+      if (!service || !methodId) return null;
+      const docEntry = tab.discoveryDocs.get(service) || globalStore.discoveryDocs.get(service);
+      if (!docEntry?.doc) return null;
+      const mName = methodId.split(".").pop();
+      return docEntry.doc.resources?.learned?.methods?.[mName];
+    })();
+
+    if (_batchPartMethod?._batchPart && msg.body.mode === "form") {
+      // Multipart batch: wrap form fields in a single-part multipart body
+      const fields = msg.body.formData?.fields || [];
+      const jsonBody = JSON.stringify(encodeFormToJson(fields));
+      const partPath = _batchPartMethod.path;
+      const partMethod = _batchPartMethod.httpMethod || "GET";
+      const boundary = "batch_" + Date.now();
+      body = `--${boundary}\r\nContent-Type: application/http\r\n\r\n` +
+        `${partMethod} ${partPath} HTTP/1.1\r\n` +
+        `Content-Type: application/json\r\nAccept: application/json\r\n\r\n` +
+        jsonBody + `\r\n--${boundary}--`;
+      headers["Content-Type"] = `multipart/mixed; boundary=${boundary}`;
+    } else if (url.includes("batchexecute") && msg.body.mode === "form") {
       // Special handling for batchexecute: wrap in f.req envelope
       const fields = msg.body.formData?.fields || [];
       const argsArray = encodeFormToJspb(fields);
