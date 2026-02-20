@@ -88,6 +88,11 @@ function throttledLoadState() {
   }, 100);
 }
 
+// Change-detection fingerprints — skip DOM rebuild when data hasn't changed
+let _lastKeysFp = "";
+let _lastSecFp = "";
+let _lastLogFp = "";
+
 document.addEventListener("DOMContentLoaded", async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTabId = tab?.id ?? null;
@@ -142,6 +147,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("log-tab-filter").addEventListener("change", async (e) => {
     const val = e.target.value;
     logFilter = val === "active" ? "active" : val === "all" ? "all" : parseInt(val, 10);
+    _lastLogFp = "";
     await loadRequestLog();
     renderResponsePanel();
   });
@@ -150,6 +156,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Request log search filter
   document.getElementById("log-search").addEventListener("input", (e) => {
     logSearchQuery = e.target.value.toLowerCase().trim();
+    _lastLogFp = "";
     renderResponsePanel();
   });
 
@@ -525,6 +532,7 @@ async function clearState() {
   await chrome.runtime.sendMessage({ type: "CLEAR_TAB", tabId: currentTabId });
   tabData = null;
   allTabsData = null;
+  _lastKeysFp = _lastSecFp = _lastLogFp = "";
   render();
 }
 
@@ -593,9 +601,12 @@ function renderDataPanel() {
   const keysContainer = document.getElementById("data-keys");
   const empty = document.getElementById("data-empty");
 
-  keysContainer.innerHTML = "";
-
   const keys = tabData?.apiKeys ? Object.entries(tabData.apiKeys) : [];
+  const fp = keys.length + ":" + keys.map(k => k[0]).join(",");
+  if (fp === _lastKeysFp) return;
+  _lastKeysFp = fp;
+
+  keysContainer.innerHTML = "";
   const hasData = keys.length > 0;
   empty.style.display = hasData ? "none" : "block";
 
@@ -630,9 +641,18 @@ function renderDataPanel() {
 function renderSecurityPanel() {
   const container = document.getElementById("security-findings");
   const empty = document.getElementById("security-empty");
-  container.innerHTML = "";
 
   const findings = tabData?.securityFindings || [];
+  // Fingerprint: count of sinks + patterns across all findings
+  let secCount = 0;
+  for (let i = 0; i < findings.length; i++) {
+    secCount += (findings[i].securitySinks || []).length + (findings[i].dangerousPatterns || []).length;
+  }
+  const fp = findings.length + ":" + secCount;
+  if (fp === _lastSecFp) return;
+  _lastSecFp = fp;
+
+  container.innerHTML = "";
 
   // Flatten all sinks and patterns with their source URL
   var allItems = [];
@@ -2495,6 +2515,12 @@ function renderResponsePanel() {
         (r._tabTitle && r._tabTitle.toLowerCase().includes(logSearchQuery));
     });
   }
+
+  // Fingerprint: skip full rebuild if entries unchanged
+  const lastId = entries.length > 0 ? (entries[entries.length - 1].id || entries[entries.length - 1].timestamp) : "";
+  const fp = entries.length + ":" + lastId;
+  if (fp === _lastLogFp && _vs.scrollHandler) return;
+  _lastLogFp = fp;
 
   // Detach old scroll handler if entries changed
   if (_vs.scrollHandler) {
