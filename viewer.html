@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Source Viewer</title>
+  <link rel="stylesheet" href="lib/prism-theme.css">
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+  <div id="toolbar">
+    <span id="source-url"></span>
+    <select id="file-picker"></select>
+    <button id="btn-focus" title="Toggle focused view (show only finding-related code)">Focus</button>
+    <span id="status"></span>
+  </div>
+  <div id="code-container">
+    <pre id="code-pre" class="line-numbers"><code id="code-output" class="language-javascript"></code></pre>
+  </div>
+  <script src="lib/babel-bundle.js"></script>
+  <script src="lib/prism.js" data-manual></script>
+  <script src="viewer.js"></script>
+</body>
+</html>

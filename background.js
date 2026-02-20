@@ -4005,6 +4005,140 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
       return;
     }
 
+    case "GET_SCRIPT_SOURCE": {
+      var scriptUrl = msg.scriptUrl;
+      if (!scriptUrl) { sendResponse({ error: "no URL" }); return; }
+      var tab = tabId != null ? getTab(tabId) : null;
+      var _slFindings = tab ? mergedSecurityFindings(tab).filter(function(f) { return f.sourceUrl === scriptUrl; }) : [];
+
+      // Try script buffers first (already fetched for AST analysis)
+      var _slBuf = _scriptBuffers.get(tabId);
+      if (_slBuf) {
+        for (var _sbi = 0; _sbi < _slBuf.scripts.length; _sbi++) {
+          if (_slBuf.scripts[_sbi].url === scriptUrl && _slBuf.scripts[_sbi].code) {
+            sendResponse({ code: _slBuf.scripts[_sbi].code, findings: _slFindings });
+            return;
+          }
+        }
+      }
+
+      // Try request log (captured response body from fetch/XHR)
+      if (tab && tab.requestLog) {
+        for (var _sli = tab.requestLog.length - 1; _sli >= 0; _sli--) {
+          var _slEntry = tab.requestLog[_sli];
+          if (_slEntry.url === scriptUrl && _slEntry.responseBody) {
+            var _slCode = _slEntry.responseBase64 ? atob(_slEntry.responseBody) : _slEntry.responseBody;
+            sendResponse({ code: _slCode, findings: _slFindings });
+            return;
+          }
+        }
+      }
+
+      // Re-fetch the script (extension has <all_urls>)
+      fetch(scriptUrl).then(function(r) {
+        if (!r.ok) throw new Error(r.status + " " + r.statusText);
+        return r.text();
+      }).then(function(code) {
+        sendResponse({ code: code, findings: _slFindings });
+      }).catch(function(e) {
+        sendResponse({ error: e.message });
+      });
+      return true; // async sendResponse
+    }
+
+    case "GET_TAB_SCRIPTS": {
+      var scripts = new Set();
+      // From script buffers (all scripts seen on the page)
+      var _tsBuf = _scriptBuffers.get(tabId);
+      if (_tsBuf) {
+        for (var _tsi = 0; _tsi < _tsBuf.scripts.length; _tsi++) {
+          if (_tsBuf.scripts[_tsi].url) scripts.add(_tsBuf.scripts[_tsi].url);
+        }
+      }
+      // From tab security findings (survives SW restart via _securityFindings)
+      var _tsTab = tabId != null ? getTab(tabId) : null;
+      if (_tsTab) {
+        var _tsFindings = mergedSecurityFindings(_tsTab);
+        for (var _tsfi = 0; _tsfi < _tsFindings.length; _tsfi++) {
+          if (_tsFindings[_tsfi].sourceUrl) scripts.add(_tsFindings[_tsfi].sourceUrl);
+        }
+      }
+      // From globalStore.securityFindings (persisted in IndexedDB, survives SW restart)
+      for (var [_tsKey] of globalStore.securityFindings) {
+        if (_tsKey && !_tsKey.startsWith("unknown_")) scripts.add(_tsKey);
+      }
+      sendResponse([...scripts]);
+      return;
+    }
+
+    case "FIND_DEFINITION": {
+      var _fdName = msg.name;
+      var _fdExclude = msg.excludeUrl || "";
+      if (!_fdName) { sendResponse(null); return; }
+
+      // Escape regex special chars in the function name
+      var _fdEsc = _fdName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      var _fdPat = new RegExp("(?:function\\s+" + _fdEsc + "\\s*\\(|(?:var|let|const|class)\\s+" + _fdEsc + "\\b)");
+
+      // Search script buffers first (in-memory, fast)
+      var _fdBuf = _scriptBuffers.get(tabId);
+      if (_fdBuf) {
+        for (var _fdi = 0; _fdi < _fdBuf.scripts.length; _fdi++) {
+          var _fdEntry = _fdBuf.scripts[_fdi];
+          if (_fdEntry.url === _fdExclude || !_fdEntry.code) continue;
+          var _fdMatch = _fdPat.exec(_fdEntry.code);
+          if (_fdMatch) {
+            var _fdLine = _fdEntry.code.substring(0, _fdMatch.index).split("\n").length;
+            sendResponse({ sourceUrl: _fdEntry.url, line: _fdLine });
+            return;
+          }
+        }
+      }
+
+      // Fallback: collect script URLs from findings, fetch on-demand
+      var _fdUrls = new Set();
+      var _fdTab = tabId != null ? getTab(tabId) : null;
+      if (_fdTab) {
+        var _fdFindings = mergedSecurityFindings(_fdTab);
+        for (var _fdfi = 0; _fdfi < _fdFindings.length; _fdfi++) {
+          if (_fdFindings[_fdfi].sourceUrl) _fdUrls.add(_fdFindings[_fdfi].sourceUrl);
+        }
+      }
+      for (var [_fdKey] of globalStore.securityFindings) {
+        if (_fdKey && !_fdKey.startsWith("unknown_")) _fdUrls.add(_fdKey);
+      }
+      // Remove already-searched buffer URLs and excluded URL
+      if (_fdBuf) {
+        for (var _fdb = 0; _fdb < _fdBuf.scripts.length; _fdb++) {
+          _fdUrls.delete(_fdBuf.scripts[_fdb].url);
+        }
+      }
+      _fdUrls.delete(_fdExclude);
+
+      if (_fdUrls.size === 0) { sendResponse(null); return; }
+
+      // Fetch each script URL and search for the definition
+      var _fdArr = [..._fdUrls];
+      (function _fdSearch(idx) {
+        if (idx >= _fdArr.length) { sendResponse(null); return; }
+        fetch(_fdArr[idx]).then(function(r) {
+          if (!r.ok) throw new Error("not ok");
+          return r.text();
+        }).then(function(code) {
+          var m = _fdPat.exec(code);
+          if (m) {
+            var line = code.substring(0, m.index).split("\n").length;
+            sendResponse({ sourceUrl: _fdArr[idx], line: line });
+          } else {
+            _fdSearch(idx + 1);
+          }
+        }).catch(function() {
+          _fdSearch(idx + 1);
+        });
+      })(0);
+      return true; // async sendResponse
+    }
+
     case "GET_ENDPOINT_SCHEMA": {
       if (tabId == null) return;
       // Pass service/methodId if available (for virtual endpoints)

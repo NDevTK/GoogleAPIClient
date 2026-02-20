@@ -1,0 +1,177 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: #161b22;
+  border-bottom: 1px solid #21262d;
+  flex-shrink: 0;
+  gap: 12px;
+}
+
+#source-url {
+  font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+  font-size: 12px;
+  color: #58a6ff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+#status {
+  font-size: 11px;
+  color: #8b949e;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+#status .badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 500;
+  margin-left: 4px;
+}
+
+.badge-count {
+  background: #1c2536;
+  color: #79c0ff;
+}
+
+.badge-high {
+  background: #3d1418;
+  color: #f85149;
+}
+
+/* File picker */
+#file-picker {
+  font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+  font-size: 11px;
+  background: #0d1117;
+  color: #c9d1d9;
+  border: 1px solid #21262d;
+  border-radius: 4px;
+  padding: 2px 6px;
+  max-width: 200px;
+  flex-shrink: 0;
+}
+#file-picker:focus {
+  outline: 1px solid #58a6ff;
+  border-color: #58a6ff;
+}
+
+/* Focus toggle button */
+#btn-focus {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 11px;
+  background: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 2px 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+#btn-focus:hover:not(:disabled) {
+  background: #30363d;
+  border-color: #484f58;
+}
+#btn-focus.active {
+  background: #1c2536;
+  color: #58a6ff;
+  border-color: #58a6ff;
+}
+#btn-focus:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Clickable function tokens */
+.token.function.def-local,
+.token.function.def-cross {
+  cursor: pointer;
+}
+.token.function.def-local:hover {
+  text-decoration: underline;
+  text-decoration-color: #58a6ff;
+  text-decoration-style: dotted;
+}
+.token.function.def-cross:hover {
+  text-decoration: underline;
+  text-decoration-color: #484f58;
+  text-decoration-style: dotted;
+}
+.token.function.def-searching {
+  opacity: 0.5;
+}
+
+#code-container {
+  flex: 1;
+  overflow: auto;
+}
+
+#code-container pre[class*="language-"] {
+  margin: 0;
+  border-radius: 0;
+  min-height: 100%;
+}
+
+/* Finding line markers in the gutter */
+.line-numbers-rows > span.finding-line:before {
+  color: #f0883e;
+  font-weight: 700;
+}
+
+.line-numbers-rows > span.finding-line-high:before {
+  color: #f85149;
+  font-weight: 700;
+}
+
+/* Loading / error states */
+.viewer-message {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #8b949e;
+  font-style: italic;
+  padding: 48px;
+  text-align: center;
+}
+
+.viewer-error {
+  color: #f85149;
+}
+
+/* Focused mode: line number overrides */
+.line-numbers-rows > span[data-line]::before {
+  content: attr(data-line) !important;
+}
+
+/* Focused mode: hidden separator lines */
+.line-numbers-rows > span.hidden-separator::before {
+  color: #484f58;
+  font-style: italic;
+  font-size: 9px;
+}

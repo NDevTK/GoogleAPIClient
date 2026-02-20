@@ -1,0 +1,171 @@
+/* Prism.js dark theme — matches extension GitHub Dark palette (#0d1117) */
+
+code[class*="language-"],
+pre[class*="language-"] {
+  color: #c9d1d9;
+  background: none;
+  font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+  font-size: 13px;
+  text-align: left;
+  white-space: pre;
+  word-spacing: normal;
+  word-break: normal;
+  word-wrap: normal;
+  line-height: 1.6;
+  tab-size: 4;
+  hyphens: none;
+}
+
+pre[class*="language-"] {
+  padding: 1em;
+  margin: 0;
+  overflow: auto;
+}
+
+:not(pre) > code[class*="language-"],
+pre[class*="language-"] {
+  background: #0d1117;
+}
+
+:not(pre) > code[class*="language-"] {
+  padding: 0.1em 0.3em;
+  border-radius: 0.3em;
+  white-space: normal;
+}
+
+.token.comment,
+.token.block-comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: #8b949e;
+}
+
+.token.punctuation {
+  color: #c9d1d9;
+}
+
+.token.tag,
+.token.attr-name,
+.token.namespace,
+.token.deleted {
+  color: #ff7b72;
+}
+
+.token.function-name,
+.token.function {
+  color: #d2a8ff;
+}
+
+.token.boolean,
+.token.number {
+  color: #79c0ff;
+}
+
+.token.class-name,
+.token.constant,
+.token.symbol {
+  color: #ffa657;
+}
+
+.token.property {
+  color: #79c0ff;
+}
+
+.token.atrule,
+.token.builtin,
+.token.important,
+.token.keyword {
+  color: #ff7b72;
+}
+
+.token.selector {
+  color: #7ee787;
+}
+
+.token.attr-value,
+.token.char,
+.token.regex,
+.token.string,
+.token.variable {
+  color: #a5d6ff;
+}
+
+.token.entity,
+.token.operator,
+.token.url {
+  color: #79c0ff;
+}
+
+.token.bold,
+.token.important {
+  font-weight: 700;
+}
+
+.token.italic {
+  font-style: italic;
+}
+
+.token.entity {
+  cursor: help;
+}
+
+.token.inserted {
+  color: #7ee787;
+}
+
+/* Line numbers plugin */
+pre[class*="language-"].line-numbers {
+  position: relative;
+  padding-left: 4.5em;
+  counter-reset: linenumber;
+}
+
+pre[class*="language-"].line-numbers > code {
+  position: relative;
+  white-space: inherit;
+}
+
+.line-numbers .line-numbers-rows {
+  position: absolute;
+  pointer-events: none;
+  top: 0;
+  font-size: 100%;
+  left: -4.5em;
+  width: 3.5em;
+  letter-spacing: -1px;
+  border-right: 1px solid #21262d;
+  user-select: none;
+  padding: 1em 0;
+}
+
+.line-numbers-rows > span {
+  display: block;
+  counter-increment: linenumber;
+}
+
+.line-numbers-rows > span:before {
+  content: counter(linenumber);
+  color: #484f58;
+  display: block;
+  padding-right: 0.8em;
+  text-align: right;
+}
+
+/* Line highlight plugin */
+pre[data-line] {
+  position: relative;
+}
+
+.line-highlight {
+  position: absolute;
+  left: 0;
+  right: 0;
+  padding: inherit 0;
+  margin-top: 1em;
+  background: rgba(245, 129, 73, 0.08);
+  border-left: 3px solid #f0883e;
+  pointer-events: none;
+  line-height: inherit;
+  white-space: pre;
+}

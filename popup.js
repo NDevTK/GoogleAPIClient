@@ -671,7 +671,9 @@ function renderSecurityPanel() {
     var loc = item.location ? "L" + item.location.line + ":" + item.location.column : "";
 
     var codeHtml = item.codeContext
-      ? '<div class="code-context">' + esc(item.codeContext) + '</div>'
+      ? '<pre class="code-context clickable-code" data-source-url="' + esc(entry.sourceUrl || '') +
+        '" data-line="' + (item.location ? item.location.line : 0) +
+        '"><code class="language-javascript">' + esc(item.codeContext) + '</code></pre>'
       : '';
 
     var srcLink = entry.sourceUrl
@@ -708,6 +710,25 @@ function renderSecurityPanel() {
   }
 
   container.innerHTML = html;
+
+  // Syntax-highlight code snippets
+  container.querySelectorAll(".code-context code.language-javascript").forEach(function(el) {
+    Prism.highlightElement(el);
+  });
+
+  // Click handler: open source viewer for code context snippets
+  container.querySelectorAll(".clickable-code").forEach(function(el) {
+    el.addEventListener("click", function() {
+      var url = el.dataset.sourceUrl;
+      var line = el.dataset.line;
+      if (url) {
+        chrome.tabs.create({
+          url: "viewer.html?sourceUrl=" + encodeURIComponent(url) +
+               "&line=" + (line || 0) + "&tabId=" + (currentTabId || 0)
+        });
+      }
+    });
+  });
 }
 
 // ─── Send Panel ──────────────────────────────────────────────────────────────

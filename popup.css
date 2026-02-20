@@ -165,13 +165,13 @@ nav {
   text-decoration: underline;
 }
 
-.code-context {
+pre.code-context {
   font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
   font-size: 11px;
   background: #161b22;
   color: #e6edf3;
   padding: 6px 8px;
-  margin-top: 4px;
+  margin: 4px 0 0;
   border-radius: 4px;
   border-left: 3px solid #f85149;
   overflow-x: auto;
@@ -180,6 +180,18 @@ nav {
   max-height: 120px;
   overflow-y: auto;
   line-height: 1.5;
+}
+pre.code-context > code {
+  font-size: inherit;
+  padding: 0;
+  background: none;
+}
+.code-context.clickable-code {
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.code-context.clickable-code:hover {
+  border-left-color: #58a6ff;
 }
 
 .badge {

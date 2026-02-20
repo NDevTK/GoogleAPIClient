@@ -4658,6 +4658,88 @@ test("postMessage high severity description includes sink name", `
   });
 });
 
+// ── PostMessage Origin Check Tracing ──
+console.log("\n=== Security: PostMessage Origin Tracing ===\n");
+
+test("origin passed to function with === check → strong (not flagged)", `
+  function validateOrigin(origin) {
+    return origin === "https://trusted.com";
+  }
+  window.addEventListener("message", function(event) {
+    if (!validateOrigin(event.origin)) return;
+    document.body.innerHTML = event.data;
+  });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" || p.type === "postmessage-weak-origin";
+  });
+});
+
+test("origin passed to method with === check → strong (not flagged)", `
+  var c = { i: function(o) { return o === "https://trusted.com"; } };
+  window.addEventListener("message", function(m) {
+    if (!c.i(m.origin)) return;
+    document.body.innerHTML = m.data;
+  });
+`, function(r) {
+  return !r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" || p.type === "postmessage-weak-origin";
+  });
+});
+
+test("origin passed to function with .includes() → weak", `
+  function checkOrigin(origin) {
+    return origin.includes("example.com");
+  }
+  window.addEventListener("message", function(event) {
+    if (checkOrigin(event.origin)) {
+      document.body.innerHTML = event.data;
+    }
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-weak-origin";
+  });
+});
+
+test("origin passed to method with .indexOf() → weak", `
+  var validator = { check: function(o) { return o.indexOf("trusted") !== -1; } };
+  window.addEventListener("message", function(e) {
+    if (validator.check(e.origin)) {
+      eval(e.data);
+    }
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-weak-origin";
+  });
+});
+
+test("origin passed to function with no check → still flagged as no-origin", `
+  function logOrigin(origin) {
+    console.log(origin);
+  }
+  window.addEventListener("message", function(event) {
+    logOrigin(event.origin);
+    document.body.innerHTML = event.data;
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin";
+  });
+});
+
+test("origin passed to unresolvable function → still flagged", `
+  window.addEventListener("message", function(m) {
+    unknownFunc(m.origin);
+    document.body.innerHTML = m.data;
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin";
+  });
+});
+
 // ── Prototype Pollution API Detection ──
 console.log("\n=== Security: Prototype Pollution APIs ===\n");
 
