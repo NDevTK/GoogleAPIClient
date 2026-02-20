@@ -322,10 +322,20 @@
       return;
     }
     if (msg.type === "PM_SEND_MSG") {
-      const origin = msg.targetOrigin || "*";
-      const source = _pmSources.get(origin);
+      if (!msg.targetOrigin) {
+        sendResponse({ error: "targetOrigin is required" });
+        return;
+      }
+      // Allow "*" only for sandboxed iframes (null origin) — otherwise require explicit origin
+      const origin = msg.targetOrigin;
+      const lookupKey = origin === "*" ? "null" : origin;
+      const source = _pmSources.get(lookupKey);
       if (!source) {
-        sendResponse({ error: "No source window for origin " + origin });
+        sendResponse({ error: "No source window for origin " + lookupKey });
+        return;
+      }
+      if (origin === "*" && lookupKey !== "null") {
+        sendResponse({ error: "Wildcard targetOrigin only allowed for sandboxed iframes" });
         return;
       }
       try {
