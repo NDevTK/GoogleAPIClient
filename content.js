@@ -134,6 +134,24 @@
 
   const ENDPOINT_RE = /https?:\/\/[\w.-]+\.[a-z]{2,}(?::\d+)?\/[^\s"'<>)}\]]+/g;
 
+  function isGoogleApisUrl(urlString) {
+    if (typeof urlString !== "string") return false;
+    try {
+      // Try absolute URL first
+      let parsed;
+      try {
+        parsed = new URL(urlString);
+      } catch (e) {
+        // Fallback: treat as relative to the current page
+        parsed = new URL(urlString, window.location.origin);
+      }
+      const host = parsed.hostname.toLowerCase();
+      return host === "googleapis.com" || host.endsWith(".googleapis.com");
+    } catch (e) {
+      return false;
+    }
+  }
+
   function scanText(text) {
     const keys = new Set();
     const endpoints = new Set();
@@ -166,7 +184,7 @@
         url.includes("/mutation") ||
         url.includes("/batch") ||
         url.includes("/webhook") ||
-        url.includes("googleapis.com") ||
+        isGoogleApisUrl(url) ||
         /\.(svc|asmx|ashx|axd)([?/]|$)/.test(url)
       ) {
         endpoints.add(url);
