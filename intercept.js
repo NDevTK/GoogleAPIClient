@@ -408,44 +408,4 @@
     window.EventSource = WrappedEventSource;
   }
 
-  // ─── sendBeacon wrapper ─────────────────────────────────────────────────────
-
-  const _sendBeacon = navigator.sendBeacon;
-
-  if (_sendBeacon) {
-    navigator.sendBeacon = function (url, data) {
-      try {
-        const beaconUrl = new URL(url, location.href).href;
-        let reqBody = null, reqBase64 = false;
-        if (typeof data === "string") {
-          reqBody = data;
-        } else if (data instanceof Uint8Array) {
-          reqBody = uint8ToBase64(data);
-          reqBase64 = true;
-        } else if (data instanceof ArrayBuffer) {
-          reqBody = uint8ToBase64(new Uint8Array(data));
-          reqBase64 = true;
-        } else if (typeof URLSearchParams !== "undefined" && data instanceof URLSearchParams) {
-          reqBody = data.toString();
-        } else if (typeof FormData !== "undefined" && data instanceof FormData) {
-          // FormData can't be serialized simply — skip body
-        } else if (typeof Blob !== "undefined" && data instanceof Blob) {
-          // Can't read synchronously — emit URL only
-        }
-        emit({
-          url: beaconUrl,
-          method: "BEACON",
-          status: 0,
-          contentType: "beacon",
-          responseHeaders: {},
-          body: null,
-          base64Encoded: false,
-          requestBody: reqBody,
-          requestBodyBase64: reqBase64,
-        });
-      } catch (_) {}
-      return _sendBeacon.apply(navigator, arguments);
-    };
-  }
-
 })();

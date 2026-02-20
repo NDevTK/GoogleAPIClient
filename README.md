@@ -6,7 +6,7 @@ A Chrome Extension (MV3) that passively reverse-engineers APIs, learns their sch
 
 Browse any website. The extension works in the background:
 
-1. **Intercepts** every fetch/XHR/WebSocket/EventSource/sendBeacon call via main-world wrappers, capturing request headers, request bodies, response headers, response bodies, and status — no `webRequest` permission, no Chrome debugger bar.
+1. **Intercepts** every fetch/XHR/WebSocket/EventSource call via main-world wrappers, capturing request headers, request bodies, response headers, response bodies, and status — no `webRequest` permission, no Chrome debugger bar.
 2. **Captures** cross-frame postMessage and MessageChannel messages via isolated-world listeners.
 3. **Decodes** traffic through a protocol chain: async chunked, batchexecute, gRPC-Web, SSE, NDJSON, multipart, GraphQL, JSON, and Protobuf.
 4. **Learns** API structure (VDD — Value-Driven Discovery) by merging schemas from every observed request and response into a unified service map.
@@ -43,9 +43,9 @@ Open the popup to inspect, test, and export everything it found.
 | **WebSocket** | Intercepts send/receive on live connections, with an interactive console for sending messages through captured sockets |
 | **postMessage** | Captures cross-frame messages, grouped by source origin, with reply capability via stored `event.source` references |
 | **MessageChannel** | Captures transferred ports from postMessage, instruments for bidirectional message logging, with send capability via stored port references |
-| **EventSource / sendBeacon** | Captures SSE streams and beacon payloads |
+| **EventSource** | Captures SSE streams |
 
-Format badges (PROTO, JSPB, BATCH, gRPC-WEB, SSE, NDJSON, GRAPHQL, MULTIPART, ASYNC, WEBSOCKET, POSTMESSAGE, MSGCHANNEL, BEACON) appear on request log entries.
+Format badges (PROTO, JSPB, BATCH, gRPC-WEB, SSE, NDJSON, GRAPHQL, MULTIPART, ASYNC, WEBSOCKET, POSTMESSAGE, MSGCHANNEL) appear on request log entries.
 
 ### JavaScript Security Code Review
 
@@ -102,7 +102,7 @@ npm install && node build.js
 ## Architecture
 
 ```
-intercept.js       Main-world fetch/XHR/WebSocket/EventSource/sendBeacon wrapper (request + response capture)
+intercept.js       Main-world fetch/XHR/WebSocket/EventSource wrapper (request + response capture)
 content.js         Isolated-world content script (DOM scanning, PAGE_FETCH relay, intercept relay, postMessage/MessageChannel listener)
 background.js      Service worker (request interception, VDD learning, AST orchestration, export)
 popup.js           Popup controller (rendering, replay, form builder, security panel)

@@ -6,7 +6,7 @@ A Chrome Extension (MV3) for API discovery, protocol reverse-engineering (Protob
 
 ## Core Architecture
 
-- **Request/Response Capture**: `intercept.js` runs in the page's main world (`world: "MAIN"`, `document_start`), wrapping `fetch()`, `XMLHttpRequest`, `WebSocket`, `EventSource`, and `sendBeacon` to capture both request data (headers, body) and response data (status, headers, body). Single capture point — no `webRequest` permission needed. Data flows: `intercept.js` → `CustomEvent(__uasr_resp)` → `content.js` relay → `chrome.runtime.sendMessage(RESPONSE_BODY)` → `background.js` `handleResponseBody()` which creates log entries, extracts keys, learns schemas, triggers discovery/probing.
+- **Request/Response Capture**: `intercept.js` runs in the page's main world (`world: "MAIN"`, `document_start`), wrapping `fetch()`, `XMLHttpRequest`, `WebSocket`, and `EventSource` to capture both request data (headers, body) and response data (status, headers, body). Single capture point — no `webRequest` permission needed. Data flows: `intercept.js` → `CustomEvent(__uasr_resp)` → `content.js` relay → `chrome.runtime.sendMessage(RESPONSE_BODY)` → `background.js` `handleResponseBody()` which creates log entries, extracts keys, learns schemas, triggers discovery/probing.
 - **Protocol Handlers** (in `lib/discovery.js`):
   - `parseBatchExecuteRequest/Response` — Google batchexecute RPC
   - `parseAsyncChunkedResponse` — Google hex-length-prefixed async chunks
@@ -30,7 +30,7 @@ A Chrome Extension (MV3) for API discovery, protocol reverse-engineering (Protob
 | File | Role |
 |------|------|
 | `manifest.json` | MV3 manifest. Permissions: `storage`, `offscreen`. Host permissions: `<all_urls>`. |
-| `intercept.js` | Main-world content script. Wraps `fetch`/`XHR`/`WebSocket`/`EventSource`/`sendBeacon`, captures request headers+body and response headers+body. Emits `__uasr_resp` CustomEvent. Single capture point for all network data. |
+| `intercept.js` | Main-world content script. Wraps `fetch`/`XHR`/`WebSocket`/`EventSource`, captures request headers+body and response headers+body. Emits `__uasr_resp` CustomEvent. Single capture point for all network data. |
 | `content.js` | Isolated-world content script. DOM key/endpoint scanning, `PAGE_FETCH` relay for session-aware requests, `__uasr_resp` event relay to background. |
 | `background.js` | Service worker. Request interception, key extraction, schema learning, request export builder, OpenAPI export/import, session storage, message routing. |
 | `popup.js` | Popup controller. Tab rendering, service filter, cross-tab log filtering, replay, export (curl/fetch/Python/OpenAPI). |

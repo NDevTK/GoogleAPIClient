@@ -2442,7 +2442,6 @@ function _renderLogCard(req, showTabLabel) {
       ${isMultipartBatch(req.mimeType || "") ? ' <span class="badge badge-multipart">MULTIPART</span>' : ""}
       ${/\/async\//.test(req.url) ? ' <span class="badge badge-batch">ASYNC</span>' : ""}
       ${req.method === "SSE" ? ' <span class="badge badge-sse">SSE</span>' : ""}
-      ${req.method === "BEACON" ? ' <span class="badge badge-beacon">BEACON</span>' : ""}
     </div>
   </div>`;
 }

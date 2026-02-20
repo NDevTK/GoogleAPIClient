@@ -262,10 +262,6 @@ pre.code-context > code {
   background: #1b2733;
   color: #a78bfa;
 }
-.badge-beacon {
-  background: #3a1b1b;
-  color: #e0784e;
-}
 
 /* ─── WebSocket Console ─── */
 #send-ws-console {

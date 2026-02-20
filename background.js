@@ -2664,34 +2664,6 @@ async function handleResponseBody(tabId, msg) {
     return;
   }
 
-  // ─── BEACON: request payload only, no response ─────────────────────────
-  if (msg.method === "BEACON") {
-    const tab = getTab(tabId);
-    let rawBodyB64 = null;
-    if (msg.requestBody) {
-      rawBodyB64 = msg.requestBodyBase64
-        ? msg.requestBody
-        : uint8ToBase64(new TextEncoder().encode(msg.requestBody));
-    }
-    const entry = {
-      id: "alt_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
-      url: msg.url,
-      method: "BEACON",
-      service: extractInterfaceName(new URL(msg.url)),
-      timestamp: Date.now(),
-      status: 0,
-      rawBodyB64,
-    };
-    tab.requestLog.unshift(entry);
-    if (tab.requestLog.length > 50) tab.requestLog.pop();
-    if (msg.requestBody) {
-      extractKeysFromText(tabId, msg.requestBodyBase64 ? "" : msg.requestBody, msg.url, "request_body");
-    }
-    scheduleSessionSave(tabId);
-    notifyPopup(tabId);
-    return;
-  }
-
   // ─── HTTP (fetch / XHR): unified request + response ─────────────────────
 
   const url = new URL(msg.url);
