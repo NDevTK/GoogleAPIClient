@@ -92,6 +92,7 @@ function throttledLoadState() {
 let _lastKeysFp = "";
 let _lastSecFp = "";
 let _lastLogFp = "";
+let _lastSendFp = "";
 
 document.addEventListener("DOMContentLoaded", async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -532,7 +533,7 @@ async function clearState() {
   await chrome.runtime.sendMessage({ type: "CLEAR_TAB", tabId: currentTabId });
   tabData = null;
   allTabsData = null;
-  _lastKeysFp = _lastSecFp = _lastLogFp = "";
+  _lastKeysFp = _lastSecFp = _lastLogFp = _lastSendFp = "";
   render();
 }
 
@@ -754,6 +755,12 @@ function renderSecurityPanel() {
 // ─── Send Panel ──────────────────────────────────────────────────────────────
 
 function renderSendPanel() {
+  // Fingerprint: skip rebuild if discovery docs haven't changed
+  const docKeys = tabData?.discoveryDocs ? Object.keys(tabData.discoveryDocs) : [];
+  const sendFp = docKeys.length + ":" + (tabData?.requestLog?.length || 0);
+  if (sendFp === _lastSendFp) return;
+  _lastSendFp = sendFp;
+
   // Populate service selector
   const svcSelect = document.getElementById("spec-service-select");
   const prevSvc = svcSelect.value;

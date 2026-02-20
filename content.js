@@ -24,6 +24,9 @@
       channelId: d.channelId || null,
       sourceOrigin: d.sourceOrigin || null,
       targetOrigin: d.targetOrigin || null,
+      requestHeaders: d.requestHeaders || null,
+      requestBody: d.requestBody || null,
+      requestBodyBase64: d.requestBodyBase64 || false,
     });
   });
   // Signal intercept.js that the relay is listening — replays buffered events

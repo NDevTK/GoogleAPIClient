@@ -4,7 +4,6 @@
   "version": "2.0.0",
   "description": "API discovery, protocol reverse-engineering, JavaScript security code review, and request export.",
   "permissions": [
-    "webRequest",
     "webNavigation",
     "storage",
     "activeTab",

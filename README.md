@@ -6,8 +6,8 @@ A Chrome Extension (MV3) that passively reverse-engineers APIs, learns their sch
 
 Browse any website. The extension works in the background:
 
-1. **Intercepts** every network request, extracting URLs, headers, parameters, and body schemas.
-2. **Captures** response bodies via main-world fetch/XHR/WebSocket/EventSource/sendBeacon wrappers, plus postMessage and MessageChannel listeners — no Chrome debugger bar.
+1. **Intercepts** every fetch/XHR/WebSocket/EventSource/sendBeacon call via main-world wrappers, capturing request headers, request bodies, response headers, response bodies, and status — no `webRequest` permission, no Chrome debugger bar.
+2. **Captures** cross-frame postMessage and MessageChannel messages via isolated-world listeners.
 3. **Decodes** traffic through a protocol chain: async chunked, batchexecute, gRPC-Web, SSE, NDJSON, multipart, GraphQL, JSON, and Protobuf.
 4. **Learns** API structure (VDD — Value-Driven Discovery) by merging schemas from every observed request and response into a unified service map.
 5. **Analyzes** JavaScript bundles with a scope-aware AST engine that extracts API call sites, value constraints, proto field maps, and security vulnerabilities — before any network call is made.
@@ -102,7 +102,7 @@ npm install && node build.js
 ## Architecture
 
 ```
-intercept.js       Main-world fetch/XHR/WebSocket/EventSource/sendBeacon wrapper (response body capture)
+intercept.js       Main-world fetch/XHR/WebSocket/EventSource/sendBeacon wrapper (request + response capture)
 content.js         Isolated-world content script (DOM scanning, PAGE_FETCH relay, intercept relay, postMessage/MessageChannel listener)
 background.js      Service worker (request interception, VDD learning, AST orchestration, export)
 popup.js           Popup controller (rendering, replay, form builder, security panel)
@@ -121,10 +121,10 @@ lib/
 
 ```
 Page JS ──→ intercept.js (main world) ──→ CustomEvent ──→ content.js ──→ background.js
+             (request headers/body +                                          │
+              response headers/body)                                          │
                                                                               │
 Cross-frame postMessage / MessageChannel ──→ content.js (message listener) ──→│
-                                                                              │
-Browser ──→ webRequest API ─────────────────────────────────────────→ background.js
                                                                               │
                                               ┌───────────────────────────────┤
                                               ▼                               ▼
@@ -163,7 +163,7 @@ GlobalStore uses IndexedDB (inaccessible to content scripts) instead of `chrome.
 
 - This tool is for **authorized security research only**.
 - Cookie values are redacted; only their presence is tracked.
-- No debugger permission required — no visible browser UI impact.
+- No `webRequest` or debugger permission required — no visible browser UI impact.
 - All dynamic content in the popup is escaped via `esc()` to prevent self-XSS.
 
 ## Testing

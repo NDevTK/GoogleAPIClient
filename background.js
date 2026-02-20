@@ -464,9 +464,7 @@ const _globalStoreReady = loadGlobalStore();
 // ─── Session Storage (Request Logs) ─────────────────────────────────────────
 
 function serializeLogEntry(entry) {
-  const clone = { ...entry };
-  delete clone.requestBody; // Chrome requestBody object, redundant with rawBodyB64
-  return clone;
+  return { ...entry };
 }
 
 function scheduleSessionSave(tabId) {
@@ -553,25 +551,6 @@ loadSessionLogs();
 
 const API_KEY_RE = /AIzaSy[\w-]{33}/g;
 
-function isApiRequest(url, details) {
-  // Use the browser's own resource type classification
-  // xmlhttprequest covers both fetch() and XMLHttpRequest calls
-  if (details.type !== "xmlhttprequest") return false;
-
-  // Ignore tracking/telemetry noise
-  const noisePaths = [
-    "/gen_204",
-    "/client_204",
-    "/jserror",
-    "/ulog",
-    "/log",
-    "/error",
-    "/collect",
-  ];
-  if (noisePaths.some((p) => url.pathname.includes(p))) return false;
-
-  return true;
-}
 
 // Strip JSONP wrapper: callbackName({"key":"value"}) → '{"key":"value"}'
 // Returns the inner JSON string or null if not JSONP.
@@ -687,364 +666,8 @@ function parseRpcPath(path) {
   };
 }
 
-// ─── Request Interception ────────────────────────────────────────────────────
 
-chrome.webRequest.onBeforeRequest.addListener(
-  (details) => {
-    if (details.tabId < 0) return;
-    const url = new URL(details.url);
 
-    // Skip internal requests immediately
-    if (url.hash.includes("_internal_probe")) return;
-    if (url.hash.includes("_uasr_send")) return;
-
-    if (!isApiRequest(url, details)) return;
-
-    const tab = getTab(details.tabId);
-
-    // Capture initiator as distinct from Origin header (more reliable for context)
-    if (details.initiator) {
-      tab.authContext = tab.authContext || {};
-      if (!tab.authContext.origin) {
-        tab.authContext.origin = details.initiator;
-      }
-    }
-
-    // We store raw request bytes if present (for Protobuf decoding)
-    let rawBodyB64 = null;
-    if (details.requestBody?.raw?.[0]?.bytes) {
-      rawBodyB64 = uint8ToBase64(
-        new Uint8Array(details.requestBody.raw[0].bytes),
-      );
-    } else if (details.requestBody?.formData) {
-      // For application/x-www-form-urlencoded
-      const params = new URLSearchParams();
-      for (const [key, values] of Object.entries(
-        details.requestBody.formData,
-      )) {
-        for (const val of values) {
-          params.append(key, val);
-        }
-      }
-      rawBodyB64 = uint8ToBase64(new TextEncoder().encode(params.toString()));
-    }
-
-    const entry = {
-      id: details.requestId,
-      url: details.url,
-      method: details.method,
-      service: extractInterfaceName(url),
-      timestamp: Date.now(),
-      status: "pending",
-      requestBody: details.requestBody,
-      rawBodyB64,
-      frameId: details.frameId,
-      documentId: details.documentId,
-    };
-
-    // Check if duplicate? (unlikely for new request)
-    tab.requestLog.unshift(entry);
-    if (tab.requestLog.length > 50) tab.requestLog.pop();
-    scheduleSessionSave(details.tabId);
-  },
-  {
-    urls: ["<all_urls>"],
-  },
-  ["requestBody"],
-);
-
-chrome.webRequest.onBeforeSendHeaders.addListener(
-  (details) => {
-    if (details.tabId < 0) return;
-    const url = new URL(details.url);
-
-    // Skip internal requests early
-    if (url.hash.includes("_internal_probe")) return;
-    if (url.hash.includes("_uasr_send")) return;
-
-    // ─── CRITICAL: Universal Key Scanning ───
-    // Scan EVERY request (scripts, assets, etc) for keys in URL and Headers
-    // before any early exits.
-    extractKeysFromText(details.tabId, details.url, details.url, "url");
-    for (const h of details.requestHeaders || []) {
-      extractKeysFromText(
-        details.tabId,
-        `${h.name}: ${h.value}`,
-        details.url,
-        "header",
-      );
-    }
-
-    const headerMap = {};
-    for (const h of details.requestHeaders || []) {
-      headerMap[h.name.toLowerCase()] = h.value;
-    }
-
-    if (!isApiRequest(url, details)) return;
-
-    // Skip internal probe requests
-    if (url.searchParams.has("_probe")) return;
-
-    const tab = getTab(details.tabId);
-
-    // Capture initiator again in case onBeforeRequest didn't catch it
-    if (details.initiator) {
-      tab.authContext = tab.authContext || {};
-      if (!tab.authContext.origin) {
-        tab.authContext.origin = details.initiator;
-      }
-    }
-
-    let authorization = null;
-    let cookie = null;
-    let contentType = null;
-    let origin = null;
-    let referer = null;
-    let apiKey = null;
-
-    for (const h of details.requestHeaders || []) {
-      const name = h.name.toLowerCase();
-
-      if (name === "cookie") {
-        cookie = "[PRESENT]";
-        headerMap[name] = "[REDACTED]";
-      }
-
-      if (name === "authorization") authorization = h.value;
-      if (name === "origin") origin = h.value;
-      if (name === "referer") referer = h.value;
-      if (name === "content-type") contentType = h.value;
-      if (
-        name === "x-goog-api-key" ||
-        name === "x-api-key" ||
-        name === "apikey"
-      )
-        apiKey = h.value;
-    }
-
-    // Store API key with service/host tracking
-    const service = extractInterfaceName(url);
-    const discoveryStatus = tab.discoveryDocs.get(service);
-
-    // Update auth context
-    if (authorization || cookie) {
-      tab.authContext = tab.authContext || {};
-      if (authorization) tab.authContext.hasAuthorization = true;
-      if (cookie) tab.authContext.hasCookies = true;
-      if (origin) tab.authContext.origin = origin;
-    }
-
-    // ─── Smart Learning (Virtual Discovery) ──────────────────────────────────
-
-    // 1. Always learn from the current request to build the VDD immediately
-    let entry = tab.requestLog.find((r) => r.id === details.requestId);
-    if (!entry) {
-      entry = {
-        id: details.requestId,
-        url: details.url,
-        method: details.method,
-        service: service,
-        timestamp: Date.now(),
-        status: "pending",
-      };
-      tab.requestLog.unshift(entry);
-      if (tab.requestLog.length > 50) tab.requestLog.pop();
-      scheduleSessionSave(details.tabId);
-    }
-
-    learnFromRequest(details.tabId, service, entry, headerMap);
-
-    // Sync learned data to globalStore immediately so it survives SW restarts
-    mergeToGlobal(tab);
-
-    // 2. Proactive Active Probing for Protobuf
-    // If it's a Protobuf request, check if we already have a detailed schema.
-    // If not, trigger a probe to leak field names/numbers.
-    const isProtobuf =
-      (headerMap["content-type"] || "").includes("protobuf") ||
-      url.pathname.includes("$rpc");
-    if (isProtobuf && details.method === "POST") {
-      const doc = discoveryStatus?.doc;
-      const match = doc
-        ? findDiscoveryMethod(doc, url.pathname, details.method)
-        : null;
-
-      // If no match OR method is in "learned" resource (meaning it lacks probed field numbers)
-      const isLearnedOnly =
-        match &&
-        discoveryStatus.doc.resources?.learned?.methods[
-          match.method.id.split(".").pop()
-        ];
-
-      if (!match || isLearnedOnly) {
-        const keysForService = collectKeysForService(
-          tab,
-          service,
-          url.hostname,
-        );
-        if (apiKey && !keysForService.includes(apiKey))
-          keysForService.push(apiKey);
-        performProbeAndPatch(
-          details.tabId,
-          service,
-          details.url,
-          apiKey || keysForService[0] || null,
-        );
-      }
-    }
-
-    // 3. Automatic Background Discovery
-    // If we haven't tried to find an official discovery doc for this service yet, do it now.
-    // Cooldown: don't retry not_found within 5 minutes to avoid flooding.
-    const notFoundCooldown = discoveryStatus?.status === "not_found" &&
-      discoveryStatus._failedAt && (Date.now() - discoveryStatus._failedAt < 300000);
-    if (!notFoundCooldown && (!discoveryStatus || discoveryStatus.status === "not_found")) {
-      if (!discoveryStatus) {
-        tab.discoveryDocs.set(service, {
-          status: "pending",
-          seedUrl: details.url,
-        });
-      } else {
-        discoveryStatus.status = "pending";
-      }
-
-      const keysForService = collectKeysForService(tab, service, url.hostname);
-      if (apiKey && !keysForService.includes(apiKey))
-        keysForService.push(apiKey);
-
-      fetchDiscoveryForService(
-        details.tabId,
-        service,
-        url.hostname,
-        keysForService,
-        details.url,
-      );
-    }
-
-    mergeToGlobal(tab);
-
-    const logContentType = headerMap["content-type"] || "";
-
-    entry.requestHeaders = headerMap;
-    entry.contentType = logContentType;
-    entry.service = service;
-
-    if (entry.rawBodyB64) {
-      try {
-        const bytes = base64ToUint8(entry.rawBodyB64);
-        if (isProtobuf) {
-          if (
-            logContentType.includes("json") ||
-            logContentType.includes("text")
-          ) {
-            // Try JSPB (JSON array) parsing
-            try {
-              const text = new TextDecoder().decode(bytes);
-              if (text.trim().startsWith("[")) {
-                const json = JSON.parse(text);
-                if (Array.isArray(json)) {
-                  entry.decodedBody = jspbToTree(json);
-                  entry.isJspb = true;
-                }
-              }
-            } catch (e) {}
-          } else {
-            // Binary protobuf
-            entry.decodedBody = pbDecodeTree(bytes, 8, (val) => {
-              if (typeof val === "string") {
-                extractKeysFromText(
-                  details.tabId,
-                  val,
-                  details.url,
-                  "protobuf_body",
-                );
-              }
-            });
-          }
-        } else if (logContentType.includes("x-www-form-urlencoded")) {
-          // Form-urlencoded with f.req JSPB (e.g. browserinfo)
-          try {
-            const text = new TextDecoder().decode(bytes);
-            const params = new URLSearchParams(text);
-            const fReq = params.get("f.req");
-            if (fReq) {
-              const json = JSON.parse(fReq);
-              if (Array.isArray(json)) {
-                entry.decodedBody = jspbToTree(json);
-                entry.isJspb = true;
-              }
-            }
-          } catch (e) {}
-        } else if (logContentType.includes("json")) {
-          // JSON body — store parsed object for replay pre-fill
-          try {
-            const text = new TextDecoder().decode(bytes);
-            const json = JSON.parse(text);
-            if (json && typeof json === "object") {
-              entry.decodedBody = json;
-              entry.isJson = true;
-            }
-          } catch (e) {}
-        }
-      } catch (err) {}
-    }
-
-    scheduleSessionSave(details.tabId);
-    notifyPopup(details.tabId);
-  },
-  {
-    urls: ["<all_urls>"],
-  },
-  ["requestHeaders"],
-);
-
-// ─── Response Header Interception (scope extraction from 403) ────────────────
-
-chrome.webRequest.onHeadersReceived.addListener(
-  (details) => {
-    if (details.tabId < 0) return;
-
-    const headerMap = {};
-    for (const h of details.responseHeaders || []) {
-      headerMap[h.name.toLowerCase()] = h.value;
-    }
-
-    const url = new URL(details.url);
-    if (!isApiRequest(url, details)) return;
-
-    const tab = getTab(details.tabId);
-    const service = extractInterfaceName(url);
-
-    if (details.statusCode === 403) {
-      for (const h of details.responseHeaders || []) {
-        if (h.name.toLowerCase() === "www-authenticate" && h.value) {
-          // Extract scopes: Bearer ... scope="scope1 scope2 ..."
-          const scopeMatch = h.value.match(/scope="([^"]*)"/);
-          if (scopeMatch) {
-            const scopeList = scopeMatch[1].split(/\s+/).filter(Boolean);
-            if (scopeList.length > 0) {
-              tab.scopes.set(service, scopeList);
-
-              // Also annotate the endpoint
-              const endpointKey = `${details.method} ${url.hostname}${url.pathname}`;
-              const ep = tab.endpoints.get(endpointKey);
-              if (ep) ep.requiredScopes = scopeList;
-
-              notifyPopup(details.tabId);
-            }
-          }
-        }
-      }
-    }
-
-    // Response body learning is handled by the RESPONSE_BODY message from
-    // the main-world intercept script (intercept.js → content.js relay).
-  },
-  {
-    urls: ["<all_urls>"],
-  },
-  ["responseHeaders"],
-);
 
 /** Detect path segments that look like dynamic IDs rather than resource names. */
 function looksLikeDynamicSegment(s) {
@@ -2839,7 +2462,7 @@ async function probeEndpoint(tabId, endpointKey) {
   return result;
 }
 
-// ─── Response Body Handling (from intercept.js via content.js relay) ─────────
+// ─── Request/Response Handling (from intercept.js via content.js relay) ──────
 
 async function handleResponseBody(tabId, msg) {
   if (!msg.url) return;
@@ -3048,59 +2671,263 @@ async function handleResponseBody(tabId, msg) {
     return;
   }
 
-  if (!msg.body) return;
-
-  const tab = getTab(tabId);
-
-  // Decode body to text for key scanning
-  let textBody = msg.body;
-  if (msg.base64Encoded) {
-    try {
-      const bytes = base64ToUint8(msg.body);
-      textBody = new TextDecoder().decode(bytes);
-    } catch (e) {
-      textBody = null;
-    }
-  }
-
-  // Scan for keys in every captured response body
-  if (textBody) {
-    extractKeysFromText(tabId, textBody, msg.url, "response_body");
-  }
-
-  // Match to request log entry — most recent entry for this URL without a body
-  let entry = tab.requestLog.find(
-    (r) => r.url === msg.url && !r.responseBody,
-  );
-
-  // For transports not captured by webRequest (EventSource, sendBeacon),
-  // create a log entry on the fly
-  const isAltTransport = msg.method === "SSE" || msg.method === "BEACON";
-  if (!entry && isAltTransport) {
-    entry = {
+  // ─── SSE: streaming events, no request data ─────────────────────────────
+  if (msg.method === "SSE") {
+    if (!msg.body) return;
+    const tab = getTab(tabId);
+    const entry = {
       id: "alt_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
       url: msg.url,
-      method: msg.method,
+      method: "SSE",
       service: extractInterfaceName(new URL(msg.url)),
       timestamp: Date.now(),
-      status: msg.status || 0,
+      status: msg.status || 200,
+      responseBody: msg.body,
+      responseBase64: msg.base64Encoded || false,
+      mimeType: msg.contentType || "",
+      responseHeaders: msg.responseHeaders || {},
     };
     tab.requestLog.unshift(entry);
     if (tab.requestLog.length > 50) tab.requestLog.pop();
-  }
-
-  if (entry) {
-    entry.responseBody = msg.body;
-    entry.responseBase64 = msg.base64Encoded || false;
-    entry.mimeType = msg.contentType || "";
-    entry.responseHeaders = msg.responseHeaders || {};
-
-    const service =
-      entry.service || extractInterfaceName(new URL(entry.url));
-    learnFromResponse(tabId, service, entry);
+    if (msg.body) {
+      extractKeysFromText(tabId, msg.body, msg.url, "response_body");
+    }
+    learnFromResponse(tabId, entry.service, entry);
     scheduleSessionSave(tabId);
     notifyPopup(tabId);
+    return;
   }
+
+  // ─── BEACON: request payload only, no response ─────────────────────────
+  if (msg.method === "BEACON") {
+    const tab = getTab(tabId);
+    let rawBodyB64 = null;
+    if (msg.requestBody) {
+      rawBodyB64 = msg.requestBodyBase64
+        ? msg.requestBody
+        : uint8ToBase64(new TextEncoder().encode(msg.requestBody));
+    }
+    const entry = {
+      id: "alt_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
+      url: msg.url,
+      method: "BEACON",
+      service: extractInterfaceName(new URL(msg.url)),
+      timestamp: Date.now(),
+      status: 0,
+      rawBodyB64,
+    };
+    tab.requestLog.unshift(entry);
+    if (tab.requestLog.length > 50) tab.requestLog.pop();
+    if (msg.requestBody) {
+      extractKeysFromText(tabId, msg.requestBodyBase64 ? "" : msg.requestBody, msg.url, "request_body");
+    }
+    scheduleSessionSave(tabId);
+    notifyPopup(tabId);
+    return;
+  }
+
+  // ─── HTTP (fetch / XHR): unified request + response ─────────────────────
+
+  const url = new URL(msg.url);
+
+  // Filter internal extension requests
+  if (url.hash.includes("_uasr_send")) return;
+  if (url.hash.includes("_internal_probe")) return;
+
+  // Filter static assets fetched via fetch() (SVG icons, fonts, etc.)
+  if (/\.(css|png|jpe?g|gif|svg|ico|woff2?|ttf|eot|mp[34]|webm|webp)(\?|$)/i.test(url.pathname)) return;
+
+  // Filter telemetry/tracking noise
+  const noisePaths = ["/gen_204", "/client_204", "/jserror", "/ulog", "/log", "/error", "/collect"];
+  if (noisePaths.some((p) => url.pathname.includes(p))) return;
+
+  // Skip internal probe requests
+  if (url.searchParams.has("_probe")) return;
+
+  const tab = getTab(tabId);
+  const service = extractInterfaceName(url);
+
+  // Build request header map from intercept.js capture
+  const headerMap = msg.requestHeaders || {};
+
+  // Key scanning: URL + request headers
+  extractKeysFromText(tabId, msg.url, msg.url, "url");
+  for (const [k, v] of Object.entries(headerMap)) {
+    extractKeysFromText(tabId, `${k}: ${v}`, msg.url, "header");
+  }
+
+  // Extract key header values
+  let authorization = null, cookie = null, contentType = null;
+  let origin = null, referer = null, apiKey = null;
+  for (const [name, value] of Object.entries(headerMap)) {
+    const lname = name.toLowerCase();
+    if (lname === "cookie") { cookie = "[PRESENT]"; headerMap[lname] = "[REDACTED]"; }
+    if (lname === "authorization") authorization = value;
+    if (lname === "origin") origin = value;
+    if (lname === "referer") referer = value;
+    if (lname === "content-type") contentType = value;
+    if (lname === "x-goog-api-key" || lname === "x-api-key" || lname === "apikey") apiKey = value;
+  }
+
+  // Compute rawBodyB64 from request body
+  let rawBodyB64 = null;
+  if (msg.requestBody) {
+    if (msg.requestBodyBase64) {
+      rawBodyB64 = msg.requestBody;
+    } else {
+      rawBodyB64 = uint8ToBase64(new TextEncoder().encode(msg.requestBody));
+    }
+  }
+
+  // Create entry atomically — request + response together
+  const entry = {
+    id: "http_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
+    url: msg.url,
+    method: msg.method,
+    service: service,
+    timestamp: Date.now(),
+    status: msg.status,
+    completedAt: Date.now(),
+    requestHeaders: headerMap,
+    contentType: contentType || "",
+    rawBodyB64: rawBodyB64,
+    responseBody: msg.body || null,
+    responseBase64: msg.base64Encoded || false,
+    mimeType: msg.contentType || "",
+    responseHeaders: msg.responseHeaders || {},
+  };
+
+  // Update auth context
+  if (authorization || cookie) {
+    tab.authContext = tab.authContext || {};
+    if (authorization) tab.authContext.hasAuthorization = true;
+    if (cookie) tab.authContext.hasCookies = true;
+    if (origin) tab.authContext.origin = origin;
+  }
+
+  // Key scanning on response body
+  if (msg.body) {
+    let textBody = msg.body;
+    if (msg.base64Encoded) {
+      try { textBody = new TextDecoder().decode(base64ToUint8(msg.body)); }
+      catch (_) { textBody = null; }
+    }
+    if (textBody) extractKeysFromText(tabId, textBody, msg.url, "response_body");
+  }
+
+  // Learn from request (schema extraction)
+  learnFromRequest(tabId, service, entry, headerMap);
+  mergeToGlobal(tab);
+
+  // Decode request body (protobuf/JSPB/JSON)
+  const logContentType = contentType || "";
+  const isProtobuf = logContentType.includes("protobuf") || url.pathname.includes("$rpc");
+  if (rawBodyB64) {
+    try {
+      const bytes = base64ToUint8(rawBodyB64);
+      if (isProtobuf) {
+        if (logContentType.includes("json") || logContentType.includes("text")) {
+          try {
+            const text = new TextDecoder().decode(bytes);
+            if (text.trim().startsWith("[")) {
+              const json = JSON.parse(text);
+              if (Array.isArray(json)) {
+                entry.decodedBody = jspbToTree(json);
+                entry.isJspb = true;
+              }
+            }
+          } catch (_) {}
+        } else {
+          entry.decodedBody = pbDecodeTree(bytes, 8, (val) => {
+            if (typeof val === "string") {
+              extractKeysFromText(tabId, val, msg.url, "protobuf_body");
+            }
+          });
+        }
+      } else if (logContentType.includes("x-www-form-urlencoded")) {
+        try {
+          const text = new TextDecoder().decode(bytes);
+          const params = new URLSearchParams(text);
+          const fReq = params.get("f.req");
+          if (fReq) {
+            const json = JSON.parse(fReq);
+            if (Array.isArray(json)) {
+              entry.decodedBody = jspbToTree(json);
+              entry.isJspb = true;
+            }
+          }
+        } catch (_) {}
+      } else if (logContentType.includes("json")) {
+        try {
+          const text = new TextDecoder().decode(bytes);
+          const json = JSON.parse(text);
+          if (json && typeof json === "object") {
+            entry.decodedBody = json;
+            entry.isJson = true;
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  // Protobuf probing trigger
+  if (isProtobuf && msg.method === "POST") {
+    const discoveryStatus = tab.discoveryDocs.get(service);
+    const doc = discoveryStatus?.doc;
+    const match = doc ? findDiscoveryMethod(doc, url.pathname, msg.method) : null;
+    const isLearnedOnly = match &&
+      discoveryStatus.doc.resources?.learned?.methods[match.method.id.split(".").pop()];
+    if (!match || isLearnedOnly) {
+      const keysForService = collectKeysForService(tab, service, url.hostname);
+      if (apiKey && !keysForService.includes(apiKey)) keysForService.push(apiKey);
+      performProbeAndPatch(tabId, service, msg.url, apiKey || keysForService[0] || null);
+    }
+  }
+
+  // Automatic background discovery
+  const discoveryStatus = tab.discoveryDocs.get(service);
+  const notFoundCooldown = discoveryStatus?.status === "not_found" &&
+    discoveryStatus._failedAt && (Date.now() - discoveryStatus._failedAt < 300000);
+  if (!notFoundCooldown && (!discoveryStatus || discoveryStatus.status === "not_found")) {
+    if (!discoveryStatus) {
+      tab.discoveryDocs.set(service, { status: "pending", seedUrl: msg.url });
+    } else {
+      discoveryStatus.status = "pending";
+    }
+    const keysForService = collectKeysForService(tab, service, url.hostname);
+    if (apiKey && !keysForService.includes(apiKey)) keysForService.push(apiKey);
+    fetchDiscoveryForService(tabId, service, url.hostname, keysForService, msg.url);
+  }
+
+  // Extract OAuth scopes from 403 www-authenticate response header
+  if (msg.status === 403 && msg.responseHeaders) {
+    const wwwAuth = msg.responseHeaders["www-authenticate"];
+    if (wwwAuth) {
+      const scopeMatch = wwwAuth.match(/scope="([^"]*)"/);
+      if (scopeMatch) {
+        const scopeList = scopeMatch[1].split(/\s+/).filter(Boolean);
+        if (scopeList.length > 0) {
+          tab.scopes.set(service, scopeList);
+          const endpointKey = `${msg.method} ${url.hostname}${url.pathname}`;
+          const ep = tab.endpoints.get(endpointKey);
+          if (ep) ep.requiredScopes = scopeList;
+        }
+      }
+    }
+  }
+
+  // Add to request log
+  tab.requestLog.unshift(entry);
+  if (tab.requestLog.length > 50) tab.requestLog.pop();
+
+  // Learn from response
+  if (entry.responseBody) {
+    learnFromResponse(tabId, service, entry);
+  }
+
+  mergeToGlobal(tab);
+  scheduleSessionSave(tabId);
+  notifyPopup(tabId);
 }
 
 // ─── Cross-Script AST Buffering ──────────────────────────────────────────────
@@ -5583,39 +5410,3 @@ function serializeTabData(tab) {
   };
 }
 
-// ─── Request Completion Tracking ─────────────────────────────────────────────
-
-chrome.webRequest.onCompleted.addListener(
-  (details) => {
-    if (details.tabId < 0) return;
-    const tab = state.tabs.get(details.tabId);
-    if (!tab) return;
-
-    const entry = tab.requestLog.find((r) => r.id === details.requestId);
-    if (entry) {
-      entry.status = details.statusCode;
-      entry.completedAt = Date.now();
-      scheduleSessionSave(details.tabId);
-      notifyPopup(details.tabId);
-    }
-  },
-  { urls: ["<all_urls>"] },
-);
-
-chrome.webRequest.onErrorOccurred.addListener(
-  (details) => {
-    if (details.tabId < 0) return;
-    const tab = state.tabs.get(details.tabId);
-    if (!tab) return;
-
-    const entry = tab.requestLog.find((r) => r.id === details.requestId);
-    if (entry) {
-      entry.status = "error";
-      entry.error = details.error;
-      entry.completedAt = Date.now();
-      scheduleSessionSave(details.tabId);
-      notifyPopup(details.tabId);
-    }
-  },
-  { urls: ["<all_urls>"] },
-);

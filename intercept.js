@@ -1,26 +1,13 @@
 // Main-world script: wraps fetch() and XMLHttpRequest to passively capture
-// response bodies.  Communicates back to the isolated-world content script
-// via CustomEvent on the shared document.
+// request headers/bodies and response bodies.  Communicates back to the
+// isolated-world content script via CustomEvent on the shared document.
 //
-// Replaces the chrome.debugger approach — no yellow bar, no powerful permission.
+// Single capture point — replaces chrome.webRequest for all request data.
 
 (function () {
   "use strict";
 
   const EVENT_NAME = "__uasr_resp";
-
-  // ─── Filters ────────────────────────────────────────────────────────────────
-
-  const SKIP_CT = /^(image|font|video|audio)\//i;
-  const SKIP_EXT =
-    /\.(css|png|jpe?g|gif|svg|ico|woff2?|ttf|eot|mp[34]|webm|webp)(\?|$)/i;
-
-  function shouldCapture(url, contentType) {
-    if (SKIP_EXT.test(url)) return false;
-    if (contentType && SKIP_CT.test(contentType)) return false;
-    if (contentType && contentType.startsWith("text/css")) return false;
-    return true;
-  }
 
   function isBinary(ct) {
     if (!ct) return false;
@@ -45,6 +32,10 @@
       bin += String.fromCharCode.apply(null, chunk);
     }
     return btoa(bin);
+  }
+
+  function _isInternalUrl(url) {
+    return url.includes("#_uasr_send") || url.includes("#_internal_probe");
   }
 
   // ─── Buffered emit ──────────────────────────────────────────────────────────
@@ -98,11 +89,56 @@
   });
 
 
+  // ─── Request header/body capture helpers ──────────────────────────────────
+
+  function _captureHeaders(input, init) {
+    var h = {};
+    try {
+      var src = (init && init.headers) || (input instanceof Request ? input.headers : null);
+      if (!src) return h;
+      if (src instanceof Headers) {
+        src.forEach(function (v, k) { h[k] = v; });
+      } else if (Array.isArray(src)) {
+        for (var i = 0; i < src.length; i++) h[src[i][0].toLowerCase()] = src[i][1];
+      } else if (typeof src === "object") {
+        for (var k in src) h[k.toLowerCase()] = src[k];
+      }
+    } catch (_) {}
+    return h;
+  }
+
+  function _captureBody(bodySource) {
+    var reqBody = null, reqBase64 = false;
+    try {
+      if (bodySource == null) return { body: null, base64: false };
+      if (typeof bodySource === "string") {
+        reqBody = bodySource;
+      } else if (bodySource instanceof ArrayBuffer) {
+        reqBody = uint8ToBase64(new Uint8Array(bodySource));
+        reqBase64 = true;
+      } else if (bodySource instanceof Uint8Array) {
+        reqBody = uint8ToBase64(bodySource);
+        reqBase64 = true;
+      } else if (typeof URLSearchParams !== "undefined" && bodySource instanceof URLSearchParams) {
+        reqBody = bodySource.toString();
+      }
+      // FormData, Blob, ReadableStream — can't serialize simply, skip
+    } catch (_) {}
+    return { body: reqBody, base64: reqBase64 };
+  }
+
   // ─── fetch() wrapper ───────────────────────────────────────────────────────
 
   const _fetch = window.fetch;
 
   window.fetch = async function (input, init) {
+    // Snapshot request data before calling fetch (body may be consumed)
+    var reqHeaders = _captureHeaders(input, init);
+    var bodySource = (init && init.body !== undefined) ? init.body : null;
+    var captured = _captureBody(bodySource);
+    var reqBody = captured.body;
+    var reqBase64 = captured.base64;
+
     const response = await _fetch.apply(this, arguments);
 
     try {
@@ -113,43 +149,63 @@
             ? input.url
             : String(input);
       const url = new URL(raw, location.href).href;
+
+      if (_isInternalUrl(url)) return response;
+
       const method =
         (init && init.method) ||
         (input instanceof Request ? input.method : "GET");
       const ct = response.headers.get("content-type") || "";
 
-      if (shouldCapture(url, ct)) {
-        const clone = response.clone();
-        // Read body asynchronously — never blocks the caller
-        (async () => {
-          try {
-            const headers = {};
-            clone.headers.forEach((v, k) => {
-              headers[k] = v;
-            });
+      const clone = response.clone();
+      // Read body asynchronously — never blocks the caller
+      (async () => {
+        try {
+          const headers = {};
+          clone.headers.forEach((v, k) => {
+            headers[k] = v;
+          });
 
-            let body,
-              base64Encoded = false;
-            if (isBinary(ct)) {
-              const buf = await clone.arrayBuffer();
-              body = uint8ToBase64(new Uint8Array(buf));
-              base64Encoded = true;
-            } else {
-              body = await clone.text();
-            }
+          // If body wasn't captured synchronously (Request with stream body),
+          // try reading from a cloned Request
+          if (reqBody === null && input instanceof Request && !init) {
+            try {
+              var rc = input.clone();
+              var ct2 = reqHeaders["content-type"] || "";
+              if (isBinary(ct2)) {
+                var ab = await rc.arrayBuffer();
+                reqBody = uint8ToBase64(new Uint8Array(ab));
+                reqBase64 = true;
+              } else {
+                reqBody = await rc.text();
+              }
+            } catch (_) {}
+          }
 
-            emit({
-              url,
-              method: method.toUpperCase(),
-              status: clone.status,
-              contentType: ct,
-              responseHeaders: headers,
-              body,
-              base64Encoded,
-            });
-          } catch (_) {}
-        })();
-      }
+          let body,
+            base64Encoded = false;
+          if (isBinary(ct)) {
+            const buf = await clone.arrayBuffer();
+            body = uint8ToBase64(new Uint8Array(buf));
+            base64Encoded = true;
+          } else {
+            body = await clone.text();
+          }
+
+          emit({
+            url,
+            method: method.toUpperCase(),
+            status: clone.status,
+            contentType: ct,
+            responseHeaders: headers,
+            body,
+            base64Encoded,
+            requestHeaders: reqHeaders,
+            requestBody: reqBody,
+            requestBodyBase64: reqBase64,
+          });
+        } catch (_) {}
+      })();
     } catch (_) {}
 
     return response;
@@ -159,25 +215,41 @@
 
   const _xhrOpen = XMLHttpRequest.prototype.open;
   const _xhrSend = XMLHttpRequest.prototype.send;
+  const _xhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
 
   XMLHttpRequest.prototype.open = function (method, url) {
     this.__uasr_method = method;
     this.__uasr_url = url;
+    this.__uasr_reqHeaders = {};
     return _xhrOpen.apply(this, arguments);
   };
 
-  XMLHttpRequest.prototype.send = function () {
+  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+    if (!this.__uasr_reqHeaders) this.__uasr_reqHeaders = {};
+    this.__uasr_reqHeaders[name.toLowerCase()] = value;
+    return _xhrSetHeader.apply(this, arguments);
+  };
+
+  XMLHttpRequest.prototype.send = function (sendBody) {
     if (this.__uasr_hooked) return _xhrSend.apply(this, arguments);
     this.__uasr_hooked = true;
+
+    // Capture request body before sending
+    var captured = _captureBody(sendBody);
+    var _reqHeaders = this.__uasr_reqHeaders || {};
+    var _reqBody = captured.body;
+    var _reqBase64 = captured.base64;
+
     this.addEventListener("load", function () {
       try {
         const url = new URL(
           String(this.__uasr_url || ""),
           location.href,
         ).href;
-        const ct = this.getResponseHeader("content-type") || "";
-        if (!shouldCapture(url, ct)) return;
 
+        if (_isInternalUrl(url)) return;
+
+        const ct = this.getResponseHeader("content-type") || "";
         // Collect response headers
         const rawHeaders = this.getAllResponseHeaders();
         const headers = {};
@@ -215,6 +287,9 @@
           responseHeaders: headers,
           body,
           base64Encoded,
+          requestHeaders: _reqHeaders,
+          requestBody: _reqBody,
+          requestBodyBase64: _reqBase64,
         });
       } catch (_) {}
     });
@@ -341,33 +416,33 @@
     navigator.sendBeacon = function (url, data) {
       try {
         const beaconUrl = new URL(url, location.href).href;
-        let body = null, base64Encoded = false;
+        let reqBody = null, reqBase64 = false;
         if (typeof data === "string") {
-          body = data;
+          reqBody = data;
         } else if (data instanceof Uint8Array) {
-          body = uint8ToBase64(data);
-          base64Encoded = true;
+          reqBody = uint8ToBase64(data);
+          reqBase64 = true;
         } else if (data instanceof ArrayBuffer) {
-          body = uint8ToBase64(new Uint8Array(data));
-          base64Encoded = true;
+          reqBody = uint8ToBase64(new Uint8Array(data));
+          reqBase64 = true;
         } else if (typeof URLSearchParams !== "undefined" && data instanceof URLSearchParams) {
-          body = data.toString();
+          reqBody = data.toString();
         } else if (typeof FormData !== "undefined" && data instanceof FormData) {
           // FormData can't be serialized simply — skip body
         } else if (typeof Blob !== "undefined" && data instanceof Blob) {
           // Can't read synchronously — emit URL only
         }
-        if (shouldCapture(beaconUrl, "")) {
-          emit({
-            url: beaconUrl,
-            method: "BEACON",
-            status: 0,
-            contentType: "beacon",
-            responseHeaders: {},
-            body,
-            base64Encoded,
-          });
-        }
+        emit({
+          url: beaconUrl,
+          method: "BEACON",
+          status: 0,
+          contentType: "beacon",
+          responseHeaders: {},
+          body: null,
+          base64Encoded: false,
+          requestBody: reqBody,
+          requestBodyBase64: reqBase64,
+        });
       } catch (_) {}
       return _sendBeacon.apply(navigator, arguments);
     };

@@ -6,8 +6,7 @@ A Chrome Extension (MV3) for API discovery, protocol reverse-engineering (Protob
 
 ## Core Architecture
 
-- **Request Interception**: `webRequest` API captures request metadata, headers, and bodies. No debugger permission needed.
-- **Response Capture**: `intercept.js` runs in the page's main world (`world: "MAIN"`, `document_start`), wrapping `fetch()` and `XMLHttpRequest` to capture response bodies. Data flows: `intercept.js` → `CustomEvent(__uasr_resp)` → `content.js` relay → `chrome.runtime.sendMessage(RESPONSE_BODY)` → `background.js` handler.
+- **Request/Response Capture**: `intercept.js` runs in the page's main world (`world: "MAIN"`, `document_start`), wrapping `fetch()`, `XMLHttpRequest`, `WebSocket`, `EventSource`, and `sendBeacon` to capture both request data (headers, body) and response data (status, headers, body). Single capture point — no `webRequest` permission needed. Data flows: `intercept.js` → `CustomEvent(__uasr_resp)` → `content.js` relay → `chrome.runtime.sendMessage(RESPONSE_BODY)` → `background.js` `handleResponseBody()` which creates log entries, extracts keys, learns schemas, triggers discovery/probing.
 - **Protocol Handlers** (in `lib/discovery.js`):
   - `parseBatchExecuteRequest/Response` — Google batchexecute RPC
   - `parseAsyncChunkedResponse` — Google hex-length-prefixed async chunks
@@ -30,8 +29,8 @@ A Chrome Extension (MV3) for API discovery, protocol reverse-engineering (Protob
 
 | File | Role |
 |------|------|
-| `manifest.json` | MV3 manifest. Permissions: `webRequest`, `storage`, `activeTab`. |
-| `intercept.js` | Main-world content script. Wraps `fetch`/`XHR`, emits `__uasr_resp` CustomEvent with response body, headers, status. Filters out non-API content types. |
+| `manifest.json` | MV3 manifest. Permissions: `webNavigation`, `storage`, `activeTab`, `offscreen`. No `webRequest`. |
+| `intercept.js` | Main-world content script. Wraps `fetch`/`XHR`/`WebSocket`/`EventSource`/`sendBeacon`, captures request headers+body and response headers+body. Emits `__uasr_resp` CustomEvent. Single capture point for all network data. |
 | `content.js` | Isolated-world content script. DOM key/endpoint scanning, `PAGE_FETCH` relay for session-aware requests, `__uasr_resp` event relay to background. |
 | `background.js` | Service worker. Request interception, key extraction, schema learning, request export builder, OpenAPI export/import, session storage, message routing. |
 | `popup.js` | Popup controller. Tab rendering, service filter, cross-tab log filtering, replay, export (curl/fetch/Python/OpenAPI). |
@@ -69,11 +68,11 @@ All AST analysis uses Babel's scope system (`path.scope.getBinding()`) for varia
 ## Development Standards
 
 - **Naming**: `camelCase` for logic, `UPPER_SNAKE_CASE` for constants. Unified `methodId` format: `interface.name.method`.
-- **MV3 Compliance**: Non-blocking `webRequest` observers. No debugger API. Response bodies captured via main-world prototype wrapping.
+- **MV3 Compliance**: No `webRequest` or debugger API. All network capture via main-world prototype wrapping in `intercept.js`.
 - **Message Routing**: `chrome.runtime.onMessage` routes by sender origin — extension pages go to `handlePopupMessage`, content scripts go to `handleContentMessage`. Allowed content script types: `CONTENT_KEYS`, `CONTENT_ENDPOINTS`, `RESPONSE_BODY`.
 - **UI Security**: Strict origin checks in `onMessage` handlers. All dynamic content passed through `esc()` to prevent XSS.
 - **Data Persistence**: `scheduleSave()` for global store writes (IndexedDB, inaccessible to content scripts), `scheduleSessionSave(tabId)` for per-tab request log writes (`chrome.storage.session`, 1s debounce). GlobalStore uses IndexedDB instead of `chrome.storage.local` to prevent compromised renderers from reading cross-site structural metadata.
-- **Intercept Script Safety**: `intercept.js` runs in main world — never blocks the caller (async body reads), filters non-API content types. Uses IIFE to avoid global pollution.
+- **Intercept Script Safety**: `intercept.js` runs in main world — never blocks the caller (async body reads). Uses IIFE to avoid global pollution. Filters internal requests (`_uasr_send`, `_internal_probe` hashes). Static asset and noise path filtering done in `background.js` `handleResponseBody()`.
 - **Send Panel**: Content-Type and body mode are auto-determined (no manual dropdowns). `currentContentType` set from `schema.contentTypes[0]` or replayed request headers. `currentBodyMode` set to `form` (schema loaded), `graphql` (GraphQL URL), or `raw` (fallback). `setBodyMode()` toggles panel visibility.
 
 ## Security Model
@@ -101,7 +100,7 @@ All AST analysis uses Babel's scope system (`path.scope.getBinding()`) for varia
 - **Extend Key Patterns**: Update `KEY_PATTERNS` in `background.js`.
 - **Adjust Method Heuristics**: Modify `calculateMethodMetadata` in `background.js`.
 - **Add Export Format**: Add a `formatXxx()` function in `popup.js` and a button in `popup.html`. The `BUILD_REQUEST` message handler in `background.js` returns the fully-encoded `{ url, method, headers, body }`.
-- **Add Intercepted Content Types**: Modify `shouldCapture()` / `isBinary()` in `intercept.js`.
+- **Add Intercepted Content Types**: Modify `isBinary()` in `intercept.js` for binary encoding detection. Add static asset extensions to the filter regex in `handleResponseBody()` in `background.js`.
 - **Add Protocol Parser**: Add parser + detector in `lib/discovery.js`, add `learnFromResponse()` branch in `background.js`, add renderer in `popup.js` (wire into `renderResultBody()`), add format badge.
 - **UI Changes**: Ensure new components maintain scroll position in their respective panels. The Send panel includes export buttons (curl, fetch, Python).
 - **Cross-Tab Features**: Tab metadata tracked in `_tabMeta` Map. Filter logic in popup controlled by `logFilter` state variable. New message types: `GET_TAB_LIST`, `GET_ALL_LOGS`.
