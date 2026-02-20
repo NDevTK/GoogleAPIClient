@@ -803,10 +803,12 @@ function learnFromRequest(tabId, interfaceName, entry, headers) {
       httpMethod: method,
       parameters: {},
       request: null,
+      origin: url.origin,
     };
   }
 
   const m = probedMethod || doc.resources.learned.methods[methodName];
+  if (m && !m.origin) m.origin = url.origin;
 
   // Learn query parameters from URL
   if (!url.pathname.includes("batchexecute")) {
@@ -1897,37 +1899,9 @@ function releaseTempTab(origin) {
 }
 
 /**
- * Resolve the best frameId for a given initiatorOrigin on a tab.
- * Uses webNavigation.getAllFrames to find a frame matching the origin.
- * Returns 0 (main frame) if no match or if initiatorOrigin is null.
- */
-async function _resolveFrameForOrigin(tabId, initiatorOrigin) {
-  if (!initiatorOrigin) return 0;
-  try {
-    const frames = await chrome.webNavigation.getAllFrames({ tabId });
-    if (!frames) return 0;
-    // Prefer non-main frames matching the origin (iframe proxy scenario)
-    for (const f of frames) {
-      if (f.frameId === 0) continue; // check sub-frames first
-      try {
-        if (new URL(f.url).origin === initiatorOrigin) return f.frameId;
-      } catch (_) {}
-    }
-    // Fall back to main frame if its origin matches
-    for (const f of frames) {
-      if (f.frameId !== 0) continue;
-      try {
-        if (new URL(f.url).origin === initiatorOrigin) return 0;
-      } catch (_) {}
-    }
-  } catch (_) {}
-  return 0;
-}
-
-/**
  * Fetch through a content script, with temp window fallback.
- * Dynamically resolves the correct frame by matching initiatorOrigin
- * against the tab's current frames (frameIds are ephemeral).
+ * Tries the original tab first (main frame), then any tab with matching
+ * origin, then opens a temp window as last resort.
  */
 async function pageContextFetch(tabId, url, opts, initiatorOrigin, allowFallbackTab = false) {
   // Validate URL
@@ -1940,19 +1914,11 @@ async function pageContextFetch(tabId, url, opts, initiatorOrigin, allowFallback
     return { error: "blocked: invalid URL" };
   }
 
-  // Try the original tab — resolve the right frame dynamically
+  // Try the original tab (main frame)
   if (tabId != null) {
-    const frameId = await _resolveFrameForOrigin(tabId, initiatorOrigin);
     try {
-      return await sendPageFetch(tabId, url, opts, frameId);
+      return await sendPageFetch(tabId, url, opts, 0);
     } catch (_) {
-      // If we targeted a sub-frame and it failed, fall back to main frame
-      if (frameId !== 0) {
-        try {
-          return await sendPageFetch(tabId, url, opts, 0);
-        } catch (__) {}
-      }
-
       // Tab might still be loading — poll briefly if origin matches
       try {
         const tab = await chrome.tabs.get(tabId);

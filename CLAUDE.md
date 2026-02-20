@@ -29,7 +29,7 @@ A Chrome Extension (MV3) for API discovery, protocol reverse-engineering (Protob
 
 | File | Role |
 |------|------|
-| `manifest.json` | MV3 manifest. Permissions: `webNavigation`, `storage`, `activeTab`, `offscreen`. No `webRequest`. |
+| `manifest.json` | MV3 manifest. Permissions: `storage`, `offscreen`. Host permissions: `<all_urls>`. |
 | `intercept.js` | Main-world content script. Wraps `fetch`/`XHR`/`WebSocket`/`EventSource`/`sendBeacon`, captures request headers+body and response headers+body. Emits `__uasr_resp` CustomEvent. Single capture point for all network data. |
 | `content.js` | Isolated-world content script. DOM key/endpoint scanning, `PAGE_FETCH` relay for session-aware requests, `__uasr_resp` event relay to background. |
 | `background.js` | Service worker. Request interception, key extraction, schema learning, request export builder, OpenAPI export/import, session storage, message routing. |

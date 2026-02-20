@@ -869,6 +869,10 @@ function onSendEndpointSelected() {
   const select = document.getElementById("send-ep-select");
   const epKey = select.value;
 
+  // Clear previous send result
+  const respEl = document.getElementById("send-response");
+  if (respEl) respEl.style.display = "none";
+
   // Handle virtual discovery endpoint
   const selectedOpt = select.options[select.selectedIndex];
   if (selectedOpt?.dataset?.isVirtual === "true") {
