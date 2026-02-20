@@ -573,6 +573,21 @@ function isApiRequest(url, details) {
   return true;
 }
 
+// Strip JSONP wrapper: callbackName({"key":"value"}) → '{"key":"value"}'
+// Returns the inner JSON string or null if not JSONP.
+function stripJsonp(text) {
+  var m = /^[a-zA-Z_$][\w$.]*\s*\(\s*/.exec(text);
+  if (!m) return null;
+  var inner = text.slice(m[0].length);
+  // Remove trailing );\s* or )\s*
+  var end = inner.lastIndexOf(")");
+  if (end === -1) return null;
+  inner = inner.slice(0, end).trim();
+  // Sanity check: must look like JSON (object or array)
+  if (inner.charAt(0) !== "{" && inner.charAt(0) !== "[") return null;
+  return inner;
+}
+
 // Extract interface name from URL with better granularity
 function extractInterfaceName(urlObj) {
   const hostname = urlObj.hostname;
@@ -1739,9 +1754,16 @@ function learnFromResponse(tabId, interfaceName, entry) {
         mergeSchemaInto(doc, schemaName, newSchema);
       }
     } catch (e) {}
-  } else if (mimeType.includes("json")) {
+  } else if (mimeType.includes("json") || mimeType.includes("javascript")) {
+    // JSON or JSONP (callback-wrapped JSON returned as text/javascript)
     try {
-      const json = JSON.parse(textBody);
+      var _lrText = textBody;
+      if (!mimeType.includes("json")) {
+        var _lrJsonp = stripJsonp(textBody);
+        if (!_lrJsonp) throw new Error("not JSONP");
+        _lrText = _lrJsonp;
+      }
+      const json = JSON.parse(_lrText);
       const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Response`;
       targetM.response = { $ref: schemaName };
       const newSchema = generateSchemaFromJson(json, schemaName, doc.schemas);
@@ -1775,10 +1797,11 @@ function learnFromResponse(tabId, interfaceName, entry) {
   if (tab._valueIndex && textBody) {
     const methodId = targetM.id || `${interfaceName.replace(/\//g, ".")}.${methodName}`;
     try {
-      const parsed = JSON.parse(textBody);
+      var _ciText = stripJsonp(textBody) || textBody;
+      const parsed = JSON.parse(_ciText);
       indexResponseValues(tab._valueIndex, parsed, methodId);
     } catch (_) {
-      // Not JSON — index the raw text body if it looks like a useful value
+      // Not JSON/JSONP — index the raw text body if it looks like a useful value
       if (textBody.length >= 4 && textBody.length <= 500) {
         indexResponseValues(tab._valueIndex, textBody, methodId);
       }

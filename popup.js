@@ -3087,12 +3087,21 @@ async function replayRequest(reqId, sourceTabId) {
             size: bytes.length,
           };
         } catch (e) {}
-      } else if (mimeType.includes("json") || mimeType.includes("text/plain")) {
+      } else if (mimeType.includes("json") || mimeType.includes("text/plain") || mimeType.includes("javascript")) {
         try {
           // Strip Google XSSI prefix before parsing
           let jsonText = bodyText;
           if (jsonText.trimStart().startsWith(")]}'")) {
             jsonText = jsonText.trimStart().substring(4).trimStart();
+          }
+          // Strip JSONP wrapper: callbackName({...}) → {...}
+          if (mimeType.includes("javascript")) {
+            var _jpM = /^[a-zA-Z_$][\w$.]*\s*\(\s*/.exec(jsonText);
+            if (_jpM) {
+              var _jpInner = jsonText.slice(_jpM[0].length);
+              var _jpEnd = _jpInner.lastIndexOf(")");
+              if (_jpEnd !== -1) jsonText = _jpInner.slice(0, _jpEnd).trim();
+            }
           }
           const parsed = JSON.parse(jsonText);
           // Detect JSPB in text/plain responses (Google returns these)
