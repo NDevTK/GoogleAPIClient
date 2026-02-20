@@ -2753,6 +2753,9 @@ async function handleResponseBody(tabId, msg) {
     if (textBody) extractKeysFromText(tabId, textBody, msg.url, "response_body");
   }
 
+  // Snapshot discovery status before learnFromRequest (which creates a virtual doc)
+  const preLearnDiscovery = tab.discoveryDocs.get(service);
+
   // Learn from request (schema extraction)
   learnFromRequest(tabId, service, entry, headerMap);
   mergeToGlobal(tab);
@@ -2822,15 +2825,15 @@ async function handleResponseBody(tabId, msg) {
     }
   }
 
-  // Automatic background discovery
-  const discoveryStatus = tab.discoveryDocs.get(service);
-  const notFoundCooldown = discoveryStatus?.status === "not_found" &&
-    discoveryStatus._failedAt && (Date.now() - discoveryStatus._failedAt < 300000);
-  if (!notFoundCooldown && (!discoveryStatus || discoveryStatus.status === "not_found")) {
-    if (!discoveryStatus) {
-      tab.discoveryDocs.set(service, { status: "pending", seedUrl: msg.url });
-    } else {
+  // Automatic background discovery (use pre-learn snapshot to avoid virtual doc blocking)
+  const notFoundCooldown = preLearnDiscovery?.status === "not_found" &&
+    preLearnDiscovery._failedAt && (Date.now() - preLearnDiscovery._failedAt < 300000);
+  if (!notFoundCooldown && (!preLearnDiscovery || preLearnDiscovery.status === "not_found")) {
+    const discoveryStatus = tab.discoveryDocs.get(service);
+    if (discoveryStatus) {
       discoveryStatus.status = "pending";
+    } else {
+      tab.discoveryDocs.set(service, { status: "pending", seedUrl: msg.url });
     }
     const keysForService = collectKeysForService(tab, service, url.hostname);
     if (apiKey && !keysForService.includes(apiKey)) keysForService.push(apiKey);
