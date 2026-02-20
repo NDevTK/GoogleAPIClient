@@ -4571,6 +4571,93 @@ test("postMessage(data, 'https://specific.com') → NOT flagged", `
   });
 });
 
+// ── PostMessage Severity ──
+console.log("\n=== Security: PostMessage Severity ===\n");
+
+test("postMessage listener without sink → medium severity", `
+  window.addEventListener("message", function(event) {
+    console.log(event.data);
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" && p.severity === "medium";
+  });
+});
+
+test("postMessage listener with innerHTML sink → high severity", `
+  window.addEventListener("message", function(event) {
+    document.body.innerHTML = event.data;
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" && p.severity === "high";
+  });
+});
+
+test("postMessage listener with eval sink → high severity", `
+  window.addEventListener("message", function(event) {
+    eval(event.data);
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" && p.severity === "high";
+  });
+});
+
+test("postMessage listener with document.write sink → high severity", `
+  window.addEventListener("message", function(event) {
+    document.write(event.data);
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" && p.severity === "high";
+  });
+});
+
+test("postMessage listener with location.href sink → high severity", `
+  window.addEventListener("message", function(event) {
+    location.href = event.data;
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" && p.severity === "high";
+  });
+});
+
+test("weak origin postMessage with sink → high severity", `
+  window.addEventListener("message", function(event) {
+    if (event.origin.includes("example.com")) {
+      document.body.innerHTML = event.data;
+    }
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-weak-origin" && p.severity === "high";
+  });
+});
+
+test("weak origin postMessage without sink → medium severity", `
+  window.addEventListener("message", function(event) {
+    if (event.origin.includes("example.com")) {
+      console.log(event.data);
+    }
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-weak-origin" && p.severity === "medium";
+  });
+});
+
+test("postMessage high severity description includes sink name", `
+  window.addEventListener("message", function(event) {
+    document.body.innerHTML = event.data;
+  });
+`, function(r) {
+  return r.dangerousPatterns.some(function(p) {
+    return p.type === "postmessage-no-origin" && p.description.indexOf("innerHTML") !== -1;
+  });
+});
+
 // ── Prototype Pollution API Detection ──
 console.log("\n=== Security: Prototype Pollution APIs ===\n");
 
