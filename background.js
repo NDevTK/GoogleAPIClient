@@ -3678,7 +3678,178 @@ function mergeASTResultsIntoVDD(tab, results, tabId) {
 
 // ─── Message Handling ────────────────────────────────────────────────────────
 
-// Content scripts handle CONTENT_KEYS, CONTENT_ENDPOINTS, RESPONSE_BODY, and SCRIPT_SOURCE.
+// ─── Form Metadata Processing ─────────────────────────────────────────────
+
+function _formFieldToParamType(field) {
+  switch (field.type) {
+    case "number": case "range": return "number";
+    case "checkbox": return "boolean";
+    case "file": return "file";
+    default: return "string";
+  }
+}
+
+function _handleFormMetadata(tabId, forms, sender) {
+  const tab = getTab(tabId);
+  const pageUrl = sender.tab ? sender.tab.url : null;
+
+  for (var fi = 0; fi < forms.length; fi++) {
+    var form = forms[fi];
+    if (!form.action || !form.fields || !form.fields.length) continue;
+
+    var url;
+    try { url = new URL(form.action); } catch (_) { continue; }
+
+    var service = extractInterfaceName(url);
+    var { methodName: baseMethodName } = calculateMethodMetadata(url, service);
+    var qualifiedName = form.method.toLowerCase() + "_" + baseMethodName;
+    console.log("[UASR] form →", service, qualifiedName, form.fields.length, "fields");
+
+    // Create or get VDD entry
+    var docEntry = tab.discoveryDocs.get(service);
+    if (!docEntry || !docEntry.doc) {
+      docEntry = {
+        status: "found",
+        isVirtual: true,
+        doc: {
+          kind: "discovery#restDescription",
+          name: service,
+          title: `${service} (Learned)`,
+          rootUrl: url.origin + "/",
+          baseUrl: url.origin + "/",
+          resources: { learned: { methods: {} } },
+          schemas: {},
+        },
+      };
+      tab.discoveryDocs.set(service, docEntry);
+    }
+
+    var doc = docEntry.doc;
+    if (!doc.resources.learned) doc.resources.learned = { methods: {} };
+
+    var methodId = `${service.replace(/\//g, ".")}.${qualifiedName}`;
+
+    if (!doc.resources.learned.methods[qualifiedName]) {
+      doc.resources.learned.methods[qualifiedName] = {
+        id: methodId,
+        path: url.pathname.substring(1),
+        httpMethod: form.method,
+        parameters: {},
+        request: null,
+        origin: url.origin,
+        _source: "form_scan",
+      };
+    }
+
+    var m = doc.resources.learned.methods[qualifiedName];
+
+    // Convert form fields to parameters
+    for (var fj = 0; fj < form.fields.length; fj++) {
+      var field = form.fields[fj];
+      if (!field.name || typeof field.name !== "string") continue;
+
+      var location = form.method === "GET" ? "query" : "body";
+      var paramType = _formFieldToParamType(field);
+
+      if (!m.parameters[field.name]) {
+        m.parameters[field.name] = {
+          type: paramType,
+          location: location,
+          description: "Learned from form" + (field.placeholder ? ` (${field.placeholder})` : ""),
+        };
+      }
+
+      var param = m.parameters[field.name];
+
+      // HTML validation constraints
+      if (field.required) param.required = true;
+      if (field.pattern) param.pattern = field.pattern;
+      if (field.minLength) param.minLength = field.minLength;
+      if (field.maxLength) param.maxLength = field.maxLength;
+      if (field.min != null) param.minimum = field.min;
+      if (field.max != null) param.maximum = field.max;
+
+      // Select/radio options → enum
+      if (field.options && field.options.length > 0) {
+        param.enum = field.options.map(function (o) { return o.value; });
+      }
+
+      if (field.defaultValue != null) param.default = field.defaultValue;
+      if (field.autocomplete) param._autocomplete = field.autocomplete;
+    }
+
+    // Record content type
+    if (!m.contentTypes) m.contentTypes = [];
+    if (!m.contentTypes.includes(form.enctype)) m.contentTypes.push(form.enctype);
+
+    // Register as endpoint
+    var epKey = "FORM " + form.method + " " + url.hostname + url.pathname;
+    if (!tab.endpoints.has(epKey)) {
+      tab.endpoints.set(epKey, {
+        url: form.action,
+        method: form.method,
+        host: url.hostname,
+        path: url.pathname,
+        service: service,
+        origin: url.origin,
+        source: "form_scan",
+        pageUrl: pageUrl,
+        firstSeen: Date.now(),
+      });
+    }
+  }
+
+  mergeToGlobal(tab);
+  notifyPopup(tabId);
+}
+
+function _handleFormSubmit(tabId, msg) {
+  if (!msg.url || !msg.fields) return;
+  var tab = getTab(tabId);
+  var method = msg.method || "GET";
+
+  var url;
+  try { url = new URL(msg.url); } catch (_) { return; }
+
+  var service = extractInterfaceName(url);
+
+  // Build body for POST forms
+  var reqBody = null;
+  if (method !== "GET" && msg.fields.length > 0) {
+    reqBody = msg.fields.map(function (f) {
+      return encodeURIComponent(f.name) + "=" + encodeURIComponent(f.value);
+    }).join("&");
+  }
+
+  // Create log entry
+  var entry = {
+    id: "form_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
+    url: msg.url,
+    method: method,
+    service: service,
+    timestamp: Date.now(),
+    status: 0,
+    completedAt: Date.now(),
+    requestHeaders: method !== "GET" ? { "content-type": msg.enctype || "application/x-www-form-urlencoded" } : {},
+    contentType: msg.enctype || "",
+    rawBodyB64: reqBody ? btoa(reqBody) : null,
+    responseBody: null,
+    responseBase64: false,
+    mimeType: "",
+    responseHeaders: {},
+    _source: "form_submit",
+  };
+
+  tab.requestLog.push(entry);
+  scheduleSessionSave(tabId);
+
+  // Learn from the form submission
+  learnFromRequest(tabId, service, entry, entry.requestHeaders);
+  mergeToGlobal(tab);
+  notifyPopup(tabId);
+}
+
+// Content scripts handle CONTENT_KEYS, CONTENT_ENDPOINTS, CONTENT_FORMS, CONTENT_FORM_SUBMIT, RESPONSE_BODY, and SCRIPT_SOURCE.
 // Manifest "matches" already restricts which pages they run on.
 function handleContentMessage(msg, sender) {
   if (!sender.tab) return;
@@ -3701,6 +3872,20 @@ function handleContentMessage(msg, sender) {
       // Background has host_permissions: <all_urls>, so fetch is unrestricted
       _fetchAndBufferScript(tabId, msg.url, pageUrl);
     }
+    return;
+  }
+
+  if (msg.type === "CONTENT_FORMS") {
+    console.log("[UASR] CONTENT_FORMS received, forms:", msg.forms?.length, msg.forms);
+    if (Array.isArray(msg.forms)) {
+      _handleFormMetadata(tabId, msg.forms, sender);
+    }
+    return;
+  }
+
+  if (msg.type === "CONTENT_FORM_SUBMIT") {
+    console.log("[UASR] CONTENT_FORM_SUBMIT received", msg.method, msg.url, msg.fields?.length, "fields");
+    _handleFormSubmit(tabId, msg);
     return;
   }
 
@@ -3760,6 +3945,7 @@ function handleContentMessage(msg, sender) {
     mergeToGlobal(tab);
     notifyPopup(tabId);
   }
+
 }
 
 // Popup messages — sender.tab is absent for popup contexts.
@@ -4452,6 +4638,8 @@ const EXTENSION_ORIGIN = `chrome-extension://${chrome.runtime.id}`;
 const CONTENT_TYPES = new Set([
   "CONTENT_KEYS",
   "CONTENT_ENDPOINTS",
+  "CONTENT_FORMS",
+  "CONTENT_FORM_SUBMIT",
   "RESPONSE_BODY",
   "SCRIPT_SOURCE",
 ]);

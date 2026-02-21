@@ -208,6 +208,90 @@
     return { keys: [...new Set(keys)], endpoints: [...new Set(endpoints)] };
   }
 
+  // ─── Form Element Scanning ────────────────────────────────────────────────
+
+  function scanForms() {
+    var forms = document.querySelectorAll("form");
+    if (!forms.length) return [];
+    var results = [];
+    for (var i = 0; i < forms.length; i++) {
+      var meta = _extractFormMetadata(forms[i]);
+      if (meta) results.push(meta);
+    }
+    return results;
+  }
+
+  function _extractFormMetadata(form) {
+    var action;
+    try {
+      action = new URL(form.action || location.href, location.href).href;
+    } catch (_) {
+      action = location.href;
+    }
+
+    var method = (form.method || "GET").toUpperCase();
+    var enctype = form.enctype || "application/x-www-form-urlencoded";
+
+    var fields = [];
+    var elements = form.elements;
+    var seenNames = {};
+
+    for (var i = 0; i < elements.length; i++) {
+      var el = elements[i];
+      var name = el.name;
+      if (!name) continue;
+      if (seenNames[name] && el.type === "radio") continue;
+      seenNames[name] = true;
+
+      var field = { name: name, tagName: el.tagName.toLowerCase(), type: el.type || null };
+
+      if (el.placeholder) field.placeholder = el.placeholder;
+      if (el.required) field.required = true;
+      if (el.pattern) field.pattern = el.pattern;
+      if (el.minLength > 0) field.minLength = el.minLength;
+      if (el.maxLength > 0 && el.maxLength < 524288) field.maxLength = el.maxLength;
+      if (el.min) field.min = el.min;
+      if (el.max) field.max = el.max;
+      if (el.step && el.step !== "any") field.step = el.step;
+      if (el.autocomplete && el.autocomplete !== "on" && el.autocomplete !== "off") {
+        field.autocomplete = el.autocomplete;
+      }
+      if (el.value && el.type !== "password") {
+        field.defaultValue = el.value;
+      }
+
+      // Select options
+      if (el.tagName === "SELECT") {
+        var options = [];
+        for (var j = 0; j < el.options.length && j < 50; j++) {
+          options.push({ value: el.options[j].value, label: el.options[j].text || el.options[j].value });
+        }
+        field.options = options;
+      }
+
+      // Radio button group values
+      if (el.type === "radio") {
+        var radios = form.querySelectorAll("input[type=\"radio\"][name=\"" + CSS.escape(name) + "\"]");
+        var radioValues = [];
+        for (var r = 0; r < radios.length; r++) radioValues.push(radios[r].value);
+        field.options = radioValues.map(function (v) { return { value: v, label: v }; });
+      }
+
+      fields.push(field);
+    }
+
+    if (fields.length === 0) return null;
+
+    return {
+      action: action,
+      method: method,
+      enctype: enctype,
+      id: form.id || null,
+      name: form.name || null,
+      fields: fields,
+    };
+  }
+
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   function isBinaryContentType(ct) {
@@ -385,6 +469,17 @@
     });
   }
 
+  var forms = scanForms();
+  console.log("[UASR] scanForms found", forms.length, "forms", forms);
+  if (forms.length > 0) {
+    chrome.runtime.sendMessage({
+      type: "CONTENT_FORMS",
+      forms: forms,
+      origin: location.origin,
+      pageUrl: location.href,
+    });
+  }
+
   // ─── Script Source Extraction (for AST analysis) ────────────────────────────
 
   const _sentScripts = new Set(); // track URLs/hashes already sent
@@ -441,6 +536,7 @@
   let debounceTimer = null;
   const pendingKeys = new Set();
   const pendingEndpoints = new Set();
+  const pendingForms = [];
 
   const observer = new MutationObserver((mutations) => {
     let changed = false;
@@ -458,6 +554,17 @@
             }
             // Extract source for AST analysis
             extractScriptSource(node);
+          }
+          // Check form elements
+          if (node.tagName === "FORM") {
+            var formMeta = _extractFormMetadata(node);
+            if (formMeta) { pendingForms.push(formMeta); changed = true; }
+          } else if (node.querySelectorAll) {
+            var nestedForms = node.querySelectorAll("form");
+            for (var fi = 0; fi < nestedForms.length; fi++) {
+              var nfMeta = _extractFormMetadata(nestedForms[fi]);
+              if (nfMeta) { pendingForms.push(nfMeta); changed = true; }
+            }
           }
         }
       }
@@ -492,5 +599,68 @@
       });
       pendingEndpoints.clear();
     }
+    if (pendingForms.length > 0) {
+      chrome.runtime.sendMessage({
+        type: "CONTENT_FORMS",
+        forms: pendingForms.slice(),
+        origin: location.origin,
+        pageUrl: location.href,
+      });
+      pendingForms.length = 0;
+    }
   }
+
+  // ─── Form Submission Capture ──────────────────────────────────────────────
+
+  document.addEventListener("submit", function (e) {
+    console.log("[UASR] submit event fired", e.target?.tagName, e.target?.name);
+    if (!e.target || e.target.tagName !== "FORM") return;
+    try {
+      var form = e.target;
+      var action;
+      try { action = new URL(form.action || location.href, location.href).href; }
+      catch (_) { action = location.href; }
+
+      var method = (form.method || "GET").toUpperCase();
+      var enctype = form.enctype || "application/x-www-form-urlencoded";
+
+      var fd;
+      try { fd = new FormData(form); } catch (_) { return; }
+
+      // Serialize form fields as key=value pairs
+      var fields = [];
+      fd.forEach(function (value, key) {
+        if (typeof File !== "undefined" && value instanceof File) {
+          fields.push({ name: key, value: "[File:" + value.name + "]" });
+        } else {
+          fields.push({ name: key, value: value });
+        }
+      });
+
+      if (fields.length === 0) return;
+
+      // For GET forms, build the full URL with query params
+      var url = action;
+      if (method === "GET") {
+        var getUrl = new URL(action);
+        for (var i = 0; i < fields.length; i++) {
+          if (fields[i].value.indexOf("[File:") !== 0) {
+            getUrl.searchParams.set(fields[i].name, fields[i].value);
+          }
+        }
+        url = getUrl.href;
+      }
+
+      console.log("[UASR] sending CONTENT_FORM_SUBMIT", method, url, fields.length, "fields", fields);
+      chrome.runtime.sendMessage({
+        type: "CONTENT_FORM_SUBMIT",
+        url: url,
+        method: method,
+        enctype: enctype,
+        fields: fields,
+        origin: location.origin,
+        pageUrl: location.href,
+      });
+    } catch (_) {}
+  }, true);
 })();

@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Form Detection Test</title>
+  <style>
+    body { font-family: system-ui; max-width: 900px; margin: 2em auto; background: #1a1a2e; color: #e0e0e0; }
+    h1 { color: #7fdbca; }
+    h2 { color: #c792ea; margin-top: 2em; border-bottom: 1px solid #333; padding-bottom: 0.3em; }
+    form { background: #16213e; padding: 1.2em; border-radius: 8px; margin: 1em 0; }
+    label { display: block; margin: 0.6em 0 0.2em; color: #82aaff; font-size: 0.9em; }
+    input, select, textarea { background: #0f3460; color: #e0e0e0; border: 1px solid #444; padding: 0.4em 0.6em; border-radius: 4px; width: 300px; }
+    input[type="checkbox"], input[type="radio"] { width: auto; }
+    button { background: #533483; color: #fff; border: none; padding: 0.5em 1.5em; border-radius: 4px; cursor: pointer; margin-top: 0.8em; }
+    button:hover { background: #7b2cbf; }
+    .note { color: #888; font-size: 0.8em; margin-top: 0.3em; }
+    #dynamic-container { border: 2px dashed #444; padding: 1em; margin-top: 1em; min-height: 50px; }
+    #log { background: #0a0a1a; padding: 1em; border-radius: 8px; margin-top: 2em; font-family: monospace; font-size: 0.85em; white-space: pre-wrap; max-height: 300px; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <h1>Form Detection Test Page</h1>
+
+  <!-- ═══ 1. POST form with varied field types ═══ -->
+  <h2>1. POST Form (mixed field types)</h2>
+  <form action="https://httpbin.org/post" method="POST" id="signup-form" name="signup">
+    <label>Username (text, required, minlength=3, maxlength=20)
+      <input type="text" name="username" required minlength="3" maxlength="20" placeholder="Enter username" autocomplete="username">
+    </label>
+
+    <label>Email (email, required, pattern)
+      <input type="email" name="email" required pattern="[^@]+@[^@]+\.[^@]+" placeholder="user@example.com" autocomplete="email">
+    </label>
+
+    <label>Password (password, minlength=8)
+      <input type="password" name="password" required minlength="8" placeholder="Min 8 characters" autocomplete="new-password">
+    </label>
+
+    <label>Age (number, min=13, max=120, step=1)
+      <input type="number" name="age" min="13" max="120" step="1" placeholder="Your age">
+    </label>
+
+    <label>Bio (textarea)
+      <textarea name="bio" placeholder="Tell us about yourself" maxlength="500"></textarea>
+    </label>
+
+    <label>Country (select)
+      <select name="country">
+        <option value="">-- Select --</option>
+        <option value="us">United States</option>
+        <option value="gb">United Kingdom</option>
+        <option value="de">Germany</option>
+        <option value="jp">Japan</option>
+        <option value="au">Australia</option>
+      </select>
+    </label>
+
+    <label>Plan (radio)
+      <div>
+        <input type="radio" name="plan" value="free"> Free
+        <input type="radio" name="plan" value="pro"> Pro
+        <input type="radio" name="plan" value="enterprise"> Enterprise
+      </div>
+    </label>
+
+    <label>
+      <input type="checkbox" name="newsletter" value="yes"> Subscribe to newsletter (checkbox)
+    </label>
+
+    <label>
+      <input type="checkbox" name="terms" value="accepted" required> Accept terms (checkbox, required)
+    </label>
+
+    <input type="hidden" name="csrf_token" value="abc123def456">
+    <input type="hidden" name="form_version" value="2.1">
+
+    <br>
+    <button type="submit">Sign Up (POST)</button>
+  </form>
+
+  <!-- ═══ 2. GET search form ═══ -->
+  <h2>2. GET Form (search)</h2>
+  <form action="https://httpbin.org/get" method="GET" name="search">
+    <label>Query (text, required)
+      <input type="text" name="q" required placeholder="Search query" autocomplete="off">
+    </label>
+
+    <label>Category (select)
+      <select name="category">
+        <option value="all">All</option>
+        <option value="images">Images</option>
+        <option value="videos">Videos</option>
+        <option value="news">News</option>
+      </select>
+    </label>
+
+    <label>Safe search
+      <select name="safe">
+        <option value="off">Off</option>
+        <option value="moderate">Moderate</option>
+        <option value="strict">Strict</option>
+      </select>
+    </label>
+
+    <label>Results per page (range, min=10, max=100, step=10)
+      <input type="range" name="limit" min="10" max="100" step="10" value="20">
+    </label>
+
+    <button type="submit">Search (GET)</button>
+  </form>
+
+  <!-- ═══ 3. File upload form (multipart) ═══ -->
+  <h2>3. Multipart File Upload</h2>
+  <form action="https://httpbin.org/post" method="POST" enctype="multipart/form-data" name="upload">
+    <label>Title
+      <input type="text" name="title" placeholder="File title">
+    </label>
+
+    <label>File
+      <input type="file" name="attachment" accept=".pdf,.doc,.docx,.txt">
+    </label>
+
+    <label>Visibility (select)
+      <select name="visibility">
+        <option value="private">Private</option>
+        <option value="unlisted">Unlisted</option>
+        <option value="public">Public</option>
+      </select>
+    </label>
+
+    <input type="hidden" name="upload_token" value="tok_xyz789">
+
+    <button type="submit">Upload (multipart POST)</button>
+  </form>
+
+  <!-- ═══ 4. Form with no action (submits to current page) ═══ -->
+  <h2>4. No Action Attribute (defaults to current page)</h2>
+  <form method="POST" name="feedback">
+    <label>Rating (number, min=1, max=5)
+      <input type="number" name="rating" min="1" max="5" required>
+    </label>
+
+    <label>Comment
+      <textarea name="comment" placeholder="Your feedback"></textarea>
+    </label>
+
+    <button type="submit">Submit Feedback</button>
+  </form>
+
+  <!-- ═══ 5. Form with specialty input types ═══ -->
+  <h2>5. Specialty Input Types</h2>
+  <form action="https://httpbin.org/post" method="POST" name="event">
+    <label>Event date (date)
+      <input type="date" name="event_date" required>
+    </label>
+
+    <label>Start time (time)
+      <input type="time" name="start_time">
+    </label>
+
+    <label>Reminder (datetime-local)
+      <input type="datetime-local" name="reminder">
+    </label>
+
+    <label>Website (url)
+      <input type="url" name="website" placeholder="https://example.com">
+    </label>
+
+    <label>Phone (tel)
+      <input type="tel" name="phone" pattern="[0-9]{3}-[0-9]{3}-[0-9]{4}" placeholder="123-456-7890" autocomplete="tel">
+    </label>
+
+    <label>Theme color (color)
+      <input type="color" name="theme_color" value="#533483">
+    </label>
+
+    <button type="submit">Create Event (POST)</button>
+  </form>
+
+  <!-- ═══ 6. Dynamic form injection test ═══ -->
+  <h2>6. Dynamic Form (injected via JS)</h2>
+  <button onclick="injectForm()">Inject Form into DOM</button>
+  <div id="dynamic-container"></div>
+
+  <!-- ═══ 7. fetch() with FormData body ═══ -->
+  <h2>7. fetch() with FormData Body</h2>
+  <form id="fetch-form" name="api-submit">
+    <label>Name
+      <input type="text" name="name" value="Test User">
+    </label>
+    <label>Role (select)
+      <select name="role">
+        <option value="viewer">Viewer</option>
+        <option value="editor">Editor</option>
+        <option value="admin">Admin</option>
+      </select>
+    </label>
+    <input type="hidden" name="api_key" value="sk_test_12345">
+    <button type="button" onclick="submitViaFetch()">Submit via fetch() with FormData</button>
+  </form>
+
+  <div id="log"></div>
+
+  <script>
+    function log(msg) {
+      var el = document.getElementById("log");
+      el.textContent += new Date().toISOString().slice(11,19) + "  " + msg + "\n";
+      el.scrollTop = el.scrollHeight;
+    }
+
+    // Inject a dynamic form after button click (tests MutationObserver)
+    function injectForm() {
+      var container = document.getElementById("dynamic-container");
+      container.innerHTML = "";
+      var form = document.createElement("form");
+      form.action = "https://httpbin.org/post";
+      form.method = "POST";
+      form.name = "dynamic";
+
+      form.innerHTML =
+        '<label>Dynamic field <input type="text" name="dynamic_field" placeholder="Added by JS" value="injected"></label>' +
+        '<label>Priority <select name="priority">' +
+        '<option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>' +
+        '</select></label>' +
+        '<input type="hidden" name="source" value="dynamic_inject">' +
+        '<button type="submit">Submit Dynamic Form</button>';
+
+      container.appendChild(form);
+      log("Dynamic form injected into DOM");
+    }
+
+    // Submit form data via fetch() instead of native form submission
+    function submitViaFetch() {
+      var form = document.getElementById("fetch-form");
+      var fd = new FormData(form);
+      log("Sending fetch() with FormData body...");
+      fetch("https://httpbin.org/post", {
+        method: "POST",
+        body: fd
+      }).then(function(r) { return r.json(); })
+        .then(function(data) { log("fetch response: " + JSON.stringify(data.form || data.data)); })
+        .catch(function(e) { log("fetch error: " + e.message); });
+    }
+
+    // Prevent actual navigation on form submits (for testing)
+    document.addEventListener("submit", function(e) {
+      if (e.target.id !== "fetch-form") {
+        e.preventDefault();
+        var fd = new FormData(e.target);
+        var params = [];
+        fd.forEach(function(v, k) { params.push(k + "=" + v); });
+        log("Form submitted: " + (e.target.name || "unnamed") + " → " + (e.target.action || location.href) + "\n  Fields: " + params.join(", "));
+      }
+    });
+  </script>
+</body>
+</html>

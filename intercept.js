@@ -121,8 +121,18 @@
         reqBase64 = true;
       } else if (typeof URLSearchParams !== "undefined" && bodySource instanceof URLSearchParams) {
         reqBody = bodySource.toString();
+      } else if (typeof FormData !== "undefined" && bodySource instanceof FormData) {
+        var parts = [];
+        bodySource.forEach(function (value, key) {
+          if (typeof File !== "undefined" && value instanceof File) {
+            parts.push(encodeURIComponent(key) + "=" + encodeURIComponent("[File:" + value.name + "]"));
+          } else {
+            parts.push(encodeURIComponent(key) + "=" + encodeURIComponent(value));
+          }
+        });
+        reqBody = parts.join("&");
       }
-      // FormData, Blob, ReadableStream — can't serialize simply, skip
+      // Blob, ReadableStream — can't serialize simply, skip
     } catch (_) {}
     return { body: reqBody, base64: reqBase64 };
   }
