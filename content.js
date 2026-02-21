@@ -489,7 +489,6 @@
   }
 
   var forms = scanForms();
-  console.debug("[UASR:forms] scanForms found %d forms", forms.length);
   var formHash = _simpleHash(JSON.stringify(forms));
   if (formHash !== _lastFormScanHash) {
     _lastFormScanHash = formHash;
@@ -641,7 +640,6 @@
   // ─── Form Submission Capture ──────────────────────────────────────────────
 
   document.addEventListener("submit", function (e) {
-    console.debug("[UASR:forms] submit event fired", e.target?.tagName, e.target?.name);
     if (!e.target || e.target.tagName !== "FORM") return;
     try {
       var form = e.target;
@@ -679,7 +677,6 @@
         url = getUrl.href;
       }
 
-      console.debug("[UASR:forms] sending CONTENT_FORM_SUBMIT %s %s (%d fields)", method, url, fields.length);
       chrome.runtime.sendMessage({
         type: "CONTENT_FORM_SUBMIT",
         url: url,

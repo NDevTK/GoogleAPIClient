@@ -4033,8 +4033,6 @@ function _handleFormMetadata(tabId, forms, sender) {
     var service = extractInterfaceName(url);
     var { methodName: baseMethodName } = calculateMethodMetadata(url, service);
     var qualifiedName = form.method.toLowerCase() + "_" + baseMethodName;
-    console.debug("[UASR:forms] form →", service, qualifiedName, form.fields.length, "fields");
-
     // Create or get VDD entry
     var docEntry = tab.discoveryDocs.get(service);
     if (!docEntry || !docEntry.doc) {
@@ -4206,7 +4204,6 @@ function handleContentMessage(msg, sender) {
   }
 
   if (msg.type === "CONTENT_FORMS") {
-    console.debug("[UASR:forms] CONTENT_FORMS received, %d forms", msg.forms?.length);
     if (Array.isArray(msg.forms)) {
       _handleFormMetadata(tabId, msg.forms, sender);
     }
@@ -4214,7 +4211,6 @@ function handleContentMessage(msg, sender) {
   }
 
   if (msg.type === "CONTENT_FORM_SUBMIT") {
-    console.debug("[UASR:forms] CONTENT_FORM_SUBMIT received %s %s (%d fields)", msg.method, msg.url, msg.fields?.length);
     _handleFormSubmit(tabId, msg);
     return;
   }
