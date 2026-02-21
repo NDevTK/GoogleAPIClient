@@ -2478,16 +2478,18 @@ function _renderVisibleSlice() {
 
   // Skip re-render if visible range unchanged
   if (startIdx === _vs.lastStart && endIdx === _vs.lastEnd) return;
+
   _vs.lastStart = startIdx;
   _vs.lastEnd = endIdx;
 
   _vs.rendering = true;
 
   const topPad = startIdx * rh;
+  const totalHeight = n * rh;
   const showTabLabel = logFilter !== "active";
 
   // Fixed minHeight keeps scroll range stable regardless of actual card heights
-  container.style.minHeight = (n * rh) + "px";
+  container.style.minHeight = totalHeight + "px";
 
   let html = '<div id="vs-top-spacer"></div>';
   for (let i = startIdx; i <= endIdx; i++) {
@@ -2504,6 +2506,18 @@ function _renderVisibleSlice() {
       replayRequest(c.dataset.id, sourceTabId);
     };
   });
+
+  // Self-correct estHeight from measured card heights to prevent scroll oscillation
+  const cards = container.querySelectorAll(".request-card");
+  if (cards.length > 0) {
+    let totalH = 0;
+    cards.forEach((c) => { totalH += c.offsetHeight + 8; });
+    const avgH = Math.round(totalH / cards.length);
+    if (Math.abs(avgH - _vs.estHeight) > 10) {
+      _vs.estHeight = avgH;
+      container.style.minHeight = (n * avgH) + "px";
+    }
+  }
 
   _vs.rendering = false;
 }
