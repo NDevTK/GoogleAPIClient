@@ -2893,7 +2893,7 @@ async function handleResponseBody(tabId, msg) {
   };
 
   // Update lastSeen on matching endpoint
-  var _epKey = entry.method + " " + urlObj.hostname + urlObj.pathname;
+  var _epKey = entry.method + " " + url.hostname + url.pathname;
   var _ep = tab.endpoints.get(_epKey);
   if (_ep) _ep.lastSeen = Date.now();
 
