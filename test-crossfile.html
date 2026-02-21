@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head><title>Cross-File Scanning Test Page</title></head>
+<body>
+<h2>Cross-File Scanning Test Page</h2>
+<p>Tests patterns where taint sources and sinks span separate .js files.</p>
+<p>The extension's combined analysis (<code>forceScript=true</code>) concatenates all scripts
+into a shared global scope, so cross-file data flow should be detected.</p>
+<div id="xss-target" style="border:2px dashed #c00;padding:8px;margin:12px 0;min-height:20px;color:#c00;font-size:11px">XSS target element</div>
+
+<!-- Script A: defines tainted globals (simulates a config/init script) -->
+<script src="test-script-a.js"></script>
+
+<!-- Script B: uses tainted globals from Script A (simulates app code) -->
+<script src="test-script-b.js"></script>
+
+<!-- Script C: more cross-file patterns (simulates a third-party widget) -->
+<script src="test-script-c.js"></script>
+</body>
+</html>

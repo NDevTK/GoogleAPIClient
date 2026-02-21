@@ -12,6 +12,7 @@ var params = new URLSearchParams(location.search);
 var tabId = parseInt(params.get("tabId"), 10) || 0;
 
 var urlEl = document.getElementById("source-url");
+var pageUrlEl = document.getElementById("page-url");
 var statusEl = document.getElementById("status");
 var codeEl = document.getElementById("code-output");
 var preEl = document.getElementById("code-pre");
@@ -47,12 +48,15 @@ function escHtml(s) {
 // ─── Beautify ────────────────────────────────────────────────────────────────
 
 function beautify(rawCode) {
+  console.log("[viewer:beautify] Input length=%d, first 200 chars: %s", rawCode.length, JSON.stringify(rawCode.substring(0, 200)));
+  console.log("[viewer:beautify] Char codes at start: %s", Array.from(rawCode.substring(0, 10)).map(function(c) { return c.charCodeAt(0); }).join(", "));
   try {
     var ast;
     var parseOpts = { plugins: ["jsx"], errorRecovery: true, sourceFilename: "input.js" };
     try {
       ast = BabelBundle.parse(rawCode, Object.assign({ sourceType: "module" }, parseOpts));
-    } catch (_) {
+    } catch (modErr) {
+      console.log("[viewer:beautify] Module parse failed: %s", modErr.message);
       ast = BabelBundle.parse(rawCode, Object.assign({ sourceType: "script" }, parseOpts));
     }
 
@@ -65,7 +69,8 @@ function beautify(rawCode) {
     }, { "input.js": rawCode });
 
     _vlqState = [0, 0, 0, 0, 0];
-    var lineMap = {};
+    var lineMap = {};      // origLine → first genLine (line-only lookups)
+    var colMap = {};       // origLine → [{origCol, genLine}] (column-precise lookups)
     if (result.map && result.map.mappings) {
       var mappings = result.map.mappings;
       var genLine = 0;
@@ -80,16 +85,19 @@ function beautify(rawCode) {
         var decoded = decodeVLQSegment(mappings, i);
         if (decoded && decoded.originalLine != null) {
           var origLine = decoded.originalLine + 1;
+          var origCol = decoded.originalColumn || 0;
           if (!lineMap[origLine] || lineMap[origLine] > genLine + 1) {
             lineMap[origLine] = genLine + 1;
           }
+          if (!colMap[origLine]) colMap[origLine] = [];
+          colMap[origLine].push({ origCol: origCol, genLine: genLine + 1 });
         }
         while (i < mappings.length && mappings.charAt(i) !== "," && mappings.charAt(i) !== ";") i++;
         i--;
       }
     }
 
-    return { code: result.code, lineMap: lineMap };
+    return { code: result.code, lineMap: lineMap, colMap: colMap };
   } catch (e) {
     console.debug("[viewer] Beautify failed:", e.message);
     return { code: rawCode, lineMap: null };
@@ -145,17 +153,40 @@ function decodeVLQSegment(mappings, pos) {
   pos += d3.length;
   _vlqState[3] += d3.value;
 
-  return { originalLine: _vlqState[2] };
+  return { originalLine: _vlqState[2], originalColumn: _vlqState[3] };
 }
 
 // ─── Line Mapping & Findings ─────────────────────────────────────────────────
 
-function mapLine(originalLine, lineMap) {
+function mapLine(originalLine, lineMap, colMap, originalCol) {
   if (!lineMap) return originalLine;
-  if (lineMap[originalLine]) return lineMap[originalLine];
-  for (var l = originalLine; l > 0; l--) {
-    if (lineMap[l]) return lineMap[l];
+  // Column-precise lookup for minified code (one source line → many beautified lines)
+  if (originalCol != null && colMap && colMap[originalLine]) {
+    var entries = colMap[originalLine];
+    var best = null;
+    for (var ei = 0; ei < entries.length; ei++) {
+      if (entries[ei].origCol <= originalCol) {
+        if (!best || entries[ei].origCol > best.origCol) {
+          best = entries[ei];
+        }
+      }
+    }
+    if (best) {
+      console.log("[viewer:mapLine] col-precise: orig %d:%d → beautified %d (matched col %d)", originalLine, originalCol, best.genLine, best.origCol);
+      return best.genLine;
+    }
   }
+  if (lineMap[originalLine]) {
+    console.log("[viewer:mapLine] exact: orig %d → beautified %d", originalLine, lineMap[originalLine]);
+    return lineMap[originalLine];
+  }
+  for (var l = originalLine; l > 0; l--) {
+    if (lineMap[l]) {
+      console.log("[viewer:mapLine] fallback: orig %d → nearest orig %d → beautified %d (gap=%d)", originalLine, l, lineMap[l], originalLine - l);
+      return lineMap[l];
+    }
+  }
+  console.warn("[viewer:mapLine] no mapping found for orig %d", originalLine);
   return originalLine;
 }
 
@@ -168,12 +199,12 @@ function collectFindingLines(findings) {
     var patterns = f.dangerousPatterns || [];
     for (var si = 0; si < sinks.length; si++) {
       if (sinks[si].location) {
-        lines.push({ line: sinks[si].location.line, severity: sinks[si].severity || "high" });
+        lines.push({ line: sinks[si].location.line, col: sinks[si].location.column, severity: sinks[si].severity || "high" });
       }
     }
     for (var di = 0; di < patterns.length; di++) {
       if (patterns[di].location) {
-        lines.push({ line: patterns[di].location.line, severity: patterns[di].severity || "medium" });
+        lines.push({ line: patterns[di].location.line, col: patterns[di].location.column, severity: patterns[di].severity || "medium" });
       }
     }
   }
@@ -203,13 +234,72 @@ function markFindingLinesInGutter(mappedLines, remap) {
   }
 }
 
-function scrollToLine(line) {
-  if (!line || line < 1) return;
+function addFindingOverlays(highlightLines, severities) {
+  // Remove old overlays
+  var old = preEl.querySelectorAll(".finding-overlay");
+  for (var oi = 0; oi < old.length; oi++) old[oi].remove();
+
+  if (!highlightLines.length) return;
+  preEl.style.position = "relative";
+  var lineHeight = parseFloat(getComputedStyle(codeEl).lineHeight) || 20;
+  var padTop = parseFloat(getComputedStyle(preEl).paddingTop) || 0;
+  for (var i = 0; i < highlightLines.length; i++) {
+    var div = document.createElement("div");
+    div.className = "finding-overlay " + (severities[i] === "high" ? "finding-overlay-high" : "finding-overlay-medium");
+    div.style.top = (padTop + (highlightLines[i] - 1) * lineHeight) + "px";
+    div.style.height = lineHeight + "px";
+    preEl.appendChild(div);
+  }
+}
+
+var _defHighlightEl = null;
+
+function scrollToLine(line, highlight) {
+  console.log("[viewer:scrollToLine] Requested line=%s highlight=%s", line, !!highlight);
+  if (!line || line < 1) {
+    console.warn("[viewer:scrollToLine] Invalid line, skipping");
+    return;
+  }
   requestAnimationFrame(function() {
     var lineHeight = parseFloat(getComputedStyle(codeEl).lineHeight) || 20;
     var offset = (line - 1) * lineHeight;
     var containerHeight = containerEl.clientHeight;
-    containerEl.scrollTop = Math.max(0, offset - containerHeight / 3);
+    var scrollPos = Math.max(0, offset - containerHeight / 3);
+    console.log("[viewer:scrollToLine] lineHeight=%d, offset=%d, containerHeight=%d, scrollTop=%d", lineHeight, offset, containerHeight, scrollPos);
+    containerEl.scrollTop = scrollPos;
+
+    if (highlight) {
+      var prePadTop = parseFloat(getComputedStyle(preEl).paddingTop) || 0;
+      var rows = preEl.querySelector(".line-numbers-rows");
+      var gutterSpan = rows && rows.children[line - 1];
+      var gutterRect = gutterSpan ? gutterSpan.getBoundingClientRect() : null;
+      var preRect = preEl.getBoundingClientRect();
+      console.log("[viewer:highlight] line=%d, offset=%d, prePaddingTop=%d", line, offset, prePadTop);
+      console.log("[viewer:highlight] gutterSpan rect:", gutterRect ? {top: gutterRect.top, height: gutterRect.height} : "null");
+      console.log("[viewer:highlight] preEl rect top=%d, gutterSpan relative top=%s", preRect.top, gutterRect ? (gutterRect.top - preRect.top + containerEl.scrollTop) : "null");
+
+      // Clear previous gutter highlight
+      var prevGutter = preEl.querySelectorAll(".def-target");
+      for (var j = 0; j < prevGutter.length; j++) prevGutter[j].classList.remove("def-target");
+
+      // Highlight gutter
+      if (gutterSpan) {
+        gutterSpan.classList.add("def-target");
+      }
+
+      // Position overlay highlight (no innerHTML mutation)
+      if (!_defHighlightEl) {
+        _defHighlightEl = document.createElement("div");
+        _defHighlightEl.id = "def-highlight";
+        preEl.style.position = "relative";
+        preEl.appendChild(_defHighlightEl);
+      }
+      var overlayTop = offset + prePadTop;
+      console.log("[viewer:highlight] overlay top=%d (offset=%d + padding=%d), height=%d", overlayTop, offset, prePadTop, lineHeight);
+      _defHighlightEl.style.top = overlayTop + "px";
+      _defHighlightEl.style.height = lineHeight + "px";
+      _defHighlightEl.style.display = "block";
+    }
   });
 }
 
@@ -306,6 +396,9 @@ function buildCodeGraph(beautifiedCode) {
   _funcMap = funcMap;
   _defMap = defMap;
   _allFuncRanges = allRanges;
+  console.log("[viewer:buildCodeGraph] _defMap entries:", Object.keys(defMap).length, defMap);
+  console.log("[viewer:buildCodeGraph] _funcMap entries:", Object.keys(funcMap).length);
+  console.log("[viewer:buildCodeGraph] _allFuncRanges count:", allRanges.length);
 }
 
 // ─── Reachability (Focus Mode) ───────────────────────────────────────────────
@@ -447,12 +540,14 @@ function buildFocusedCode(beautifiedCode, ranges) {
 // ─── Render ──────────────────────────────────────────────────────────────────
 
 function renderCode(code, remap) {
+  console.log("[viewer:renderCode] code length=%d, remap=%s, _mappedTarget=%s", code.length, !!remap, _mappedTarget);
   // Restore pre/code structure (showMessage may have replaced container)
   containerEl.innerHTML = "";
   containerEl.appendChild(preEl);
 
   // Set line highlight data
   var highlightLines = [];
+  var highlightSeverities = [];
   if (_mappedFindings) {
     for (var i = 0; i < _mappedFindings.length; i++) {
       var targetLine = _mappedFindings[i].line;
@@ -462,9 +557,15 @@ function renderCode(code, remap) {
         remap.forEach(function(origLine, fLine) {
           if (origLine === targetLine) found = fLine;
         });
-        if (found) highlightLines.push(found);
+        if (found) {
+          highlightLines.push(found);
+          highlightSeverities.push(_mappedFindings[i].severity);
+        } else {
+          console.log("[viewer:renderCode] Finding at beautified %d NOT in focused view", targetLine);
+        }
       } else {
         highlightLines.push(targetLine);
+        highlightSeverities.push(_mappedFindings[i].severity);
       }
     }
   }
@@ -475,14 +576,31 @@ function renderCode(code, remap) {
       remap.forEach(function(origLine, fLine) {
         if (origLine === _mappedTarget) mapped = fLine;
       });
-      if (mapped) scrollTarget = mapped;
+      if (mapped) {
+        scrollTarget = mapped;
+      } else if (highlightLines.length > 0) {
+        // Target not in focused view — scroll to first finding instead
+        scrollTarget = highlightLines[0];
+        console.log("[viewer:renderCode] Target %d not in focused view, using first highlight line %d", _mappedTarget, scrollTarget);
+      }
+    }
+    console.log("[viewer:renderCode] scrollTarget: beautified %d → %s %d", _mappedTarget, remap ? "focused" : "beautified", scrollTarget);
+  }
+  console.log("[viewer:renderCode] highlightLines (%d): %s", highlightLines.length, highlightLines.join(","));
+  // Log what's actually at the scroll target line
+  var codeLines = code.split("\n");
+  if (scrollTarget && scrollTarget > 0 && scrollTarget <= codeLines.length) {
+    console.log("[viewer:renderCode] Content at scroll target line %d: %s", scrollTarget, JSON.stringify(codeLines[scrollTarget - 1].substring(0, 120)));
+  }
+  // Log content at each highlight line
+  for (var _dli = 0; _dli < Math.min(highlightLines.length, 10); _dli++) {
+    var _hl = highlightLines[_dli];
+    if (_hl > 0 && _hl <= codeLines.length) {
+      console.log("[viewer:renderCode] Highlight line %d: %s", _hl, JSON.stringify(codeLines[_hl - 1].substring(0, 120)));
     }
   }
 
   preEl.removeAttribute("data-line");
-  if (highlightLines.length > 0) {
-    preEl.setAttribute("data-line", highlightLines.join(","));
-  }
 
   codeEl.textContent = code;
   Prism.highlightElement(codeEl);
@@ -492,8 +610,9 @@ function renderCode(code, remap) {
     fixLineNumbers(remap);
   }
 
-  // Mark finding lines in gutter
+  // Mark finding lines in gutter + background overlays
   markFindingLinesInGutter(_mappedFindings || [], remap);
+  addFindingOverlays(highlightLines, highlightSeverities);
 
   // Attach definition links
   attachDefinitionLinks();
@@ -523,25 +642,40 @@ function fixLineNumbers(remap) {
 
 function attachDefinitionLinks() {
   var tokens = codeEl.querySelectorAll("span.token.function");
+  console.log("[viewer:attachDefLinks] Total .token.function spans:", tokens.length);
+  console.log("[viewer:attachDefLinks] _defMap available:", !!_defMap, _defMap ? Object.keys(_defMap).length + " entries" : "null");
+  var localCount = 0, crossCount = 0, missCount = 0;
   for (var i = 0; i < tokens.length; i++) {
     var span = tokens[i];
     var name = span.textContent;
     if (_defMap && _defMap[name]) {
+      localCount++;
+      console.log("[viewer:attachDefLinks] LOCAL match: '%s' → line %d", name, _defMap[name]);
       span.classList.add("def-local");
       span.dataset.defLine = _defMap[name];
       span.addEventListener("click", onLocalDefClick);
     } else if (name.length > 1) {
+      crossCount++;
       span.classList.add("def-cross");
       span.dataset.defName = name;
       span.addEventListener("click", onCrossDefClick);
+    } else {
+      missCount++;
     }
   }
+  console.log("[viewer:attachDefLinks] Summary: %d local, %d cross, %d skipped", localCount, crossCount, missCount);
 }
 
 function onLocalDefClick(e) {
   e.stopPropagation();
+  var clickedName = e.currentTarget.textContent;
   var origLine = parseInt(e.currentTarget.dataset.defLine, 10);
-  if (!origLine) return;
+  console.log("[viewer:onLocalDefClick] Clicked '%s', dataset.defLine=%s, parsed origLine=%d", clickedName, e.currentTarget.dataset.defLine, origLine);
+  console.log("[viewer:onLocalDefClick] _focusMode=%s, _lineRemap=%s", _focusMode, !!_lineRemap);
+  if (!origLine) {
+    console.warn("[viewer:onLocalDefClick] No origLine — aborting");
+    return;
+  }
 
   // In focused mode, reverse-map beautified line → focused line
   if (_focusMode && _lineRemap) {
@@ -549,19 +683,22 @@ function onLocalDefClick(e) {
     _lineRemap.forEach(function(oLine, fLine) {
       if (oLine === origLine) focusedLine = fLine;
     });
+    console.log("[viewer:onLocalDefClick] Focus remap: origLine %d → focusedLine %s (remap size=%d)", origLine, focusedLine, _lineRemap.size);
     if (focusedLine) {
-      scrollToLine(focusedLine);
+      scrollToLine(focusedLine, true);
       return;
     }
     // Definition not in focused view — switch to full, then scroll
+    console.log("[viewer:onLocalDefClick] Def not in focused view, switching to full");
     _focusMode = false;
     updateFocusButton();
     renderCode(_fullCode, null);
-    scrollToLine(origLine);
+    scrollToLine(origLine, true);
     return;
   }
 
-  scrollToLine(origLine);
+  console.log("[viewer:onLocalDefClick] Full mode, scrolling to line %d", origLine);
+  scrollToLine(origLine, true);
 }
 
 function onCrossDefClick(e) {
@@ -701,6 +838,19 @@ function loadScript(scriptUrl, targetLine) {
     var findings = response.findings || [];
     var findingLines = collectFindingLines(findings);
 
+    // Show page context in toolbar
+    if (response.pageUrl && response.pageUrl !== scriptUrl) {
+      var pageName = response.pageUrl.split("/").pop().split("?")[0] || response.pageUrl;
+      pageUrlEl.textContent = "in " + pageName;
+      pageUrlEl.title = response.pageUrl;
+    } else {
+      pageUrlEl.textContent = "";
+      pageUrlEl.title = "";
+    }
+
+    console.log("[viewer:loadScript] Raw code length=%d, targetLine=%d, findings count=%d", rawCode.length, targetLine, findingLines.length);
+    console.log("[viewer:loadScript] Finding lines (original):", findingLines.map(function(f) { return f.line + ":" + (f.col != null ? f.col : "?") + "(" + f.severity + ")"; }).join(", "));
+
     statusEl.textContent = rawCode.length.toLocaleString() + " chars";
     if (findingLines.length > 0) {
       var highCount = findingLines.filter(function(f) { return f.severity === "high"; }).length;
@@ -714,13 +864,17 @@ function loadScript(scriptUrl, targetLine) {
     var result = beautify(rawCode);
     var beautifiedCode = result.code;
     var lineMap = result.lineMap;
+    var colMap = result.colMap;
     _fullCode = beautifiedCode;
 
-    // Map finding lines to beautified positions
-    _mappedTarget = mapLine(targetLine, lineMap);
+    // Map finding lines to beautified positions (column-aware for minified code)
+    console.log("[viewer:loadScript] lineMap entries: %d, colMap entries: %d", Object.keys(lineMap || {}).length, Object.keys(colMap || {}).length);
+    _mappedTarget = mapLine(targetLine, lineMap, colMap);
     _mappedFindings = findingLines.map(function(f) {
-      return { line: mapLine(f.line, lineMap), severity: f.severity };
+      return { line: mapLine(f.line, lineMap, colMap, f.col), severity: f.severity };
     });
+    console.log("[viewer:loadScript] Mapped target: %d → %d", targetLine, _mappedTarget);
+    console.log("[viewer:loadScript] Mapped findings:", _mappedFindings.map(function(f) { return f.line; }).join(", "));
 
     // Build code graph (definitions + call references)
     buildCodeGraph(beautifiedCode);

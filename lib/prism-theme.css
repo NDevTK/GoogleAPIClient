@@ -136,7 +136,6 @@ pre[class*="language-"].line-numbers > code {
   letter-spacing: -1px;
   border-right: 1px solid #21262d;
   user-select: none;
-  padding: 1em 0;
 }
 
 .line-numbers-rows > span {

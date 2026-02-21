@@ -34,7 +34,16 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+
+#page-url {
+  font-size: 11px;
+  color: #8b949e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   flex: 1;
+  min-width: 0;
 }
 
 #status {
@@ -148,6 +157,21 @@ body {
   font-weight: 700;
 }
 
+/* Finding line background overlays */
+.finding-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+.finding-overlay-high {
+  background: rgba(248, 81, 73, 0.08);
+}
+.finding-overlay-medium {
+  background: rgba(240, 136, 62, 0.08);
+}
+
 /* Loading / error states */
 .viewer-message {
   display: flex;
@@ -169,9 +193,29 @@ body {
   content: attr(data-line) !important;
 }
 
-/* Focused mode: hidden separator lines */
+/* Focused mode: hidden separator lines — keep same row height as code (13px × 1.6) */
+.line-numbers-rows > span.hidden-separator {
+  height: calc(13px * 1.6);
+  box-sizing: content-box;
+}
 .line-numbers-rows > span.hidden-separator::before {
   color: #484f58;
   font-style: italic;
   font-size: 9px;
+  line-height: calc(13px * 1.6);
+}
+
+/* Definition target highlight */
+.line-numbers-rows > span.def-target::before {
+  color: #58a6ff;
+  font-weight: 700;
+}
+#def-highlight {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: rgba(56, 139, 253, 0.1);
+  pointer-events: none;
+  display: none;
+  z-index: 0;
 }

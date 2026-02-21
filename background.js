@@ -113,6 +113,7 @@ function extractKeysFromText(tabId, text, sourceUrl, sourceContext, depth = 0) {
           services: new Set(),
           hosts: new Set(),
           endpoints: new Set(),
+          pageUrls: new Set(),
           requestCount: 0,
         });
       }
@@ -124,6 +125,10 @@ function extractKeysFromText(tabId, text, sourceUrl, sourceContext, depth = 0) {
         keyData.hosts.add(url.hostname);
         keyData.endpoints.add(`${url.hostname}${url.pathname}`);
       }
+      // Track which page this key was found on
+      const _keyMeta = _tabMeta.get(tabId);
+      if (_keyMeta && _keyMeta.url) keyData.pageUrls.add(_keyMeta.url);
+      if (!keyData.pageUrls) keyData.pageUrls = new Set();
     }
   }
 
@@ -293,6 +298,9 @@ function _serializeGlobalStore() {
           endpoints: [
             ...(v.endpoints instanceof Set ? v.endpoints : v.endpoints || []),
           ],
+          pageUrls: [
+            ...(v.pageUrls instanceof Set ? v.pageUrls : v.pageUrls || []),
+          ],
         },
       ]),
     ),
@@ -325,6 +333,7 @@ function _deserializeIntoGlobalStore(s) {
         services: new Set(v.services || []),
         hosts: new Set(v.hosts || []),
         endpoints: new Set(v.endpoints || []),
+        pageUrls: new Set(v.pageUrls || []),
       });
     }
   }
@@ -398,6 +407,9 @@ function mergeToGlobal(tab) {
       if (existing.hosts instanceof Set) mergeSet(existing.hosts, v.hosts);
       if (existing.endpoints instanceof Set)
         mergeSet(existing.endpoints, v.endpoints);
+      if (!existing.pageUrls) existing.pageUrls = new Set();
+      if (existing.pageUrls instanceof Set)
+        mergeSet(existing.pageUrls, v.pageUrls);
     } else {
       globalStore.apiKeys.set(k, {
         origin: v.origin,
@@ -409,6 +421,7 @@ function mergeToGlobal(tab) {
         services: new Set(v.services || []),
         hosts: new Set(v.hosts || []),
         endpoints: new Set(v.endpoints || []),
+        pageUrls: new Set(v.pageUrls || []),
       });
     }
   }
@@ -2945,6 +2958,13 @@ function _hashScriptCode(code) {
   return "inline:" + h;
 }
 
+function _findScriptForLine(line, scriptOffsets) {
+  for (var i = scriptOffsets.length - 1; i >= 0; i--) {
+    if (line >= scriptOffsets[i].lineStart) return scriptOffsets[i];
+  }
+  return scriptOffsets[0];
+}
+
 async function _analyzeCombinedScripts(tabId) {
   var buf = _scriptBuffers.get(tabId);
   if (!buf || buf.scripts.length === 0) return;
@@ -2980,10 +3000,18 @@ async function _analyzeCombinedScripts(tabId) {
   tab._securityFindings = [];
 
   // Concatenate all scripts with semicolons (safe delimiter for script mode)
+  // Track line offsets for per-script finding attribution
   var combined = "";
+  var scriptOffsets = []; // [{url, lineStart}]
+  var nlCount = 0;
   for (var ci = 0; ci < scripts.length; ci++) {
-    if (ci > 0) combined += ";\n";
-    combined += scripts[ci].code;
+    if (ci > 0) { combined += ";\n"; nlCount++; }
+    scriptOffsets.push({ url: scripts[ci].url, lineStart: nlCount + 1 });
+    var code = scripts[ci].code;
+    for (var ch = 0; ch < code.length; ch++) {
+      if (code.charCodeAt(ch) === 10) nlCount++;
+    }
+    combined += code;
   }
 
   // Determine source URL for the combined analysis (use tab URL or first script URL)
@@ -3030,8 +3058,60 @@ async function _analyzeCombinedScripts(tabId) {
       (analysis.securitySinks ? analysis.securitySinks.length : 0),
       (analysis.dangerousPatterns ? analysis.dangerousPatterns.length : 0));
 
+    // Pre-empt mergeASTResultsIntoVDD's security merge — we split findings per-script below
+    analysis._securityMerged = true;
+
     tab._astResults.push(analysis);
     mergeASTResultsIntoVDD(tab, [analysis], tabId);
+
+    // Split security findings by source script using line offsets
+    var secSinks = analysis.securitySinks || [];
+    var dangerousPats = analysis.dangerousPatterns || [];
+    if (secSinks.length || dangerousPats.length) {
+      var byScript = {}; // scriptUrl → {sinks: [], patterns: []}
+      for (var _fsi = 0; _fsi < secSinks.length; _fsi++) {
+        var sink = secSinks[_fsi];
+        var sLine = sink.location ? sink.location.line : 0;
+        var sInfo = _findScriptForLine(sLine, scriptOffsets);
+        // External scripts: attribute to script URL with adjusted line numbers
+        // Inline scripts (url empty): attribute to page URL with original line numbers
+        var sKey = sInfo.url || tabUrl;
+        if (!byScript[sKey]) byScript[sKey] = { sinks: [], patterns: [] };
+        var adjustedSink = Object.assign({}, sink);
+        if (sInfo.url && sink.location) {
+          adjustedSink.location = Object.assign({}, sink.location, {
+            line: sink.location.line - sInfo.lineStart + 1
+          });
+        }
+        byScript[sKey].sinks.push(adjustedSink);
+      }
+      for (var _fpi = 0; _fpi < dangerousPats.length; _fpi++) {
+        var pat = dangerousPats[_fpi];
+        var pLine = pat.location ? pat.location.line : 0;
+        var pInfo = _findScriptForLine(pLine, scriptOffsets);
+        var pKey = pInfo.url || tabUrl;
+        if (!byScript[pKey]) byScript[pKey] = { sinks: [], patterns: [] };
+        var adjustedPat = Object.assign({}, pat);
+        if (pInfo.url && pat.location) {
+          adjustedPat.location = Object.assign({}, pat.location, {
+            line: pat.location.line - pInfo.lineStart + 1
+          });
+        }
+        byScript[pKey].patterns.push(adjustedPat);
+      }
+      if (!tab._securityFindings) tab._securityFindings = [];
+      for (var sUrl in byScript) {
+        tab._securityFindings.push({
+          sourceUrl: sUrl,
+          pageUrl: tabUrl,
+          securitySinks: byScript[sUrl].sinks,
+          dangerousPatterns: byScript[sUrl].patterns,
+        });
+      }
+      console.debug("[AST:combined] Split security findings across %d scripts for tab=%d",
+        Object.keys(byScript).length, tabId);
+    }
+
     mergeToGlobal(tab);
     notifyPopup(tabId);
   }
@@ -3553,6 +3633,7 @@ function mergeASTResultsIntoVDD(tab, results, tabId) {
           ? "AST DYN " + bundleId + " " + (callSite.enclosingFunction || "anon") + " " + callSite.method + " " + fc
           : "AST " + callSite.method + " " + csUrl.pathname;
         if (!tab.endpoints.has(epKey)) {
+          var _epMeta = _tabMeta.get(tabId);
           tab.endpoints.set(epKey, {
             url: isDynamic ? callSite.url : csUrl.href,
             method: callSite.method,
@@ -3560,6 +3641,7 @@ function mergeASTResultsIntoVDD(tab, results, tabId) {
             path: isDynamic ? callSite.url : csUrl.pathname,
             service: interfaceName,
             source: isDynamic ? "ast_dynamic" : "ast_analysis",
+            pageUrl: _epMeta ? _epMeta.url : null,
             firstSeen: Date.now(),
           });
           newEndpoints++;
@@ -3626,6 +3708,7 @@ function handleContentMessage(msg, sender) {
       API_KEY_RE.lastIndex = 0;
       if (!API_KEY_RE.test(key)) continue;
       if (!tab.apiKeys.has(key)) {
+        var _ckPageUrl = sender.tab ? sender.tab.url : null;
         tab.apiKeys.set(key, {
           origin: sender.origin,
           referer: sender.origin,
@@ -3635,8 +3718,13 @@ function handleContentMessage(msg, sender) {
           services: new Set(),
           hosts: new Set(),
           endpoints: new Set(),
+          pageUrls: new Set(_ckPageUrl ? [_ckPageUrl] : []),
           requestCount: 0,
         });
+      } else if (sender.tab && sender.tab.url) {
+        var _ckExisting = tab.apiKeys.get(key);
+        if (!_ckExisting.pageUrls) _ckExisting.pageUrls = new Set();
+        _ckExisting.pageUrls.add(sender.tab.url);
       }
     }
     mergeToGlobal(tab);
@@ -3659,6 +3747,7 @@ function handleContentMessage(msg, sender) {
             origin: sender.origin,
             rpc: rpcInfo,
             source: "page_source",
+            pageUrl: sender.tab ? sender.tab.url : null,
             firstSeen: Date.now(),
           });
         } catch (_) {}
@@ -3801,15 +3890,29 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
       if (!scriptUrl) { sendResponse({ error: "no URL" }); return; }
       var tab = tabId != null ? getTab(tabId) : null;
       var _slFindings = tab ? mergedSecurityFindings(tab).filter(function(f) { return f.sourceUrl === scriptUrl; }) : [];
+      // Determine pageUrl from buffer or findings
+      var _slBuf = _scriptBuffers.get(tabId);
+      var _slPageUrl = _slBuf ? _slBuf.pageUrl : null;
+      if (!_slPageUrl && _slFindings.length > 0) _slPageUrl = _slFindings[0].pageUrl || null;
 
       // Try script buffers first (already fetched for AST analysis)
-      var _slBuf = _scriptBuffers.get(tabId);
       if (_slBuf) {
         for (var _sbi = 0; _sbi < _slBuf.scripts.length; _sbi++) {
           if (_slBuf.scripts[_sbi].url === scriptUrl && _slBuf.scripts[_sbi].code) {
-            sendResponse({ code: _slBuf.scripts[_sbi].code, findings: _slFindings });
+            sendResponse({ code: _slBuf.scripts[_sbi].code, findings: _slFindings, pageUrl: _slPageUrl });
             return;
           }
+        }
+        // If requested URL is the page URL, return the same combined source the AST analyzed
+        // (all scripts in buffer order, joined with ;\n) so finding line numbers match
+        if (_slBuf.pageUrl && scriptUrl === _slBuf.pageUrl && _slBuf.scripts.length > 0) {
+          var _combined = "";
+          for (var _cli = 0; _cli < _slBuf.scripts.length; _cli++) {
+            if (_cli > 0) _combined += ";\n";
+            _combined += _slBuf.scripts[_cli].code;
+          }
+          sendResponse({ code: _combined, findings: _slFindings, pageUrl: _slPageUrl });
+          return;
         }
       }
 
@@ -3819,7 +3922,7 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
           var _slEntry = tab.requestLog[_sli];
           if (_slEntry.url === scriptUrl && _slEntry.responseBody) {
             var _slCode = _slEntry.responseBase64 ? atob(_slEntry.responseBody) : _slEntry.responseBody;
-            sendResponse({ code: _slCode, findings: _slFindings });
+            sendResponse({ code: _slCode, findings: _slFindings, pageUrl: _slPageUrl });
             return;
           }
         }
@@ -3830,7 +3933,7 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
         if (!r.ok) throw new Error(r.status + " " + r.statusText);
         return r.text();
       }).then(function(code) {
-        sendResponse({ code: code, findings: _slFindings });
+        sendResponse({ code: code, findings: _slFindings, pageUrl: _slPageUrl });
       }).catch(function(e) {
         sendResponse({ error: e.message });
       });
@@ -4866,7 +4969,28 @@ async function executeSendRequest(tabId, msg) {
       }
     }
     if (svcKeys.length > 0) {
-      apiKey = svcKeys[0];
+      // Prefer key from same pageUrl origin as current tab
+      var _skTabMeta = _tabMeta.get(tabId);
+      var _skOrigin = null;
+      if (_skTabMeta && _skTabMeta.url) {
+        try { _skOrigin = new URL(_skTabMeta.url).origin; } catch (_) {}
+      }
+      if (_skOrigin && svcKeys.length > 1) {
+        var _skBest = null;
+        for (var _ski = 0; _ski < svcKeys.length; _ski++) {
+          var _skData = tab.apiKeys.get(svcKeys[_ski]) || globalStore.apiKeys.get(svcKeys[_ski]);
+          if (_skData && _skData.pageUrls) {
+            var _skPages = _skData.pageUrls instanceof Set ? _skData.pageUrls : new Set(_skData.pageUrls);
+            for (var _skPurl of _skPages) {
+              try { if (new URL(_skPurl).origin === _skOrigin) { _skBest = svcKeys[_ski]; break; } } catch (_) {}
+            }
+            if (_skBest) break;
+          }
+        }
+        apiKey = _skBest || svcKeys[0];
+      } else {
+        apiKey = svcKeys[0];
+      }
     }
     // Fall back to discovery doc's key
     if (!apiKey) {
@@ -4989,9 +5113,12 @@ async function executeSendRequest(tabId, msg) {
     headers["Content-Type"] = "application/json";
   }
 
-  // Resolve initiator origin
-  const initiatorOrigin =
+  // Resolve initiator origin (pageUrl provides context for AST-derived endpoints)
+  let initiatorOrigin =
     ep?.origin || ep?.referer || tab.authContext?.origin || null;
+  if (!initiatorOrigin && ep?.pageUrl) {
+    try { initiatorOrigin = new URL(ep.pageUrl).origin; } catch (_) {}
+  }
 
   // Send request via page context (session-aware)
   let resp;
@@ -5249,6 +5376,9 @@ function serializeApiKeyEntry(v) {
     hosts: [...(v.hosts instanceof Set ? v.hosts : v.hosts || [])],
     endpoints: [
       ...(v.endpoints instanceof Set ? v.endpoints : v.endpoints || []),
+    ],
+    pageUrls: [
+      ...(v.pageUrls instanceof Set ? v.pageUrls : v.pageUrls || []),
     ],
   };
 }

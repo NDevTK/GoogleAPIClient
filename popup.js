@@ -631,6 +631,13 @@ function renderDataPanel() {
       if (services.length) {
         html += `<div class="card-meta">Services: ${[...services].map((s) => `<code>${esc(s)}</code>`).join(" ")}</div>`;
       }
+      const pageUrls = info.pageUrls || [];
+      if (pageUrls.length) {
+        html += `<div class="card-meta card-meta-dim">Pages: ${[...pageUrls].map((u) => {
+          var name = u.split("/").pop().split("?")[0] || u;
+          return `<span title="${esc(u)}">${esc(name)}</span>`;
+        }).join(", ")}</div>`;
+      }
       html += `</div>`;
     }
     keysContainer.innerHTML = html;
@@ -659,14 +666,14 @@ function renderSecurityPanel() {
   var allItems = [];
   for (var fi = 0; fi < findings.length; fi++) {
     var f = findings[fi];
-    var srcLabel = f.sourceUrl || "(unknown)";
+    var srcLabel = f.sourceUrl ? (f.sourceUrl.split("/").pop().split("?")[0] || f.sourceUrl) : "(unknown)";
     for (var si = 0; si < (f.securitySinks || []).length; si++) {
       var s = f.securitySinks[si];
-      allItems.push({ kind: "sink", item: s, sourceUrl: f.sourceUrl, srcLabel: srcLabel });
+      allItems.push({ kind: "sink", item: s, sourceUrl: f.sourceUrl, srcLabel: srcLabel, pageUrl: f.pageUrl });
     }
     for (var di = 0; di < (f.dangerousPatterns || []).length; di++) {
       var d = f.dangerousPatterns[di];
-      allItems.push({ kind: "pattern", item: d, sourceUrl: f.sourceUrl, srcLabel: srcLabel });
+      allItems.push({ kind: "pattern", item: d, sourceUrl: f.sourceUrl, srcLabel: srcLabel, pageUrl: f.pageUrl });
     }
   }
 
@@ -700,6 +707,10 @@ function renderSecurityPanel() {
     var srcLink = entry.sourceUrl
       ? '<a href="' + esc(entry.sourceUrl) + '" target="_blank" title="' + esc(entry.sourceUrl) + '">' + esc(entry.srcLabel) + '</a>'
       : esc(entry.srcLabel);
+    if (entry.pageUrl && entry.pageUrl !== entry.sourceUrl) {
+      var pageName = entry.pageUrl.split("/").pop().split("?")[0] || entry.pageUrl;
+      srcLink += ' <span class="page-context" title="' + esc(entry.pageUrl) + '">in ' + esc(pageName) + '</span>';
+    }
 
     if (entry.kind === "sink") {
       var typeBadge = "";
