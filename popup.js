@@ -616,6 +616,7 @@ function renderDataPanel() {
     let html = '<div class="section-header">Discovered API Keys</div>';
     for (const [key, info] of keys) {
       const services = info.services || [];
+      const hosts = info.hosts || [];
       const eps = info.endpoints || [];
       const reqCount = info.requestCount || eps.length || 0;
 
@@ -625,15 +626,15 @@ function renderDataPanel() {
         </div>
         <div class="card-value">${esc(key)}</div>
         <div class="card-meta">
-          ${info.origin ? `Origin: <strong>${esc(info.origin)}</strong>` : ""}
+          ${hosts.length ? `${hosts.length === 1 ? "Host" : "Hosts"}: ${hosts.map((h) => `<strong>${esc(h)}</strong>`).join(", ")}` : ""}
         </div>`;
 
       if (services.length) {
-        html += `<div class="card-meta">Services: ${[...services].map((s) => `<code>${esc(s)}</code>`).join(" ")}</div>`;
+        html += `<div class="card-meta">${services.length === 1 ? "Service" : "Services"}: ${[...services].map((s) => `<code>${esc(s)}</code>`).join(" ")}</div>`;
       }
       const pageUrls = info.pageUrls || [];
       if (pageUrls.length) {
-        html += `<div class="card-meta card-meta-dim">Pages: ${[...pageUrls].map((u) => {
+        html += `<div class="card-meta card-meta-dim">${pageUrls.length === 1 ? "Page" : "Pages"}: ${[...pageUrls].map((u) => {
           var name = u.split("/").pop().split("?")[0] || u;
           return `<span title="${esc(u)}">${esc(name)}</span>`;
         }).join(", ")}</div>`;
