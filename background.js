@@ -4,6 +4,10 @@
 
 importScripts("lib/protobuf.js", "lib/discovery.js", "lib/req2proto.js", "lib/stats.js", "lib/chains.js");
 
+// ─── AST Cache Version ──────────────────────────────────────────────────────
+// Bump this when AST analysis logic changes to auto-invalidate cached results.
+const AST_ANALYSIS_VERSION = 1;
+
 // ─── Offscreen AST Worker ────────────────────────────────────────────────────
 // Heavy libs (babel-bundle.js, ast.js, sourcemap.js) run in an offscreen
 // document so the service worker stays responsive during analysis.
@@ -68,6 +72,8 @@ const globalStore = {
   probeResults: new Map(), // endpointKey → probe result
   scopes: new Map(), // service → string[]
   securityFindings: new Map(), // sourceUrl → { sourceUrl, securitySinks[], dangerousPatterns[] }
+  scriptCache: new Map(), // SHA-256 hash → { version, result, timestamp }
+  discoveryChanges: new Map(), // service → [{ timestamp, fetchUrl, changes }]
 };
 
 // ─── Key Extraction ──────────────────────────────────────────────────────────
@@ -321,6 +327,8 @@ function _serializeGlobalStore() {
     probeResults: Object.fromEntries(globalStore.probeResults),
     scopes: Object.fromEntries(globalStore.scopes),
     securityFindings: Object.fromEntries(globalStore.securityFindings),
+    scriptCache: Object.fromEntries(globalStore.scriptCache),
+    discoveryChanges: Object.fromEntries(globalStore.discoveryChanges),
     savedAt: Date.now(),
   };
 }
@@ -356,6 +364,24 @@ function _deserializeIntoGlobalStore(s) {
   if (s.securityFindings) {
     for (const [k, v] of Object.entries(s.securityFindings))
       globalStore.securityFindings.set(k, v);
+  }
+  if (s.scriptCache) {
+    var TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
+    var now = Date.now();
+    var entries = Object.entries(s.scriptCache);
+    // Evict expired entries
+    entries = entries.filter(function([_, v]) { return now - v.timestamp < TTL; });
+    // Cap at 500 entries (LRU by timestamp)
+    if (entries.length > 500) {
+      entries.sort(function(a, b) { return b[1].timestamp - a[1].timestamp; });
+      entries = entries.slice(0, 500);
+    }
+    for (const [k, v] of entries)
+      globalStore.scriptCache.set(k, v);
+  }
+  if (s.discoveryChanges) {
+    for (const [k, v] of Object.entries(s.discoveryChanges))
+      globalStore.discoveryChanges.set(k, v);
   }
 }
 
@@ -426,6 +452,15 @@ function mergeToGlobal(tab) {
     }
   }
   for (const [k, v] of tab.endpoints) {
+    if (!globalStore.endpoints.has(k)) {
+      v._isNew = true;
+      v._firstSeenGlobal = Date.now();
+    } else {
+      var ge = globalStore.endpoints.get(k);
+      if (ge.lastSeen) v.lastSeen = Date.now();
+      if (ge._firstSeenGlobal) v._firstSeenGlobal = ge._firstSeenGlobal;
+      v._isNew = false;
+    }
     globalStore.endpoints.set(k, v);
   }
   for (const [k, v] of tab.discoveryDocs) {
@@ -1684,6 +1719,7 @@ function mergeSchemaInto(doc, schemaName, newSchema) {
   }
   const existing = doc.schemas[schemaName];
   if (!existing.properties) existing.properties = {};
+  if (!existing._drift) existing._drift = [];
   const newProps = newSchema.properties || {};
 
   // Build field-number → key index for deduplication
@@ -1705,6 +1741,7 @@ function mergeSchemaInto(doc, schemaName, newSchema) {
       // Brand new field — add it
       existing.properties[key] = newProp;
       if (fieldNum != null) numToKey[fieldNum] = key;
+      existing._drift.push({ type: "field_added", field: key, fieldType: newProp.type, timestamp: Date.now() });
     } else {
       // Re-key if matched by field number and the new key has a real name
       if (matchKey !== key && !old.customName && !/^field\d+$/.test(key)) {
@@ -1721,6 +1758,7 @@ function mergeSchemaInto(doc, schemaName, newSchema) {
       // Upgrade generic types with more specific ones
       if (newProp.type && newProp.type !== old.type) {
         if (old.type === "string" && newProp.type !== "string") {
+          existing._drift.push({ type: "type_changed", field: key || matchKey, from: old.type, to: newProp.type, timestamp: Date.now() });
           old.type = newProp.type;
         }
         // int → double/float (observed fractional value refines integer assumption)
@@ -1728,6 +1766,7 @@ function mergeSchemaInto(doc, schemaName, newSchema) {
           (old.type === "int64" || old.type === "int32") &&
           (newProp.type === "double" || newProp.type === "float")
         ) {
+          existing._drift.push({ type: "type_changed", field: key || matchKey, from: old.type, to: newProp.type, timestamp: Date.now() });
           old.type = newProp.type;
         }
       }
@@ -1759,6 +1798,8 @@ function mergeSchemaInto(doc, schemaName, newSchema) {
       }
     }
   }
+  // Cap drift log at 50 entries per schema
+  if (existing._drift.length > 50) existing._drift = existing._drift.slice(-50);
 }
 
 // ─── Page-Context Fetch Bridge ───────────────────────────────────────────────
@@ -2009,6 +2050,96 @@ function collectKeysForService(tab, service, hostname) {
   return keys;
 }
 
+// ─── Discovery Document Diffing ──────────────────────────────────────────────
+
+function _collectAllMethods(doc) {
+  var result = {};
+  if (!doc || !doc.resources) return result;
+  function walk(resources, prefix) {
+    for (var rName in resources) {
+      var res = resources[rName];
+      if (res.methods) {
+        for (var mName in res.methods) {
+          var id = (prefix ? prefix + "." : "") + rName + "." + mName;
+          result[id] = res.methods[mName];
+        }
+      }
+      // Recurse into sub-resources
+      if (res.resources) walk(res.resources, (prefix ? prefix + "." : "") + rName);
+    }
+  }
+  walk(doc.resources, "");
+  return result;
+}
+
+function _diffDiscoveryDocs(oldDoc, newDoc) {
+  if (!oldDoc || !newDoc) return null;
+  var changes = [];
+
+  var oldMethods = _collectAllMethods(oldDoc);
+  var newMethods = _collectAllMethods(newDoc);
+
+  // New methods
+  for (var id in newMethods) {
+    if (!oldMethods[id]) {
+      changes.push({ type: "method_added", methodId: id, path: newMethods[id].path, httpMethod: newMethods[id].httpMethod });
+    }
+  }
+  // Removed methods
+  for (var id in oldMethods) {
+    if (!newMethods[id]) {
+      changes.push({ type: "method_removed", methodId: id, path: oldMethods[id].path, httpMethod: oldMethods[id].httpMethod });
+    }
+  }
+  // Changed methods — compare parameters
+  for (var id in newMethods) {
+    if (!oldMethods[id]) continue;
+    var oldM = oldMethods[id], newM = newMethods[id];
+    var oldParams = Object.keys(oldM.parameters || {});
+    var newParams = Object.keys(newM.parameters || {});
+
+    for (var pi = 0; pi < newParams.length; pi++) {
+      var p = newParams[pi];
+      if (!oldM.parameters || !oldM.parameters[p]) {
+        changes.push({ type: "param_added", methodId: id, param: p, details: newM.parameters[p] });
+      }
+    }
+    for (var pi = 0; pi < oldParams.length; pi++) {
+      var p = oldParams[pi];
+      if (!newM.parameters || !newM.parameters[p]) {
+        changes.push({ type: "param_removed", methodId: id, param: p });
+      }
+    }
+    for (var pi = 0; pi < newParams.length; pi++) {
+      var p = newParams[pi];
+      if (!oldM.parameters || !oldM.parameters[p]) continue;
+      var op = oldM.parameters[p], np = newM.parameters[p];
+      if (op.type !== np.type) {
+        changes.push({ type: "param_type_changed", methodId: id, param: p, from: op.type, to: np.type });
+      }
+      if (!op.required && np.required) {
+        changes.push({ type: "param_required", methodId: id, param: p });
+      }
+    }
+  }
+
+  // Compare schemas — new/removed schema names
+  var oldSchemas = Object.keys(oldDoc.schemas || {});
+  var newSchemas = Object.keys(newDoc.schemas || {});
+  for (var si = 0; si < newSchemas.length; si++) {
+    if (oldSchemas.indexOf(newSchemas[si]) === -1) {
+      changes.push({ type: "schema_added", schema: newSchemas[si] });
+    }
+  }
+  for (var si = 0; si < oldSchemas.length; si++) {
+    if (newSchemas.indexOf(oldSchemas[si]) === -1) {
+      changes.push({ type: "schema_removed", schema: oldSchemas[si] });
+    }
+  }
+
+  return changes.length > 0 ? changes : null;
+}
+
 /**
  * Fetch discovery document for a service, trying multiple API keys.
  * Some discovery documents only load with the correct API key.
@@ -2070,6 +2201,19 @@ async function fetchDiscoveryForService(
           }
 
           const existingEntry = tab.discoveryDocs.get(service);
+
+          // Diff before merge overwrites — track API surface changes
+          if (existingEntry?.doc) {
+            var diff = _diffDiscoveryDocs(existingEntry.doc, unifiedDoc);
+            if (diff) {
+              var dcList = globalStore.discoveryChanges.get(service) || [];
+              dcList.push({ timestamp: Date.now(), fetchUrl: url, changes: diff });
+              if (dcList.length > 20) dcList = dcList.slice(-20);
+              globalStore.discoveryChanges.set(service, dcList);
+              console.debug("[Discovery:diff] %d changes detected for %s", diff.length, service);
+            }
+          }
+
           const mergedDoc = mergeVirtualParts(unifiedDoc, existingEntry?.doc);
 
           tab.discoveryDocs.set(service, {
@@ -2748,6 +2892,11 @@ async function handleResponseBody(tabId, msg) {
     responseHeaders: msg.responseHeaders || {},
   };
 
+  // Update lastSeen on matching endpoint
+  var _epKey = entry.method + " " + urlObj.hostname + urlObj.pathname;
+  var _ep = tab.endpoints.get(_epKey);
+  if (_ep) _ep.lastSeen = Date.now();
+
   // Update auth context
   if (authorization || cookie) {
     tab.authContext = tab.authContext || {};
@@ -2958,11 +3107,145 @@ function _hashScriptCode(code) {
   return "inline:" + h;
 }
 
+// Full-content SHA-256 hash for AST cache keys (async, SubtleCrypto)
+async function _hashScriptSHA256(code) {
+  var buf = new TextEncoder().encode(code);
+  var hash = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(hash)).map(function(b) {
+    return b.toString(16).padStart(2, "0");
+  }).join("");
+}
+
 function _findScriptForLine(line, scriptOffsets) {
   for (var i = scriptOffsets.length - 1; i >= 0; i--) {
     if (line >= scriptOffsets[i].lineStart) return scriptOffsets[i];
   }
   return scriptOffsets[0];
+}
+
+// Compare new security findings against globalStore to mark as new/existing/fixed
+function _markSecurityFindingChanges(scriptUrl, findings) {
+  var prev = globalStore.securityFindings.get(scriptUrl);
+  if (prev) {
+    var prevSigs = new Set();
+    var ps = prev.securitySinks || [];
+    for (var i = 0; i < ps.length; i++) {
+      prevSigs.add(ps[i].sink + ":" + (ps[i].sourceType || "") + ":" + (ps[i].location ? ps[i].location.line : ""));
+    }
+    var pp = prev.dangerousPatterns || [];
+    for (var i = 0; i < pp.length; i++) {
+      prevSigs.add(pp[i].pattern + ":" + (pp[i].location ? pp[i].location.line : ""));
+    }
+    for (var i = 0; i < findings.sinks.length; i++) {
+      var s = findings.sinks[i];
+      var sig = s.sink + ":" + (s.sourceType || "") + ":" + (s.location ? s.location.line : "");
+      findings.sinks[i]._changeType = prevSigs.has(sig) ? "existing" : "new";
+      prevSigs.delete(sig);
+    }
+    for (var i = 0; i < findings.patterns.length; i++) {
+      var p = findings.patterns[i];
+      var sig = p.pattern + ":" + (p.location ? p.location.line : "");
+      findings.patterns[i]._changeType = prevSigs.has(sig) ? "existing" : "new";
+      prevSigs.delete(sig);
+    }
+    findings._fixedCount = prevSigs.size;
+  } else {
+    for (var i = 0; i < findings.sinks.length; i++) findings.sinks[i]._changeType = "new";
+    for (var i = 0; i < findings.patterns.length; i++) findings.patterns[i]._changeType = "new";
+  }
+}
+
+// Replay a cached AST analysis result — mirrors the post-analysis flow in
+// _analyzeCombinedScripts() but skips the offscreen worker entirely.
+function _replayCachedAST(tabId, tab, cached, sourceMapScripts, buf) {
+  // Clear previous AST-derived endpoints
+  var keysToDelete = [];
+  tab.endpoints.forEach(function(val, key) {
+    if (key.startsWith("AST ") || key.startsWith("AST DYN ")) {
+      keysToDelete.push(key);
+    }
+  });
+  for (var di = 0; di < keysToDelete.length; di++) {
+    tab.endpoints.delete(keysToDelete[di]);
+  }
+  tab._astResults = [];
+  tab._securityFindings = [];
+
+  var analysis = JSON.parse(JSON.stringify(cached.result)); // deep copy
+  var scriptOffsets = cached.scriptOffsets || [];
+  var tabUrl = cached.tabUrl || "";
+
+  // Override tabUrl with current tab URL if available
+  var meta = _tabMeta.get(tabId);
+  if (meta && meta.url) tabUrl = meta.url;
+  else if (buf && buf.pageUrl) tabUrl = buf.pageUrl;
+
+  var hasFindings = analysis.protoEnums.length || analysis.protoFieldMaps.length ||
+    analysis.fetchCallSites.length || analysis.sourceMapUrl ||
+    (analysis.securitySinks && analysis.securitySinks.length) ||
+    (analysis.dangerousPatterns && analysis.dangerousPatterns.length);
+
+  if (!hasFindings && sourceMapScripts.length === 0) return;
+
+  if (hasFindings) {
+    analysis._securityMerged = true;
+    tab._astResults.push(analysis);
+    mergeASTResultsIntoVDD(tab, [analysis], tabId);
+
+    // Split security findings by source script
+    var secSinks = analysis.securitySinks || [];
+    var dangerousPats = analysis.dangerousPatterns || [];
+    if (secSinks.length || dangerousPats.length) {
+      var byScript = {};
+      for (var _fsi = 0; _fsi < secSinks.length; _fsi++) {
+        var sink = secSinks[_fsi];
+        var sLine = sink.location ? sink.location.line : 0;
+        var sInfo = _findScriptForLine(sLine, scriptOffsets);
+        var sKey = sInfo.url || tabUrl;
+        if (!byScript[sKey]) byScript[sKey] = { sinks: [], patterns: [] };
+        var adjustedSink = Object.assign({}, sink);
+        if (sInfo.url && sink.location) {
+          adjustedSink.location = Object.assign({}, sink.location, {
+            line: sink.location.line - sInfo.lineStart + 1
+          });
+        }
+        byScript[sKey].sinks.push(adjustedSink);
+      }
+      for (var _fpi = 0; _fpi < dangerousPats.length; _fpi++) {
+        var pat = dangerousPats[_fpi];
+        var pLine = pat.location ? pat.location.line : 0;
+        var pInfo = _findScriptForLine(pLine, scriptOffsets);
+        var pKey = pInfo.url || tabUrl;
+        if (!byScript[pKey]) byScript[pKey] = { sinks: [], patterns: [] };
+        var adjustedPat = Object.assign({}, pat);
+        if (pInfo.url && pat.location) {
+          adjustedPat.location = Object.assign({}, pat.location, {
+            line: pat.location.line - pInfo.lineStart + 1
+          });
+        }
+        byScript[pKey].patterns.push(adjustedPat);
+      }
+      if (!tab._securityFindings) tab._securityFindings = [];
+      for (var sUrl in byScript) {
+        _markSecurityFindingChanges(sUrl, byScript[sUrl]);
+        tab._securityFindings.push({
+          sourceUrl: sUrl,
+          pageUrl: tabUrl,
+          securitySinks: byScript[sUrl].sinks,
+          dangerousPatterns: byScript[sUrl].patterns,
+          _fixedCount: byScript[sUrl]._fixedCount || 0,
+        });
+      }
+    }
+
+    mergeToGlobal(tab);
+    notifyPopup(tabId);
+  }
+
+  // Fetch source maps (not cached — they're fetched separately and may change)
+  for (var smi = 0; smi < sourceMapScripts.length; smi++) {
+    _fetchSourceMapForScript(tabId, tab, analysis, sourceMapScripts[smi].scriptUrl, sourceMapScripts[smi].smUrl);
+  }
 }
 
 async function _analyzeCombinedScripts(tabId) {
@@ -2984,6 +3267,38 @@ async function _analyzeCombinedScripts(tabId) {
     if (smUrl) {
       sourceMapScripts.push({ scriptUrl: scripts[si].url, smUrl: smUrl });
     }
+  }
+
+  // ─── AST Cache Check ───────────────────────────────────────────────
+  // Hash each script individually, then combine hashes into a cache key.
+  // If the exact same set of scripts was analyzed before with the same
+  // AST_ANALYSIS_VERSION, replay the cached result without touching the
+  // offscreen worker.
+  var scriptHashes = [];
+  try {
+    for (var hi = 0; hi < scripts.length; hi++) {
+      scriptHashes.push(await _hashScriptSHA256(scripts[hi].code));
+    }
+  } catch (_) {
+    // SubtleCrypto unavailable — proceed without cache
+    scriptHashes = [];
+  }
+
+  var cacheKey = null;
+  if (scriptHashes.length === scripts.length) {
+    cacheKey = scriptHashes.join("+");
+    var cached = globalStore.scriptCache.get(cacheKey);
+    if (cached && cached.version === AST_ANALYSIS_VERSION) {
+      console.debug("[AST:cache] Cache HIT for tab=%d (%d scripts, key=%s…)",
+        tabId, scripts.length, cacheKey.slice(0, 16));
+      // Update timestamp for LRU eviction
+      cached.timestamp = Date.now();
+      // Replay cached results
+      _replayCachedAST(tabId, tab, cached, sourceMapScripts, buf);
+      return;
+    }
+    console.debug("[AST:cache] Cache MISS for tab=%d (%d scripts, key=%s…)",
+      tabId, scripts.length, cacheKey.slice(0, 16));
   }
 
   // Clear previous AST-derived endpoints (in case of re-analysis due to late scripts)
@@ -3043,6 +3358,18 @@ async function _analyzeCombinedScripts(tabId) {
   }
   analysis = response.result;
 
+  // ─── Cache the analysis result ──────────────────────────────────────
+  if (cacheKey) {
+    globalStore.scriptCache.set(cacheKey, {
+      version: AST_ANALYSIS_VERSION,
+      result: JSON.parse(JSON.stringify(analysis)), // deep copy to avoid aliasing
+      scriptOffsets: scriptOffsets,
+      tabUrl: tabUrl,
+      timestamp: Date.now(),
+    });
+    scheduleSave();
+  }
+
   var hasFindings = analysis.protoEnums.length || analysis.protoFieldMaps.length ||
     analysis.fetchCallSites.length || analysis.sourceMapUrl ||
     (analysis.securitySinks && analysis.securitySinks.length) ||
@@ -3101,11 +3428,14 @@ async function _analyzeCombinedScripts(tabId) {
       }
       if (!tab._securityFindings) tab._securityFindings = [];
       for (var sUrl in byScript) {
+        // Mark findings as new/existing by comparing against globalStore
+        _markSecurityFindingChanges(sUrl, byScript[sUrl]);
         tab._securityFindings.push({
           sourceUrl: sUrl,
           pageUrl: tabUrl,
           securitySinks: byScript[sUrl].sinks,
           dangerousPatterns: byScript[sUrl].patterns,
+          _fixedCount: byScript[sUrl]._fixedCount || 0,
         });
       }
       console.debug("[AST:combined] Split security findings across %d scripts for tab=%d",
@@ -3703,7 +4033,7 @@ function _handleFormMetadata(tabId, forms, sender) {
     var service = extractInterfaceName(url);
     var { methodName: baseMethodName } = calculateMethodMetadata(url, service);
     var qualifiedName = form.method.toLowerCase() + "_" + baseMethodName;
-    console.log("[UASR] form →", service, qualifiedName, form.fields.length, "fields");
+    console.debug("[UASR:forms] form →", service, qualifiedName, form.fields.length, "fields");
 
     // Create or get VDD entry
     var docEntry = tab.discoveryDocs.get(service);
@@ -3876,7 +4206,7 @@ function handleContentMessage(msg, sender) {
   }
 
   if (msg.type === "CONTENT_FORMS") {
-    console.log("[UASR] CONTENT_FORMS received, forms:", msg.forms?.length, msg.forms);
+    console.debug("[UASR:forms] CONTENT_FORMS received, %d forms", msg.forms?.length);
     if (Array.isArray(msg.forms)) {
       _handleFormMetadata(tabId, msg.forms, sender);
     }
@@ -3884,7 +4214,7 @@ function handleContentMessage(msg, sender) {
   }
 
   if (msg.type === "CONTENT_FORM_SUBMIT") {
-    console.log("[UASR] CONTENT_FORM_SUBMIT received", msg.method, msg.url, msg.fields?.length, "fields");
+    console.debug("[UASR:forms] CONTENT_FORM_SUBMIT received %s %s (%d fields)", msg.method, msg.url, msg.fields?.length);
     _handleFormSubmit(tabId, msg);
     return;
   }
@@ -4072,6 +4402,11 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
         result[tid] = { meta, requestLog: t.requestLog };
       }
       sendResponse(result);
+      return;
+    }
+
+    case "GET_DISCOVERY_CHANGES": {
+      sendResponse(Object.fromEntries(globalStore.discoveryChanges));
       return;
     }
 

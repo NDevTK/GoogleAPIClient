@@ -450,34 +450,57 @@
     }
   });
 
+  // ─── Scan Dedup ────────────────────────────────────────────────────────────
+  // Track hashes of last sent scan results to avoid re-sending identical data
+  // on SPA re-renders or MutationObserver re-triggers without actual DOM changes.
+
+  var _lastScanHash = null;
+  var _lastFormScanHash = null;
+
+  function _simpleHash(str) {
+    var h = 0;
+    for (var i = 0; i < str.length; i++) {
+      h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+    }
+    return h;
+  }
+
   // ─── Init ──────────────────────────────────────────────────────────────────
 
   const { keys, endpoints } = scanPage();
 
-  if (keys.length > 0) {
-    chrome.runtime.sendMessage({
-      type: "CONTENT_KEYS",
-      keys,
-      origin: location.origin,
-    });
-  }
-  if (endpoints.length > 0) {
-    chrome.runtime.sendMessage({
-      type: "CONTENT_ENDPOINTS",
-      endpoints,
-      origin: location.origin,
-    });
+  var scanHash = _simpleHash(JSON.stringify({ keys: keys, endpoints: endpoints }));
+  if (scanHash !== _lastScanHash) {
+    _lastScanHash = scanHash;
+    if (keys.length > 0) {
+      chrome.runtime.sendMessage({
+        type: "CONTENT_KEYS",
+        keys,
+        origin: location.origin,
+      });
+    }
+    if (endpoints.length > 0) {
+      chrome.runtime.sendMessage({
+        type: "CONTENT_ENDPOINTS",
+        endpoints,
+        origin: location.origin,
+      });
+    }
   }
 
   var forms = scanForms();
-  console.log("[UASR] scanForms found", forms.length, "forms", forms);
-  if (forms.length > 0) {
-    chrome.runtime.sendMessage({
-      type: "CONTENT_FORMS",
-      forms: forms,
-      origin: location.origin,
-      pageUrl: location.href,
-    });
+  console.debug("[UASR:forms] scanForms found %d forms", forms.length);
+  var formHash = _simpleHash(JSON.stringify(forms));
+  if (formHash !== _lastFormScanHash) {
+    _lastFormScanHash = formHash;
+    if (forms.length > 0) {
+      chrome.runtime.sendMessage({
+        type: "CONTENT_FORMS",
+        forms: forms,
+        origin: location.origin,
+        pageUrl: location.href,
+      });
+    }
   }
 
   // ─── Script Source Extraction (for AST analysis) ────────────────────────────
@@ -600,20 +623,25 @@
       pendingEndpoints.clear();
     }
     if (pendingForms.length > 0) {
-      chrome.runtime.sendMessage({
-        type: "CONTENT_FORMS",
-        forms: pendingForms.slice(),
-        origin: location.origin,
-        pageUrl: location.href,
-      });
+      var pf = pendingForms.slice();
       pendingForms.length = 0;
+      var pfHash = _simpleHash(JSON.stringify(pf));
+      if (pfHash !== _lastFormScanHash) {
+        _lastFormScanHash = pfHash;
+        chrome.runtime.sendMessage({
+          type: "CONTENT_FORMS",
+          forms: pf,
+          origin: location.origin,
+          pageUrl: location.href,
+        });
+      }
     }
   }
 
   // ─── Form Submission Capture ──────────────────────────────────────────────
 
   document.addEventListener("submit", function (e) {
-    console.log("[UASR] submit event fired", e.target?.tagName, e.target?.name);
+    console.debug("[UASR:forms] submit event fired", e.target?.tagName, e.target?.name);
     if (!e.target || e.target.tagName !== "FORM") return;
     try {
       var form = e.target;
@@ -651,7 +679,7 @@
         url = getUrl.href;
       }
 
-      console.log("[UASR] sending CONTENT_FORM_SUBMIT", method, url, fields.length, "fields", fields);
+      console.debug("[UASR:forms] sending CONTENT_FORM_SUBMIT %s %s (%d fields)", method, url, fields.length);
       chrome.runtime.sendMessage({
         type: "CONTENT_FORM_SUBMIT",
         url: url,
