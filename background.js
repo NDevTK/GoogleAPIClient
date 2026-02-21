@@ -3203,8 +3203,10 @@ function _fetchSourceMapForScript(tabId, tab, analysis, scriptUrl, smUrl) {
                 });
                 if (_srcSinks.length || _srcDangerous.length) {
                   if (!tab._securityFindings) tab._securityFindings = [];
+                  var _smPageMeta = _tabMeta.get(tabId);
                   tab._securityFindings.push({
                     sourceUrl: batchFiles[_bi].name,
+                    pageUrl: _smPageMeta ? _smPageMeta.url : null,
                     securitySinks: _srcSinks,
                     dangerousPatterns: _srcDangerous,
                   });
@@ -3661,8 +3663,10 @@ function mergeASTResultsIntoVDD(tab, results, tabId) {
     if ((secSinks.length || dangerousPats.length) && !analysis._securityMerged) {
       analysis._securityMerged = true;
       if (!tab._securityFindings) tab._securityFindings = [];
+      var _mfMeta = tabId != null ? _tabMeta.get(tabId) : null;
       tab._securityFindings.push({
         sourceUrl: analysis.sourceUrl,
+        pageUrl: _mfMeta ? _mfMeta.url : null,
         securitySinks: secSinks,
         dangerousPatterns: dangerousPats,
       });
