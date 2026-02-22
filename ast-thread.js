@@ -14,7 +14,7 @@ onmessage = function(e) {
       var result = analyzeJSBundle(msg.code, msg.sourceUrl, msg.forceScript);
       response = { success: true, result: result };
     } catch (err) {
-      response = { success: false, error: err.message };
+      response = { success: false, error: err.message, stack: err.stack };
     }
   } else if (msg.type === "AST_ANALYZE_BATCH") {
     try {
@@ -28,8 +28,8 @@ onmessage = function(e) {
             securitySinks: a.securitySinks || [],
             dangerousPatterns: a.dangerousPatterns || [],
           });
-        } catch (_) {
-          results.push({ success: false });
+        } catch (err) {
+          results.push({ success: false, error: err.message });
         }
       }
       response = { success: true, result: results };
@@ -41,14 +41,14 @@ onmessage = function(e) {
       var smData = parseSourceMap(msg.sourceMapJson);
       response = { success: true, result: smData };
     } catch (err) {
-      response = { success: false, error: err.message };
+      response = { success: false, error: err.message, stack: err.stack };
     }
   } else if (msg.type === "AST_EXTRACT_TYPES") {
     try {
       var types = extractTypesFromSources(msg.sourcesContent, msg.sources);
       response = { success: true, result: types };
     } catch (err) {
-      response = { success: false, error: err.message };
+      response = { success: false, error: err.message, stack: err.stack };
     }
   } else {
     response = { success: false, error: "Unknown message type: " + msg.type };

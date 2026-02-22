@@ -3350,6 +3350,7 @@ async function _analyzeCombinedScripts(tabId) {
   if (!response || !response.success) {
     console.debug("[AST:combined] analyzeJSBundle failed for tab=%d: %s", tabId,
       response ? response.error : "no response");
+    if (response && response.stack) console.debug(response.stack);
     // Fallback: analyze scripts individually
     for (var fi = 0; fi < scripts.length; fi++) {
       analyzeScript(tabId, scripts[fi].url, scripts[fi].code);
@@ -3368,6 +3369,14 @@ async function _analyzeCombinedScripts(tabId) {
       timestamp: Date.now(),
     });
     scheduleSave();
+  }
+
+  if (analysis.resolverErrors && analysis.resolverErrors.length > 0) {
+    for (var _rei = 0; _rei < analysis.resolverErrors.length; _rei++) {
+      var _re = analysis.resolverErrors[_rei];
+      console.debug("[AST:resolver] %s: %s", _re.context, _re.message);
+      if (_re.stack) console.debug(_re.stack);
+    }
   }
 
   var hasFindings = analysis.protoEnums.length || analysis.protoFieldMaps.length ||
@@ -3578,9 +3587,18 @@ async function analyzeScript(tabId, scriptUrl, code) {
   if (!response || !response.success) {
     console.debug("[AST] analyzeJSBundle failed for %s: %s", scriptUrl,
       response ? response.error : "no response");
+    if (response && response.stack) console.debug(response.stack);
     return;
   }
   analysis = response.result;
+
+  if (analysis.resolverErrors && analysis.resolverErrors.length > 0) {
+    for (var _rei = 0; _rei < analysis.resolverErrors.length; _rei++) {
+      var _re = analysis.resolverErrors[_rei];
+      console.debug("[AST:resolver] %s: %s", _re.context, _re.message);
+      if (_re.stack) console.debug(_re.stack);
+    }
+  }
 
   var hasFindings = analysis.protoEnums.length || analysis.protoFieldMaps.length ||
     analysis.fetchCallSites.length || analysis.sourceMapUrl ||
