@@ -769,7 +769,7 @@ details summary:hover {
   gap: 6px;
 }
 #send-graphql-fields textarea,
-#send-graphql-fields input {
+#send-graphql-fields input[type="text"] {
   width: 100%;
   background: #161b22;
   color: #c9d1d9;
@@ -781,9 +781,55 @@ details summary:hover {
   resize: vertical;
 }
 #send-graphql-fields textarea:focus,
-#send-graphql-fields input:focus {
+#send-graphql-fields input[type="text"]:focus {
   border-color: #58a6ff;
   outline: none;
+}
+.gql-op-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.gql-op-tab {
+  padding: 3px 10px;
+  font-size: 11px;
+  background: #161b22;
+  color: #8b949e;
+  border: 1px solid #30363d;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  cursor: pointer;
+}
+.gql-op-tab.active {
+  background: #0d1117;
+  color: #c9d1d9;
+  border-color: #58a6ff;
+}
+.gql-op-tab .gql-tab-close {
+  margin-left: 6px;
+  color: #6e7681;
+  cursor: pointer;
+}
+.gql-op-tab .gql-tab-close:hover {
+  color: #f85149;
+}
+.gql-op-panel { display: none; flex-direction: column; gap: 6px; }
+.gql-op-panel.active { display: flex; }
+.gql-field-label {
+  font-size: 10px;
+  color: #8b949e;
+  margin-bottom: 1px;
+}
+.gql-add-op {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+.gql-extensions-toggle {
+  font-size: 10px;
+  color: #8b949e;
+  cursor: pointer;
+  user-select: none;
 }
 
 /* Form fields */

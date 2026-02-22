@@ -77,21 +77,9 @@
           placeholder='{"field": "value"} or base64 for protobuf'
         ></textarea>
         <div id="send-graphql-fields" class="hidden">
-          <textarea
-            id="send-gql-query"
-            placeholder="query { user(id: 1) { name email } }"
-            rows="4"
-          ></textarea>
-          <textarea
-            id="send-gql-variables"
-            placeholder='Variables (JSON): {"id": 1}'
-            rows="2"
-          ></textarea>
-          <input
-            id="send-gql-opname"
-            type="text"
-            placeholder="Operation name (optional)"
-          />
+          <div id="gql-op-tabs" class="gql-op-tabs hidden"></div>
+          <div id="gql-op-container"></div>
+          <button id="btn-gql-add-op" class="btn-small gql-add-op" type="button">+ Add Operation</button>
         </div>
         <div id="send-ws-console" class="hidden">
           <div class="ws-console-header">

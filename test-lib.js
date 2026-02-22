@@ -697,8 +697,43 @@ test("parseGraphQLRequest — valid query with variables", function() {
     operationName: "GetUser"
   });
   var result = parseGraphQLRequest(body);
-  return result !== null && result.query.includes("GetUser") &&
-    result.variables.id === "123" && result.operationName === "GetUser";
+  return result !== null && !result.batched && result.operations.length === 1 &&
+    result.operations[0].query.includes("GetUser") &&
+    result.operations[0].variables.id === "123" && result.operations[0].operationName === "GetUser";
+});
+
+test("parseGraphQLRequest — preserves extensions", function() {
+  var body = JSON.stringify({
+    query: "query Q { x }",
+    extensions: { persistedQuery: { sha256Hash: "abc" } }
+  });
+  var result = parseGraphQLRequest(body);
+  return result !== null && result.operations[0].extensions.persistedQuery.sha256Hash === "abc";
+});
+
+test("parseGraphQLRequest — batched array with multiple operations", function() {
+  var body = JSON.stringify([
+    { operationName: "Op1", query: "query Op1 { a }", variables: { id: "1" }, extensions: { clientLibrary: { name: "apollo" } } },
+    { operationName: "Op2", query: "query Op2 { b }", variables: { id: "2" } }
+  ]);
+  var result = parseGraphQLRequest(body);
+  return result !== null && result.batched === true && result.operations.length === 2 &&
+    result.operations[0].operationName === "Op1" && result.operations[0].extensions.clientLibrary.name === "apollo" &&
+    result.operations[1].operationName === "Op2" && result.operations[1].variables.id === "2";
+});
+
+test("parseGraphQLRequest — batched array with single operation", function() {
+  var body = JSON.stringify([
+    { operationName: "PenEmbed", query: "query PenEmbed { pen { id } }", variables: { id: "nYvVBV" } }
+  ]);
+  var result = parseGraphQLRequest(body);
+  return result !== null && result.batched === true && result.operations.length === 1 &&
+    result.operations[0].operationName === "PenEmbed";
+});
+
+test("parseGraphQLRequest — returns null for non-GraphQL array", function() {
+  var result = parseGraphQLRequest(JSON.stringify([{ data: "hello" }, { data: "world" }]));
+  return result === null;
 });
 
 test("parseGraphQLRequest — returns null for non-GraphQL JSON", function() {
@@ -714,8 +749,9 @@ test("parseGraphQLRequest — returns null for invalid JSON", function() {
 test("parseGraphQLResponse — valid response with data", function() {
   var body = JSON.stringify({ data: { user: { name: "Alice" } } });
   var result = parseGraphQLResponse(body);
-  return result !== null && result.data.user.name === "Alice" &&
-    result.errors === null && result.extensions === null;
+  return result !== null && !result.batched && result.results.length === 1 &&
+    result.results[0].data.user.name === "Alice" &&
+    result.results[0].errors === null && result.results[0].extensions === null;
 });
 
 test("parseGraphQLResponse — response with errors", function() {
@@ -724,8 +760,8 @@ test("parseGraphQLResponse — response with errors", function() {
     errors: [{ message: "Not found" }]
   });
   var result = parseGraphQLResponse(body);
-  return result !== null && result.data === null &&
-    result.errors.length === 1 && result.errors[0].message === "Not found";
+  return result !== null && result.results[0].data === null &&
+    result.results[0].errors.length === 1 && result.results[0].errors[0].message === "Not found";
 });
 
 test("parseGraphQLResponse — response with extensions", function() {
@@ -734,7 +770,19 @@ test("parseGraphQLResponse — response with extensions", function() {
     extensions: { tracing: { duration: 100 } }
   });
   var result = parseGraphQLResponse(body);
-  return result !== null && result.extensions.tracing.duration === 100;
+  return result !== null && result.results[0].extensions.tracing.duration === 100;
+});
+
+test("parseGraphQLResponse — batched array response", function() {
+  var body = JSON.stringify([
+    { data: { user: { name: "Alice" } } },
+    { data: { post: { title: "Hello" } }, errors: [{ message: "partial" }] }
+  ]);
+  var result = parseGraphQLResponse(body);
+  return result !== null && result.batched === true && result.results.length === 2 &&
+    result.results[0].data.user.name === "Alice" &&
+    result.results[1].data.post.title === "Hello" &&
+    result.results[1].errors.length === 1;
 });
 
 test("parseGraphQLResponse — returns null for non-GraphQL", function() {

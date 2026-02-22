@@ -1416,15 +1416,19 @@ function learnFromResponse(tabId, interfaceName, entry) {
     // GraphQL response: extract data/errors structure
     try {
       const gqlResp = parseGraphQLResponse(textBody);
-      if (gqlResp && gqlResp.data) {
-        const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Response`;
-        targetM.response = { $ref: schemaName };
-        const newSchema = generateSchemaFromJson(
-          gqlResp.data,
-          schemaName,
-          doc.schemas,
-        );
-        mergeSchemaInto(doc, schemaName, newSchema);
+      if (gqlResp) {
+        for (const r of gqlResp.results) {
+          if (r.data) {
+            const schemaName = `${methodName.replace(/[^a-zA-Z0-9]/g, "")}Response`;
+            targetM.response = { $ref: schemaName };
+            const newSchema = generateSchemaFromJson(
+              r.data,
+              schemaName,
+              doc.schemas,
+            );
+            mergeSchemaInto(doc, schemaName, newSchema);
+          }
+        }
       }
     } catch (e) {}
   } else if (mimeType.includes("json") || mimeType.includes("javascript")) {
@@ -4786,20 +4790,7 @@ async function buildExportRequest(tabId, msg) {
 
   // GraphQL: wrap query/variables in standard envelope
   if (isGraphQLUrl(url) && msg.body?.mode === "graphql") {
-    const gqlBody = {
-      query: msg.body.query || "",
-    };
-    if (msg.body.variables) {
-      try {
-        gqlBody.variables = JSON.parse(msg.body.variables);
-      } catch (_) {
-        gqlBody.variables = msg.body.variables;
-      }
-    }
-    if (msg.body.operationName) {
-      gqlBody.operationName = msg.body.operationName;
-    }
-    body = JSON.stringify(gqlBody);
+    body = encodeGraphQLBody(msg.body);
     headers["Content-Type"] = "application/json";
   }
 
@@ -5064,6 +5055,29 @@ function resolveEndpointSchema(tabId, endpointKey, service, methodId) {
 /**
  * Encode form fields as a JSON object (field names as keys).
  */
+/**
+ * Encode GraphQL body from popup operations array.
+ * Supports single and batched (array) format, preserves extensions.
+ */
+function encodeGraphQLBody(bodyMsg) {
+  const ops = bodyMsg.operations || [];
+  const encode = (op) => {
+    const obj = { query: op.query || "" };
+    if (op.variables) {
+      try { obj.variables = typeof op.variables === "string" ? JSON.parse(op.variables) : op.variables; }
+      catch (_) { obj.variables = op.variables; }
+    }
+    if (op.operationName) obj.operationName = op.operationName;
+    if (op.extensions) {
+      try { obj.extensions = typeof op.extensions === "string" ? JSON.parse(op.extensions) : op.extensions; }
+      catch (_) { obj.extensions = op.extensions; }
+    }
+    return obj;
+  };
+  if (bodyMsg.batched) return JSON.stringify(ops.map(encode));
+  return JSON.stringify(ops.length > 0 ? encode(ops[0]) : { query: "" });
+}
+
 function encodeFormToJson(fields) {
   const obj = {};
   for (const f of fields) {
@@ -5460,20 +5474,7 @@ async function executeSendRequest(tabId, msg) {
 
   // GraphQL: wrap query/variables in standard envelope
   if (isGraphQLUrl(url) && msg.body?.mode === "graphql") {
-    const gqlBody = {
-      query: msg.body.query || "",
-    };
-    if (msg.body.variables) {
-      try {
-        gqlBody.variables = JSON.parse(msg.body.variables);
-      } catch (_) {
-        gqlBody.variables = msg.body.variables;
-      }
-    }
-    if (msg.body.operationName) {
-      gqlBody.operationName = msg.body.operationName;
-    }
-    body = JSON.stringify(gqlBody);
+    body = encodeGraphQLBody(msg.body);
     headers["Content-Type"] = "application/json";
   }
 

@@ -44,6 +44,7 @@ let logFilter = "active"; // "active" | "all" | tabId (number)
 let logSearchQuery = ""; // text filter for request log
 let allTabsData = null; // { tabId: { meta, requestLog } }
 let lastSendResult = null; // Last rendered response for re-render after rename
+let gqlState = { ops: [], batched: false, activeIdx: 0 }; // GraphQL operation state
 
 // Virtual scroll state for request log
 const _vs = {
@@ -75,6 +76,125 @@ function setBodyMode(mode) {
     isConsole ? "none" : "";
   document.querySelector(".export-row").style.display =
     isConsole ? "none" : "";
+}
+
+// ─── GraphQL Operation UI ────────────────────────────────────────────────────
+
+function gqlBuildOpPanel(idx, op) {
+  const div = document.createElement("div");
+  div.className = "gql-op-panel" + (idx === gqlState.activeIdx ? " active" : "");
+  div.dataset.gqlIdx = idx;
+  div.innerHTML =
+    `<div class="gql-field-label">Query</div>` +
+    `<textarea class="gql-query" placeholder="query { user(id: 1) { name email } }" rows="4">${esc(op.query || "")}</textarea>` +
+    `<div class="gql-field-label">Variables (JSON)</div>` +
+    `<textarea class="gql-variables" placeholder='{"id": 1}' rows="2">${esc(op.variables ? (typeof op.variables === "string" ? op.variables : JSON.stringify(op.variables, null, 2)) : "")}</textarea>` +
+    `<div class="gql-field-label">Operation Name</div>` +
+    `<input type="text" class="gql-opname" placeholder="(optional)" value="${esc(op.operationName || "")}">` +
+    `<details class="gql-extensions-toggle"><summary>Extensions</summary>` +
+    `<textarea class="gql-extensions" placeholder='{"persistedQuery": {...}}' rows="2">${esc(op.extensions ? (typeof op.extensions === "string" ? op.extensions : JSON.stringify(op.extensions, null, 2)) : "")}</textarea>` +
+    `</details>`;
+  return div;
+}
+
+function gqlRenderTabs() {
+  const tabsEl = document.getElementById("gql-op-tabs");
+  const showTabs = gqlState.ops.length > 1 || gqlState.batched;
+  tabsEl.classList.toggle("hidden", !showTabs);
+  tabsEl.innerHTML = "";
+  for (let i = 0; i < gqlState.ops.length; i++) {
+    const tab = document.createElement("span");
+    tab.className = "gql-op-tab" + (i === gqlState.activeIdx ? " active" : "");
+    const label = gqlState.ops[i].operationName || `Op ${i + 1}`;
+    tab.innerHTML = esc(label);
+    if (gqlState.ops.length > 1) {
+      tab.innerHTML += `<span class="gql-tab-close" data-gql-close="${i}">\u00d7</span>`;
+    }
+    tab.dataset.gqlTab = i;
+    tab.addEventListener("click", (e) => {
+      if (e.target.dataset.gqlClose !== undefined) return;
+      gqlSaveCurrentOp();
+      gqlState.activeIdx = i;
+      gqlActivateTab(i);
+    });
+    tabsEl.appendChild(tab);
+  }
+  // Close button handlers
+  tabsEl.querySelectorAll(".gql-tab-close").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const closeIdx = parseInt(btn.dataset.gqlClose, 10);
+      gqlSaveCurrentOp();
+      gqlState.ops.splice(closeIdx, 1);
+      if (gqlState.activeIdx >= gqlState.ops.length) gqlState.activeIdx = gqlState.ops.length - 1;
+      if (gqlState.activeIdx < 0) gqlState.activeIdx = 0;
+      gqlRenderAll();
+    });
+  });
+}
+
+function gqlActivateTab(idx) {
+  const container = document.getElementById("gql-op-container");
+  container.querySelectorAll(".gql-op-panel").forEach((p, i) => {
+    p.classList.toggle("active", i === idx);
+  });
+  document.getElementById("gql-op-tabs").querySelectorAll(".gql-op-tab").forEach((t, i) => {
+    t.classList.toggle("active", i === idx);
+  });
+}
+
+function gqlSaveCurrentOp() {
+  const container = document.getElementById("gql-op-container");
+  const panel = container.querySelector(`.gql-op-panel[data-gql-idx="${gqlState.activeIdx}"]`);
+  if (!panel) return;
+  const op = gqlState.ops[gqlState.activeIdx];
+  if (!op) return;
+  op.query = panel.querySelector(".gql-query").value;
+  const varsText = panel.querySelector(".gql-variables").value;
+  op.variables = varsText || null;
+  op.operationName = panel.querySelector(".gql-opname").value || null;
+  const extText = panel.querySelector(".gql-extensions").value;
+  try { op.extensions = extText ? JSON.parse(extText) : null; } catch (_) { op.extensions = extText || null; }
+}
+
+function gqlCollectAllOps() {
+  gqlSaveCurrentOp();
+  return gqlState.ops.map((op) => ({
+    query: op.query || "",
+    variables: op.variables || null,
+    operationName: op.operationName || null,
+    extensions: op.extensions || null,
+  }));
+}
+
+function gqlRenderAll() {
+  const container = document.getElementById("gql-op-container");
+  container.innerHTML = "";
+  for (let i = 0; i < gqlState.ops.length; i++) {
+    container.appendChild(gqlBuildOpPanel(i, gqlState.ops[i]));
+  }
+  gqlRenderTabs();
+  // Update tab labels when operation name changes
+  container.querySelectorAll(".gql-opname").forEach((input) => {
+    input.addEventListener("input", () => {
+      gqlSaveCurrentOp();
+      gqlRenderTabs();
+    });
+  });
+}
+
+function gqlLoadOperations(ops, batched) {
+  gqlState.ops = ops.map((o) => ({ ...o }));
+  gqlState.batched = batched;
+  gqlState.activeIdx = 0;
+  gqlRenderAll();
+}
+
+function gqlClear() {
+  gqlState.ops = [{ query: "", variables: null, operationName: null, extensions: null }];
+  gqlState.batched = false;
+  gqlState.activeIdx = 0;
+  gqlRenderAll();
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────
@@ -128,6 +248,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   document
     .getElementById("btn-add-header")
     .addEventListener("click", addHeaderRow);
+  document.getElementById("btn-gql-add-op").addEventListener("click", () => {
+    gqlSaveCurrentOp();
+    gqlState.ops.push({ query: "", variables: null, operationName: null, extensions: null });
+    gqlState.batched = true;
+    gqlState.activeIdx = gqlState.ops.length - 1;
+    gqlRenderAll();
+  });
 
   // Export buttons
   document.getElementById("btn-copy-curl").addEventListener("click", () => copyAsFormat("curl"));
@@ -265,9 +392,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     } else if (bodyMode === "graphql") {
       body = {
         mode: "graphql",
-        query: document.getElementById("send-gql-query").value,
-        variables: document.getElementById("send-gql-variables").value,
-        operationName: document.getElementById("send-gql-opname").value,
+        operations: gqlCollectAllOps(),
+        batched: gqlState.batched,
       };
     } else {
       body = {
@@ -964,6 +1090,7 @@ async function loadVirtualSchema(service, methodId, initialData = null) {
     // Auto-set body mode: GraphQL if URL matches, otherwise form
     if (isGraphQLUrl(currentRequestUrl)) {
       setBodyMode("graphql");
+      if (gqlState.ops.length === 0 || !gqlState.ops[0].query) gqlClear();
     } else {
       setBodyMode("form");
     }
@@ -1537,9 +1664,8 @@ async function sendRequest() {
   } else if (bodyMode === "graphql") {
     body = {
       mode: "graphql",
-      query: document.getElementById("send-gql-query").value,
-      variables: document.getElementById("send-gql-variables").value,
-      operationName: document.getElementById("send-gql-opname").value,
+      operations: gqlCollectAllOps(),
+      batched: gqlState.batched,
       frameId: currentReplayRequest?.frameId,
     };
   } else {
@@ -2775,32 +2901,43 @@ function renderNDJSONResponse(bodyText) {
 
 // ─── GraphQL Renderer ───────────────────────────────────────────────────────
 
+function renderSingleGqlResult(r, respSchema, responseSchemaId, doc) {
+  let html = "";
+  if (r.errors) {
+    html += `<div class="card card-compact-error">
+      <div class="card-label card-label-error">Errors (${r.errors.length})</div>
+      <pre class="resp-body">${esc(JSON.stringify(r.errors, null, 2))}</pre>
+    </div>`;
+  }
+  if (r.data) {
+    const nodes = jsonToTree(r.data);
+    html += `<div class="card-label">Data</div>` +
+      renderPbTree(nodes, respSchema, responseSchemaId, doc);
+  }
+  if (r.extensions) {
+    html += `<div class="card card-compact">
+      <div class="card-label card-label-muted">Extensions</div>
+      <pre class="resp-body resp-body-scroll">${esc(JSON.stringify(r.extensions, null, 2))}</pre>
+    </div>`;
+  }
+  return html;
+}
+
 function renderGraphQLResponse(bodyText, respSchema, responseSchemaId, doc) {
   const gql = parseGraphQLResponse(bodyText);
   if (!gql) return null; // Fall through to normal JSON rendering
 
+  if (gql.results.length === 1) {
+    return renderSingleGqlResult(gql.results[0], respSchema, responseSchemaId, doc);
+  }
+
   let html = "";
-
-  if (gql.errors) {
-    html += `<div class="card card-compact-error">
-      <div class="card-label card-label-error">Errors (${gql.errors.length})</div>
-      <pre class="resp-body">${esc(JSON.stringify(gql.errors, null, 2))}</pre>
-    </div>`;
-  }
-
-  if (gql.data) {
-    const nodes = jsonToTree(gql.data);
-    html += `<div class="card-label">Data</div>` +
-      renderPbTree(nodes, respSchema, responseSchemaId, doc);
-  }
-
-  if (gql.extensions) {
+  for (let i = 0; i < gql.results.length; i++) {
     html += `<div class="card card-compact">
-      <div class="card-label card-label-muted">Extensions</div>
-      <pre class="resp-body resp-body-scroll">${esc(JSON.stringify(gql.extensions, null, 2))}</pre>
+      <div class="card-label">Operation ${i + 1}</div>
+      ${renderSingleGqlResult(gql.results[i], respSchema, responseSchemaId, doc)}
     </div>`;
   }
-
   return html;
 }
 
@@ -3037,19 +3174,14 @@ async function replayRequest(reqId, sourceTabId) {
       if (gqlReq) {
         gqlDetected = true;
         setBodyMode("graphql");
-        document.getElementById("send-gql-query").value = gqlReq.query || "";
-        document.getElementById("send-gql-variables").value =
-          gqlReq.variables ? JSON.stringify(gqlReq.variables, null, 2) : "";
-        document.getElementById("send-gql-opname").value = gqlReq.operationName || "";
+        gqlLoadOperations(gqlReq.operations, gqlReq.batched);
       }
     } catch (_) {}
   }
   if (!gqlDetected) {
     // Form mode if schema was loaded, otherwise raw
     setBodyMode(currentSchema ? "form" : "raw");
-    document.getElementById("send-gql-query").value = "";
-    document.getElementById("send-gql-variables").value = "";
-    document.getElementById("send-gql-opname").value = "";
+    gqlClear();
   }
   // Add headers (filtering out Content-Type which is auto-determined)
   const headersList = document.getElementById("send-headers-list");
