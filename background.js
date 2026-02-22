@@ -1831,133 +1831,9 @@ async function sendPageFetch(tabId, url, opts, frameId = 0) {
 }
 
 /**
- * Open a temporary hidden tab to `initiatorOrigin`, wait for content script
- * to load, and return its tabId. Caller must close via closeTempTab().
+ * Fetch through a content script on the original tab.
  */
-// ─── Temp Tab Pooling ────────────────────────────────────────────────────────
-// Reuses temporary tabs for the same origin to avoid opening multiple tabs
-// during burst requests (like discovery). Keeps tab open for a short time
-// after use to handle subsequent requests.
-
-const tempTabPool = new Map(); // origin -> { tabId, windowId, promise, refCount, closeTimer }
-
-// Track temp window IDs in session storage so we can clean up after SW restart.
-async function _saveTempWindowIds() {
-  const ids = [];
-  for (const entry of tempTabPool.values()) {
-    if (entry.windowId) ids.push(entry.windowId);
-  }
-  try { await chrome.storage.session.set({ _tempWinIds: ids }); } catch (_) {}
-}
-// On startup, close any temp windows leaked from a previous SW lifetime.
-(async () => {
-  try {
-    const data = await chrome.storage.session.get("_tempWinIds");
-    const ids = data?._tempWinIds;
-    if (Array.isArray(ids)) {
-      for (const wid of ids) chrome.windows.remove(wid).catch(() => {});
-      await chrome.storage.session.remove("_tempWinIds");
-    }
-  } catch (_) {}
-})();
-
-async function acquireTempTab(origin) {
-  // Only allow http/https origins — never file://, chrome://, etc.
-  if (!origin.startsWith("http://") && !origin.startsWith("https://")) {
-    throw new Error("blocked: unsafe origin protocol");
-  }
-
-  let entry = tempTabPool.get(origin);
-
-  if (entry) {
-    // If pending close, cancel it
-    if (entry.closeTimer) {
-      clearTimeout(entry.closeTimer);
-      entry.closeTimer = null;
-    }
-    entry.refCount++;
-    return entry.promise;
-  }
-
-  // Create new entry — use a minimized background window (invisible to user)
-
-  const promise = (async () => {
-    try {
-      const win = await chrome.windows.create({
-        url: origin,
-        state: "minimized",
-        focused: false,
-      });
-
-      const tabId = win.tabs[0].id;
-
-      // Wait for content script (max 15s)
-      const deadline = Date.now() + 15000;
-      while (Date.now() < deadline) {
-        try {
-          await chrome.tabs.sendMessage(
-            tabId,
-            { type: "PING" },
-            { frameId: 0 },
-          );
-
-          return { tabId, windowId: win.id };
-        } catch (_) {
-          await new Promise((r) => setTimeout(r, 500));
-        }
-      }
-
-      // Timeout
-      chrome.windows.remove(win.id).catch(() => {});
-      throw new Error("Temp tab timeout");
-    } catch (err) {
-      // Clean up pool if creation failed
-      tempTabPool.delete(origin);
-      throw err;
-    }
-  })();
-
-  entry = { tabId: null, windowId: null, promise, refCount: 1, closeTimer: null };
-  tempTabPool.set(origin, entry);
-
-  try {
-    const result = await promise;
-    entry.tabId = result.tabId;
-    entry.windowId = result.windowId;
-    _saveTempWindowIds();
-    return result.tabId;
-  } catch (err) {
-    throw err;
-  }
-}
-
-function releaseTempTab(origin) {
-  const entry = tempTabPool.get(origin);
-  if (!entry) return;
-
-  entry.refCount--;
-  if (entry.refCount <= 0) {
-    // Debounce close (10s)
-    if (entry.closeTimer) clearTimeout(entry.closeTimer);
-    entry.closeTimer = setTimeout(() => {
-      tempTabPool.delete(origin);
-      if (entry.windowId) {
-        chrome.windows.remove(entry.windowId).catch(() => {});
-      } else if (entry.tabId) {
-        chrome.tabs.remove(entry.tabId).catch(() => {});
-      }
-      if (entry.tabId) state.tabs.delete(entry.tabId);
-      _saveTempWindowIds();
-    }, 10000);
-  }
-}
-
-/**
- * Fetch through a content script, with temp window fallback.
- * Tries the original tab first (main frame), then any tab with matching
- * origin, then opens a temp window as last resort.
- */
-async function pageContextFetch(tabId, url, opts, initiatorOrigin, allowFallbackTab = false) {
+async function pageContextFetch(tabId, url, opts) {
   // Validate URL
   try {
     const parsed = new URL(url);
@@ -1972,67 +1848,19 @@ async function pageContextFetch(tabId, url, opts, initiatorOrigin, allowFallback
   if (tabId != null) {
     try {
       return await sendPageFetch(tabId, url, opts, 0);
-    } catch (_) {
-      // Tab might still be loading — poll briefly if origin matches
-      try {
-        const tab = await chrome.tabs.get(tabId);
-        if (tab && tab.url) {
-          const tabOrigin = new URL(tab.url).origin;
-          if (initiatorOrigin && tabOrigin === initiatorOrigin) {
-            const deadline = Date.now() + 5000;
-            while (Date.now() < deadline) {
-              try {
-                await new Promise((r) => setTimeout(r, 500));
-                return await sendPageFetch(tabId, url, opts, 0);
-              } catch (___) {}
-            }
-          }
-        }
-      } catch (_) {}
-    }
-  }
-
-  // Try any existing tab with the same origin before creating a new one
-  if (initiatorOrigin) {
-    try {
-      const allTabs = await chrome.tabs.query({});
-      for (const t of allTabs) {
-        if (!t.url || t.id === tabId) continue;
-        try {
-          if (new URL(t.url).origin === initiatorOrigin) {
-            return await sendPageFetch(t.id, url, opts, 0);
-          }
-        } catch (_) {}
-      }
     } catch (_) {}
   }
 
-  // Fall back: open a temp tab only when the user explicitly clicked Send
-  if (initiatorOrigin && allowFallbackTab) {
-    try {
-      const tempTabId = await acquireTempTab(initiatorOrigin);
-      return await sendPageFetch(tempTabId, url, opts);
-    } catch (err) {
-      console.warn(`Relay failed for ${url} (temp window error: ${err.message})`);
-    } finally {
-      releaseTempTab(initiatorOrigin);
-    }
-  }
-
-  // Last resort
-  console.warn(
-    `Relay failed for ${url} (no responsive content script and no initiatorOrigin)`,
-  );
   return {
-    error: "relay_failed: content script unreachable and no initiatorOrigin",
+    error: "relay_failed: content script unreachable on tab " + tabId,
   };
 }
 
 /**
- * Create a fetchFn bound to a specific tab + initiator origin.
+ * Create a fetchFn bound to a specific tab.
  */
-function makePageFetchFn(tabId, initiatorOrigin) {
-  return (url, opts) => pageContextFetch(tabId, url, opts, initiatorOrigin);
+function makePageFetchFn(tabId) {
+  return (url, opts) => pageContextFetch(tabId, url, opts);
 }
 
 // ─── Discovery Document Fetching ─────────────────────────────────────────────
@@ -2158,10 +1986,7 @@ async function fetchDiscoveryForService(
 ) {
   const tab = getTab(tabId);
 
-  // Find the initiator origin for this service
-  let initiatorOrigin = tab.authContext?.origin || null;
-
-  const fetchFn = makePageFetchFn(tabId, initiatorOrigin);
+  const fetchFn = makePageFetchFn(tabId);
   const triedKeys = new Set();
 
   // Build a deduplicated candidate list across all keys
@@ -2288,9 +2113,7 @@ async function performProbeAndPatch(tabId, service, targetUrl, apiKey) {
     return;
   }
 
-  //Find initiator for fetch context
-  const initiatorOrigin = tab.authContext?.origin || null;
-  const fetchFn = makePageFetchFn(tabId, initiatorOrigin);
+  const fetchFn = makePageFetchFn(tabId);
 
   const probeHeader = apiKey ? { "x-goog-api-key": apiKey } : {};
 
@@ -2568,7 +2391,7 @@ async function probeEndpoint(tabId, endpointKey) {
     }
   }
 
-  const fetchFn = makePageFetchFn(tabId, ep.origin || ep.referer);
+  const fetchFn = makePageFetchFn(tabId);
   const result = await probeApiEndpoint(probeUrl.toString(), headers, {
     fetchFn,
   });
@@ -3471,7 +3294,7 @@ function _fetchSourceMapForScript(tabId, tab, analysis, scriptUrl, smUrl) {
     return;
   }
   console.debug("[AST:sourcemap] Fetching: %s (from %s)", smUrl, scriptUrl);
-  pageContextFetch(tabId, smUrl, { method: "GET" }, new URL(smUrl).origin)
+  pageContextFetch(tabId, smUrl, { method: "GET" })
     .then(async function(smResp) {
       if (!smResp.body || smResp.error) {
         console.debug("[AST:sourcemap] Fetch failed for %s: %s", smUrl, smResp.error || "empty body");
@@ -3634,7 +3457,7 @@ async function analyzeScript(tabId, scriptUrl, code) {
       return;
     }
     console.debug("[AST:sourcemap] Fetching: %s", smUrl);
-    pageContextFetch(tabId, smUrl, { method: "GET" }, new URL(smUrl).origin)
+    pageContextFetch(tabId, smUrl, { method: "GET" })
       .then(async function(smResp) {
         if (!smResp.body || smResp.error) {
           console.debug("[AST:sourcemap] Fetch failed for %s: %s", smUrl, smResp.error || "empty body");
@@ -4331,7 +4154,7 @@ async function handlePopupMessage(msg, _sender, sendResponse) {
           headers["X-Goog-Api-Key"] = ep.apiKey;
         }
       }
-      const fetchFn = makePageFetchFn(tabId, ep.origin || ep.referer);
+      const fetchFn = makePageFetchFn(tabId);
       discoverServiceInfo(discoverUrl.toString(), headers, { fetchFn }).then(
         (result) => {
           tab.probeResults.set(`svc:${msg.endpointKey}`, result);
@@ -5654,13 +5477,6 @@ async function executeSendRequest(tabId, msg) {
     headers["Content-Type"] = "application/json";
   }
 
-  // Resolve initiator origin (pageUrl provides context for AST-derived endpoints)
-  let initiatorOrigin =
-    ep?.origin || ep?.referer || tab.authContext?.origin || null;
-  if (!initiatorOrigin && ep?.pageUrl) {
-    try { initiatorOrigin = new URL(ep.pageUrl).origin; } catch (_) {}
-  }
-
   // Send request via page context (session-aware)
   let resp;
   try {
@@ -5673,8 +5489,6 @@ async function executeSendRequest(tabId, msg) {
         body,
         bodyEncoding,
       },
-      initiatorOrigin,
-      true,
     );
   } catch (err) {
     return { error: `fetch_exception: ${err.message}`, timing: Date.now() - startTime };
